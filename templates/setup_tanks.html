@@ -1,0 +1,65 @@
+{% extends "setup_base.html" %}
+{% set step = 1 %}
+{% block wtitle %}Add your storage tanks{% endblock %}
+{% block wdesc %}One row per physical tank. You can have more than one tank of the same fuel (e.g. two Diesel tanks) - just add them separately.{% endblock %}
+{% block wcontent %}
+<form method="post" id="tanks-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="tank_count" id="tank_count" value="0">
+  <div id="tank-rows"></div>
+  <button type="button" class="btn btn-ghost btn-sm" onclick="addTankRow()">+ Add Tank</button>
+  <div class="wizard-actions">
+    <span></span>
+    <button type="submit" class="btn">Continue &rarr;</button>
+  </div>
+</form>
+
+<script>
+let tankIndex = 0;
+
+function addTankRow() {
+  const row = document.createElement('div');
+  row.className = 'wizard-nozzle-card';
+  row.innerHTML =
+    '<div class="title">' +
+      '<span class="row-title-text">Tank ' + (tankIndex + 1) + '</span> ' +
+      '<button type="button" class="row-remove" onclick="removeTankRow(this)">Remove</button>' +
+    '</div>' +
+    '<div class="row">' +
+      '<label>Fuel type<input type="text" name="fuel_name_' + tankIndex + '" placeholder="e.g. Diesel" required></label>' +
+      '<label>Capacity (L)<input type="number" step="0.01" min="0.01" name="capacity_' + tankIndex + '" placeholder="e.g. 48000" required></label>' +
+      '<label>Current stock (L)<input type="number" step="0.01" min="0" name="stock_' + tankIndex + '" placeholder="e.g. 22000" required></label>' +
+    '</div>';
+  document.getElementById('tank-rows').appendChild(row);
+  tankIndex++;
+  updateTankCount();
+}
+
+function removeTankRow(btn) {
+  const rows = document.querySelectorAll('#tank-rows .wizard-nozzle-card');
+  if (rows.length <= 1) return;
+  btn.closest('.wizard-nozzle-card').remove();
+  reindexTanks();
+}
+
+function reindexTanks() {
+  const rows = document.querySelectorAll('#tank-rows .wizard-nozzle-card');
+  rows.forEach((row, i) => {
+    row.querySelector('.row-title-text').textContent = 'Tank ' + (i + 1);
+    row.querySelectorAll('input').forEach((inp) => {
+      const base = inp.name.replace(/_\d+$/, '');
+      inp.name = base + '_' + i;
+    });
+  });
+  tankIndex = rows.length;
+  updateTankCount();
+}
+
+function updateTankCount() {
+  document.getElementById('tank_count').value =
+    document.querySelectorAll('#tank-rows .wizard-nozzle-card').length;
+}
+
+addTankRow();
+</script>
+{% endblock %}

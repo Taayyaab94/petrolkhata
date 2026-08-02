@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Munchi{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="mark">M</div>
+      <div class="name">Munchi</div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a href="{{ url_for('ledger') }}" class="primary {{ 'active' if request.endpoint == 'ledger' }}">
+        <span class="icon">&#9998;</span> Ledger
+      </a>
+      <div class="sidebar-divider"></div>
+      <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' }}">
+        <span class="icon">&#8983;</span> Dashboard
+      </a>
+      <a href="{{ url_for('inventory') }}" class="{{ 'active' if request.endpoint == 'inventory' }}">
+        <span class="icon">&#9970;</span> Inventory
+      </a>
+      <a href="{{ url_for('accounts') }}" class="{{ 'active' if request.endpoint in ('accounts', 'customer_detail', 'supplier_detail', 'employee_detail') }}">
+        <span class="icon">&#128101;</span> Accounts
+      </a>
+      {% if current_user.is_owner %}
+      <a href="{{ url_for('reports') }}" class="{{ 'active' if request.endpoint == 'reports' }}">
+        <span class="icon">&#128202;</span> Daily Report
+      </a>
+      <a href="{{ url_for('reports_trends') }}" class="{{ 'active' if request.endpoint == 'reports_trends' }}">
+        <span class="icon">&#128200;</span> Trends
+      </a>
+      <div class="sidebar-divider"></div>
+      <a href="{{ url_for('settings') }}" class="{{ 'active' if request.endpoint == 'settings' }}">
+        <span class="icon">&#9881;</span> Settings
+      </a>
+      {% endif %}
+    </nav>
+
+    <div class="sidebar-user">
+      <div class="who">{{ current_user.username }}</div>
+      <span class="role-pill">{{ current_user.role }}</span>
+      <a href="{{ url_for('logout') }}">Log out</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-list">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

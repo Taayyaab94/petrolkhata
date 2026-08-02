@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block title %}Munchi - Settings{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <div class="subtitle">Manage tanks, dispensers, nozzles and fuel prices. Changes apply going forward.</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Tanks</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Tank</th><th>Fuel</th><th>Starting Stock (L)</th><th>Capacity &amp; alert level</th></tr></thead>
+    <tbody>
+      {% for t in tanks %}
+      <tr>
+        <td>Tank {{ t.number }}</td>
+        <td>{{ t.fuel_type.name }}</td>
+        <td>{{ "%.2f"|format(t.starting_stock_liters) }}</td>
+        <td>
+          <form method="post" action="{{ url_for('settings_edit_tank', tank_id=t.id) }}" class="inline-edit-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="number" step="0.01" min="0.01" name="capacity" value="{{ t.capacity_liters }}" required title="Capacity (L)">
+            <input type="number" step="0.01" min="0" name="threshold" value="{{ t.low_stock_threshold }}" required title="Low-stock alert (L)">
+            <button type="submit" class="btn btn-sm">Save</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Add a Tank</h3></div>
+  <form method="post" action="{{ url_for('settings_add_tank') }}" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Fuel type
+      <input type="text" name="fuel_name" list="fuel-suggestions" placeholder="e.g. Diesel" required>
+      <datalist id="fuel-suggestions">
+        {% for f in fuel_types %}<option value="{{ f.name }}">{% endfor %}
+      </datalist>
+    </label>
+    <label>Capacity (L)
+      <input type="number" step="0.01" min="0.01" name="capacity" required>
+    </label>
+    <label>Current stock (L)
+      <input type="number" step="0.01" min="0" name="stock" required>
+    </label>
+    <label>Price / L (Rs) <span class="hint-sm">only used if fuel is new</span>
+      <input type="number" step="0.01" min="0" name="price">
+    </label>
+    <button type="submit" class="btn">Add Tank</button>
+  </form>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Fuel Prices</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Fuel</th><th>Price / L (Rs)</th></tr></thead>
+    <tbody>
+      {% for f in fuel_types %}
+      <tr>
+        <td>{{ f.name }}</td>
+        <td>
+          <form method="post" action="{{ url_for('settings_edit_price', fuel_type_id=f.id) }}" class="inline-edit-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="number" step="0.01" min="0.01" name="price" value="{{ f.price_per_liter }}" required>
+            <button type="submit" class="btn btn-sm">Save</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Dispensers &amp; Nozzles</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Dispenser</th><th>Nozzle</th><th>Tank</th></tr></thead>
+    <tbody>
+      {% for d in dispensers %}
+        {% for n in d.nozzles %}
+        <tr>
+          <td>Dispenser {{ d.number }}</td>
+          <td>Nozzle {{ n.nozzle_number }}</td>
+          <td>{{ n.tank.label }}</td>
+        </tr>
+        {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="two-col">
+  <div class="panel">
+    <div class="panel-head"><h3>Add a Nozzle to an Existing Dispenser</h3></div>
+    <p class="hint">Its first meter reading is entered on the Ledger, not here.</p>
+    <form method="post" action="{{ url_for('settings_add_nozzle') }}" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>Dispenser
+        <select name="dispenser_id" required>
+          <option value="">Select...</option>
+          {% for d in dispensers %}
+          <option value="{{ d.id }}">Dispenser {{ d.number }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Tank
+        <select name="tank_id" required>
+          <option value="">Select...</option>
+          {% for t in tanks %}
+          <option value="{{ t.id }}">{{ t.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit" class="btn">Add Nozzle</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Add a New Dispenser</h3></div>
+    <p class="hint">Each nozzle's first meter reading is entered on the Ledger, not here.</p>
+    <form method="post" action="{{ url_for('settings_add_dispenser') }}" id="add-dispenser-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="nozzle_count" id="nozzle_count" value="0">
+      <div id="new-nozzle-rows"></div>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="addSettingsNozzle()">+ Add Nozzle</button>
+      <div style="margin-top:14px;">
+        <button type="submit" class="btn">Create Dispenser</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="two-col">
+  <div class="panel">
+    <div class="panel-head"><h3>Bank Accounts</h3></div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Bank</th><th>Opening Balance</th><th>Balance (Rs)</th></tr></thead>
+      <tbody>
+        {% for b in bank_accounts %}
+        <tr>
+          <td>{{ b.name }}</td>
+          <td>{{ "%.2f"|format(b.opening_balance) }}{% if b.opening_balance_date %} as of {{ b.opening_balance_date.strftime("%Y-%m-%d") }}{% endif %}</td>
+          <td>{{ "%.2f"|format(b.balance) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3">No bank accounts yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <h3 style="margin-top:18px;">Add a Bank Account</h3>
+    <form method="post" action="{{ url_for('settings_add_bank_account') }}" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>Name
+        <input type="text" name="name" placeholder="e.g. Meezan" required>
+      </label>
+      <label>Opening Balance (Rs)
+        <input type="number" step="0.01" min="0" name="opening_balance" placeholder="0.00">
+      </label>
+      <label>As of Date
+        <input type="date" name="opening_balance_date" max="{{ today.isoformat() }}">
+      </label>
+      <button type="submit" class="btn">Add Bank Account</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Cash in Hand</h3></div>
+    <div class="stat-card accent-green" style="margin-bottom:16px;">
+      <div class="label">Current Balance</div>
+      <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
+      <div class="sub">Opening balance + cash sales - cash deposited to banks</div>
+    </div>
+    <p class="hint">Set this once when migrating from paper records - it's the cash you physically had on hand as of a chosen date.</p>
+    <form method="post" action="{{ url_for('settings_edit_cash_account') }}" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>Opening Balance (Rs)
+        <input type="number" step="0.01" min="0" name="opening_balance" value="{{ cash_account.opening_balance }}" required>
+      </label>
+      <label>As of Date
+        <input type="date" name="opening_balance_date" max="{{ today.isoformat() }}"
+               value="{{ cash_account.opening_balance_date.isoformat() if cash_account.opening_balance_date else '' }}">
+      </label>
+      <button type="submit" class="btn">Save</button>
+    </form>
+  </div>
+</div>
+
+<script>
+const settingsTankOptionsHtml = '<option value="">Select tank...</option>' +
+  {% for t in tanks %}'<option value="{{ t.id }}">{{ t.label|e }}</option>' + {% endfor %} '';
+
+function addSettingsNozzle() {
+  const row = document.createElement('div');
+  row.className = 'nozzle-row-item';
+  row.innerHTML =
+    '<span class="nozzle-title">Nozzle</span>' +
+    '<select class="nozzle-tank-select" required>' + settingsTankOptionsHtml + '</select>' +
+    '<button type="button" class="row-remove-sm" onclick="removeSettingsNozzle(this)">&times;</button>';
+  document.getElementById('new-nozzle-rows').appendChild(row);
+  reindexSettingsNozzles();
+}
+
+function removeSettingsNozzle(btn) {
+  if (document.querySelectorAll('#new-nozzle-rows .nozzle-row-item').length <= 1) return;
+  btn.closest('.nozzle-row-item').remove();
+  reindexSettingsNozzles();
+}
+
+function reindexSettingsNozzles() {
+  const rows = document.querySelectorAll('#new-nozzle-rows .nozzle-row-item');
+  rows.forEach((row, i) => {
+    row.querySelector('.nozzle-title').textContent = 'Nozzle ' + (i + 1);
+    row.querySelector('.nozzle-tank-select').name = 'tank_' + i;
+  });
+  document.getElementById('nozzle_count').value = rows.length;
+}
+
+addSettingsNozzle();
+</script>
+{% endblock %}

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Munchi - Dashboard{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Dashboard</h1>
+    <div class="subtitle">A quick read-only snapshot. Everything here comes from today's ledger entries.</div>
+  </div>
+  <a href="{{ url_for('ledger') }}" class="btn">Open Ledger &rarr;</a>
+</div>
+
+<div class="stat-row">
+  <div class="stat-card accent-brand">
+    <div class="label">Today's Sales</div>
+    <div class="value">Rs {{ "%.2f"|format(today_total) }}</div>
+    <div class="sub">{{ today_sale_count }} nozzle reading(s) &middot; {{ "%.2f"|format(today_liters) }} L</div>
+  </div>
+
+  {% if current_user.is_owner %}
+  <div class="stat-card accent-red">
+    <div class="label">Today's Credit Given</div>
+    <div class="value">Rs {{ "%.2f"|format(today_credit_given) }}</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Today's Expenses</div>
+    <div class="value">Rs {{ "%.2f"|format(today_expenses) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Outstanding Customer Credit</div>
+    <div class="value">Rs {{ "%.2f"|format(outstanding_credit) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Outstanding Supplier Balance</div>
+    <div class="value">Rs {{ "%.2f"|format(outstanding_supplier) }}</div>
+  </div>
+  <div class="stat-card accent-green">
+    <div class="label">Cash in Hand</div>
+    <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
+  </div>
+  {% endif %}
+</div>
+
+{% if current_user.is_owner and bank_accounts %}
+<div class="panel">
+  <div class="panel-head"><h3>Bank Balances</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Bank</th><th>Balance (Rs)</th></tr></thead>
+    <tbody>
+      {% for b in bank_accounts %}
+      <tr>
+        <td>{{ b.name }}</td>
+        <td>{{ "%.2f"|format(b.balance) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="panel">
+  <div class="panel-head"><h3>Stock Levels</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Tank</th><th>Fuel</th><th>Stock (L)</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for row in tank_rows %}
+      <tr class="{{ 'row-low' if row.stock <= row.tank.low_stock_threshold else '' }}">
+        <td>{{ row.tank.label }}</td>
+        <td>{{ row.tank.fuel_type.name }}</td>
+        <td>{{ "%.2f"|format(row.stock) }}</td>
+        <td>{% if row.stock <= row.tank.low_stock_threshold %}<span class="badge badge-low">LOW STOCK</span>{% else %}<span class="badge badge-ok">OK</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+{% if low_stock %}
+<div class="flash flash-error">
+  Low stock warning: {{ low_stock|map(attribute='tank')|map(attribute='label')|join(', ') }} - log a Fuel Purchase on the Ledger screen.
+</div>
+{% endif %}
+{% endblock %}

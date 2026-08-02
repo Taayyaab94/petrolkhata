@@ -1,0 +1,24 @@
+{% extends "setup_base.html" %}
+{% set step = 2 %}
+{% block wtitle %}Set today's fuel prices{% endblock %}
+{% block wdesc %}One price per fuel type - this applies to every tank and nozzle for that fuel.{% endblock %}
+{% block wcontent %}
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  {% for name in fuel_names %}
+  <div class="wizard-nozzle-card">
+    <div class="title">{{ name }}</div>
+    <div class="row">
+      <label>Price / liter (Rs)
+        <input type="number" step="0.01" min="0.01" name="price_{{ loop.index0 }}" required placeholder="e.g. 280">
+      </label>
+    </div>
+  </div>
+  {% endfor %}
+
+  <div class="wizard-actions">
+    <a href="{{ url_for('setup_tanks') }}" class="btn btn-ghost">&larr; Back</a>
+    <button type="submit" class="btn">Continue &rarr;</button>
+  </div>
+</form>
+{% endblock %}

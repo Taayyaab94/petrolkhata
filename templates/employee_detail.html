@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}{{ employee.name }} - Munchi{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('accounts') }}">&larr; Back to Accounts</a></p>
+<div class="page-head">
+  <div>
+    <h1>{{ employee.name }} <span class="owner-tag">Employee</span></h1>
+    <div class="subtitle">{{ employee.phone or "No phone on file" }}</div>
+  </div>
+  <a href="{{ url_for('ledger') }}" class="btn">Record Loan / Repayment on Ledger &rarr;</a>
+</div>
+
+<div class="stat-row">
+  <div class="stat-card accent-red">
+    <div class="label">Current Balance Owed</div>
+    <div class="value">Rs {{ "%.2f"|format(employee.balance) }}</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Transaction History</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Date</th><th>Type</th><th>Details</th><th>Amount (Rs)</th></tr></thead>
+    <tbody>
+      {% for e in events %}
+      <tr>
+        <td>{{ e.entry_date.strftime("%Y-%m-%d") }}</td>
+        {% if e.kind == "opening" %}
+        <td><span class="badge">Opening Balance</span></td>
+        <td>Balance as of {{ e.entry_date.strftime("%Y-%m-%d") }}</td>
+        <td>+{{ "%.2f"|format(e.amount) }}</td>
+        {% elif e.kind == "loan" %}
+        <td><span class="badge badge-low">Loan / Advance</span></td>
+        <td>{{ e.obj.note or "-" }}</td>
+        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        {% else %}
+        <td><span class="badge badge-ok">Repayment</span></td>
+        <td>{{ e.obj.note or "-" }}</td>
+        <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
+        {% endif %}
+      </tr>
+      {% else %}
+      <tr><td colspan="4">No transactions yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,618 @@
+{% extends "base.html" %}
+{% block title %}Munchi - Ledger{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Ledger</h1>
+    <div class="subtitle">Every entry here updates stock, balances and reports automatically.</div>
+  </div>
+  <form method="get" class="date-picker-form">
+    <label class="date-picker-label">Date
+      <input type="date" name="date" value="{{ selected_date.isoformat() }}" max="{{ today.isoformat() }}" onchange="this.form.submit()">
+    </label>
+    {% if selected_date != today %}
+    <a href="{{ url_for('ledger') }}" class="btn btn-ghost btn-sm">Jump to Today</a>
+    {% endif %}
+  </form>
+</div>
+
+{% if selected_date != today %}
+<div class="flash flash-info">Editing entries for {{ selected_date.strftime("%A, %d %B %Y") }} - not today. Existing entries for this date are pre-filled below.</div>
+{% endif %}
+
+<div class="ledger-summary">
+  <div class="stat-card accent-brand">
+    <div class="label">Total Sales</div>
+    <div class="value">Rs {{ "%.2f"|format(breakdown.total) }}</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Credit Sales</div>
+    <div class="value">Rs {{ "%.2f"|format(breakdown.credit) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Bank Sales</div>
+    <div class="value">Rs {{ "%.2f"|format(breakdown.bank) }}</div>
+  </div>
+  <div class="stat-card accent-green">
+    <div class="label">Cash Sales</div>
+    <div class="value">Rs {{ "%.2f"|format(breakdown.cash) }}</div>
+    <div class="sub">Total - credit - bank</div>
+  </div>
+  {% if summary %}
+  <div class="stat-card accent-green">
+    <div class="label">Debit (Cash In)</div>
+    <div class="value">Rs {{ "%.2f"|format(summary.debit_total) }}</div>
+    <div class="sub">Sales + receipts - credit given</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Credit (Cash Out)</div>
+    <div class="value">Rs {{ "%.2f"|format(summary.credit_total) }}</div>
+    <div class="sub">Expenses + cash purchases + supplier payments</div>
+  </div>
+  {% endif %}
+</div>
+
+<div class="ledger-grid">
+  <!-- DEBIT SIDE -->
+  <div class="ledger-col ledger-col-debit">
+    <div class="ledger-col-title"><span class="dot"></span><h2>Debit - Sales &amp; Receipts</h2></div>
+    <div class="ledger-col-sub">Meter readings and money coming in.</div>
+
+    <div class="ledger-section">
+      <h3>Nozzle Meter Readings</h3>
+      {% if nozzle_rows %}
+      <form method="post" action="{{ url_for('ledger_readings') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="nozzle-list">
+          {% for row in nozzle_rows %}
+          <div class="nozzle-row" data-price="{{ row.nozzle.tank.fuel_type.price_per_liter }}" {% if row.previous_is_auto %}data-last="{{ row.previous_reading }}"{% endif %}>
+            <div>
+              <div class="nz-label">D{{ row.dispenser.number }} &middot; Nozzle {{ row.nozzle.nozzle_number }}</div>
+              <div class="nz-fuel">{{ row.nozzle.tank.label }} &middot; Rs {{ "%.2f"|format(row.nozzle.tank.fuel_type.price_per_liter) }}/L</div>
+            </div>
+            {% if row.previous_is_auto %}
+            <div class="nz-last">Previous<strong>{{ "%.2f"|format(row.previous_reading) }}</strong></div>
+            {% else %}
+            <label class="nz-previous-manual">Previous
+              <input type="number" step="0.01" min="0" name="previous_{{ row.nozzle.id }}" class="nz-previous-input"
+                     value="{{ row.previous_reading if row.previous_reading is not none else '' }}" placeholder="e.g. 45230.50">
+            </label>
+            {% endif %}
+            <input type="number" step="0.01" min="0" id="reading_{{ row.nozzle.id }}" name="reading_{{ row.nozzle.id }}" class="nz-current-input"
+                   placeholder="This date's reading" value="{{ row.existing_reading if row.existing_reading is not none else '' }}">
+            <div class="calc-preview" id="calc_{{ row.nozzle.id }}">{% if row.previous_is_auto %}Enter this date's reading{% else %}No entry for the day before - enter both readings{% endif %}</div>
+          </div>
+          {% endfor %}
+        </div>
+        <div style="margin-top:14px;">
+          <button type="submit" class="btn">Save Readings</button>
+        </div>
+      </form>
+      {% else %}
+      <p class="hint">No nozzles configured.</p>
+      {% endif %}
+    </div>
+
+    <div class="ledger-section">
+      <h3>Payment / Receipt from Customer</h3>
+      <form method="post" action="{{ url_for('ledger_payment') }}" class="payment-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Customer
+            <select name="customer_id" class="customer-select" data-scope="payment" required>
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new customer</option>
+              {% for c in customers %}
+              <option value="{{ c.id }}">{{ c.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-customer-field" data-scope="payment" style="display:none;">New customer name
+            <input type="text" name="new_customer_name">
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" required>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Payment</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="ledger-section">
+      <h3>Bank Sales</h3>
+      <p class="hint-sm">The portion of today's sales that came in via card/bank, reconciled against a bank statement.</p>
+      <form method="post" action="{{ url_for('ledger_bank_sale') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Bank Account
+            <select name="bank_account_id" class="bank-select" data-scope="bank_sale" required>
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new bank account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-bank-field" data-scope="bank_sale" style="display:none;">New bank account name
+            <input type="text" name="new_bank_account_name">
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" required>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Bank Sale</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="ledger-section">
+      <h3>Repayment from Employee</h3>
+      <form method="post" action="{{ url_for('ledger_employee_repayment') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Employee
+            <select name="employee_id" class="employee-select" data-scope="repayment" required>
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new employee</option>
+              {% for emp in employees %}
+              <option value="{{ emp.id }}">{{ emp.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-employee-field" data-scope="repayment" style="display:none;">New employee name
+            <input type="text" name="new_employee_name">
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" required>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Repayment</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- CREDIT SIDE -->
+  <div class="ledger-col ledger-col-credit">
+    <div class="ledger-col-title"><span class="dot"></span><h2>Credit - Customer, Expenses &amp; Purchases</h2></div>
+    <div class="ledger-col-sub">Credit given, loans, expenses, fuel purchases, and supplier/bank movements.</div>
+
+    <div class="ledger-section">
+      <h3>Credit to a Customer</h3>
+      <form method="post" action="{{ url_for('ledger_credit') }}" id="credit-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Customer
+            <select name="customer_id" class="customer-select" data-scope="credit" required>
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new customer</option>
+              {% for c in customers %}
+              <option value="{{ c.id }}">{{ c.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-customer-field" data-scope="credit" style="display:none;">New customer name
+            <input type="text" name="new_customer_name">
+          </label>
+          <label>Fuel
+            <select name="fuel_type_id" id="credit_fuel_type" required>
+              <option value="">Select...</option>
+              {% for f in fuel_types %}
+              <option value="{{ f.id }}" data-price="{{ f.price_per_liter }}">{{ f.name }} (Rs {{ "%.2f"|format(f.price_per_liter) }}/L)</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Liters
+            <input type="number" step="0.01" min="0.01" name="liters" id="credit_liters" required>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div class="calc-preview" id="credit_calc" style="margin-top:10px;">Amount will be calculated automatically</div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Credit</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="ledger-section">
+      <h3>Loan / Advance to Employee</h3>
+      <form method="post" action="{{ url_for('ledger_employee_loan') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Employee
+            <select name="employee_id" class="employee-select" data-scope="loan" required>
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new employee</option>
+              {% for emp in employees %}
+              <option value="{{ emp.id }}">{{ emp.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-employee-field" data-scope="loan" style="display:none;">New employee name
+            <input type="text" name="new_employee_name">
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" required>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Loan</button>
+        </div>
+      </form>
+    </div>
+
+    {% if current_user.is_owner %}
+    <div class="ledger-section">
+      <h3>Expense <span class="owner-tag">Owner</span></h3>
+      <form method="post" action="{{ url_for('ledger_expense') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Category
+            <input type="text" name="category" placeholder="e.g. Electricity" required>
+          </label>
+          <label>Description (optional)
+            <input type="text" name="description">
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" required>
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Log Expense</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="ledger-section">
+      <h3>Fuel Purchase / Delivery <span class="owner-tag">Owner</span></h3>
+      <form method="post" action="{{ url_for('ledger_purchase') }}" id="purchase-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Tank
+            <select name="tank_id" required>
+              <option value="">Select...</option>
+              {% for row in tank_rows %}
+              <option value="{{ row.tank.id }}">{{ row.tank.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Liters
+            <input type="number" step="0.01" min="0.01" name="liters" required>
+          </label>
+          <label>Cost (Rs)
+            <input type="number" step="0.01" min="0" name="cost">
+          </label>
+          <label>Payment
+            <select name="payment_type" id="purchase_payment_type">
+              <option value="cash">Paid Cash</option>
+              <option value="credit">On Credit (from supplier)</option>
+            </select>
+          </label>
+          <label id="purchase-supplier-field" style="display:none;">Supplier
+            <select name="supplier_id" class="supplier-select" data-scope="purchase">
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new supplier</option>
+              {% for s in suppliers %}
+              <option value="{{ s.id }}">{{ s.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-supplier-field" data-scope="purchase" style="display:none;">New supplier name
+            <input type="text" name="new_supplier_name">
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Add Stock</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="ledger-section">
+      <h3>Payment to Supplier <span class="owner-tag">Owner</span></h3>
+      <form method="post" action="{{ url_for('ledger_supplier_payment') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Supplier
+            <select name="supplier_id" class="supplier-select" data-scope="supplier_payment" required>
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new supplier</option>
+              {% for s in suppliers %}
+              <option value="{{ s.id }}">{{ s.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-supplier-field" data-scope="supplier_payment" style="display:none;">New supplier name
+            <input type="text" name="new_supplier_name">
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" required>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Payment</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="ledger-section">
+      <h3>Cash Deposit <span class="owner-tag">Owner</span></h3>
+      <p class="hint-sm">Cash physically deposited into a bank account - increases that bank's balance, decreases cash in hand.</p>
+      <form method="post" action="{{ url_for('ledger_cash_deposit') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Bank Account
+            <select name="bank_account_id" class="bank-select" data-scope="deposit" required>
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new bank account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-bank-field" data-scope="deposit" style="display:none;">New bank account name
+            <input type="text" name="new_bank_account_name">
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" required>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Deposit</button>
+        </div>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head">
+    <h3>Dip - Tank Stock Check</h3>
+  </div>
+  <p class="hint">Enter each tank's physical dip reading. Book stock is calculated from starting stock plus purchases minus sales. A small variance is normal (evaporation, temperature, rounding) - it's not treated as an error.</p>
+  <form method="post" action="{{ url_for('ledger_dip') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Tank</th><th>Fuel</th><th>Book Stock (L)</th><th>Dip Reading (L)</th><th>Variance</th></tr></thead>
+      <tbody>
+        {% for row in tank_rows %}
+        <tr class="{{ 'row-low' if row.is_low else '' }}">
+          <td>{{ row.tank.label }}</td>
+          <td>{{ row.tank.fuel_type.name }}</td>
+          <td>{{ "%.2f"|format(row.book_stock) }}{% if row.is_low %} <span class="badge badge-low">LOW</span>{% endif %}</td>
+          <td>
+            <input type="number" step="0.01" min="0" id="dip_{{ row.tank.id }}" name="dip_{{ row.tank.id }}"
+                   data-book="{{ row.book_stock }}" data-capacity="{{ row.tank.capacity_liters }}"
+                   placeholder="Dip reading" value="{{ row.existing_dip if row.existing_dip is not none else '' }}">
+          </td>
+          <td><div class="calc-preview" id="dipcalc_{{ row.tank.id }}">-</div></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <div style="margin-top:14px;">
+      <button type="submit" class="btn">Save Dip Readings</button>
+    </div>
+  </form>
+</div>
+
+<div class="panel" style="margin-top:24px;">
+  <div class="panel-head"><h3>Entries for {{ selected_date.strftime("%d %b %Y") }}</h3></div>
+  <div class="feed-list">
+    {% for e in feed %}
+    <div class="feed-item">
+      <div class="feed-time">{{ e.sort.strftime("%H:%M") }}</div>
+      {% if e.kind == "sale" %}
+      <div class="feed-desc"><strong>{{ e.obj.nozzle.label }} &middot; {{ e.obj.nozzle.tank.fuel_type.name }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-debit">Sale</span>
+      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.total_amount) }}</div>
+      {% elif e.kind == "payment" %}
+      <div class="feed-desc"><strong>Payment from {{ e.obj.customer.name }}</strong><span>{{ e.obj.note or "" }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-debit">Payment</span>
+      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      {% elif e.kind == "credit" %}
+      <div class="feed-desc"><strong>Credit to {{ e.obj.customer.name }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-credit">Credit</span>
+      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      {% elif e.kind == "expense" %}
+      <div class="feed-desc"><strong>{{ e.obj.category }}</strong><span>{{ e.obj.description or "" }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-credit">Expense</span>
+      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      {% elif e.kind == "purchase" %}
+      <div class="feed-desc"><strong>{{ e.obj.tank.label }} delivery</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ e.obj.payment_type }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-credit">Purchase</span>
+      <div class="feed-amount credit">{% if e.obj.cost %}-Rs {{ "%.2f"|format(e.obj.cost) }}{% else %}-{% endif %}</div>
+      {% elif e.kind == "supplier_payment" %}
+      <div class="feed-desc"><strong>Payment to {{ e.obj.supplier.name }}</strong><span>{{ e.obj.note or "" }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-credit">Supplier Payment</span>
+      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      {% elif e.kind == "bank_sale" %}
+      <div class="feed-desc"><strong>Bank sale &middot; {{ e.obj.bank_account.name }}</strong><span>{{ e.obj.note or "" }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-debit">Bank Sale</span>
+      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      {% elif e.kind == "cash_deposit" %}
+      <div class="feed-desc"><strong>Cash deposit &middot; {{ e.obj.bank_account.name }}</strong><span>{{ e.obj.note or "" }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-credit">Cash Deposit</span>
+      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      {% elif e.kind == "employee_loan" %}
+      <div class="feed-desc"><strong>Loan to {{ e.obj.employee.name }}</strong><span>{{ e.obj.note or "" }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-credit">Employee Loan</span>
+      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      {% elif e.kind == "employee_repayment" %}
+      <div class="feed-desc"><strong>Repayment from {{ e.obj.employee.name }}</strong><span>{{ e.obj.note or "" }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-debit">Employee Repayment</span>
+      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      {% elif e.kind == "dip" %}
+      <div class="feed-desc"><strong>{{ e.obj.tank.label }} dip</strong><span>{{ "%.2f"|format(e.obj.dip_liters) }} L &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-neutral">Dip</span>
+      <div class="feed-amount neutral">{{ "+" if e.variance >= 0 }}{{ "%.2f"|format(e.variance) }} L</div>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="empty-state">No entries logged yet for this date.</div>
+    {% endfor %}
+  </div>
+</div>
+
+<script>
+function fmtMoney(v) {
+  return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// --- Nozzle reading live calculation ---
+document.querySelectorAll('.nozzle-row').forEach(function (row) {
+  const input = row.querySelector('.nz-current-input');
+  const preview = row.querySelector('.calc-preview');
+  const price = parseFloat(row.dataset.price);
+  const manualPrev = row.querySelector('.nz-previous-input');
+
+  function getPrevious() {
+    if (manualPrev) {
+      const v = parseFloat(manualPrev.value);
+      return isNaN(v) ? null : v;
+    }
+    return parseFloat(row.dataset.last);
+  }
+
+  function update() {
+    const previous = getPrevious();
+    if (input.value === '' || previous === null) {
+      preview.textContent = manualPrev ? 'No entry for the day before - enter both readings' : "Enter this date's reading";
+      preview.className = 'calc-preview';
+      return;
+    }
+    const val = parseFloat(input.value);
+    if (isNaN(val)) return;
+    const liters = val - previous;
+    if (liters < 0) {
+      preview.textContent = 'Lower than previous reading (' + previous.toFixed(2) + ' L)';
+      preview.className = 'calc-preview has-error';
+      return;
+    }
+    const amount = liters * price;
+    preview.innerHTML = liters.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+    preview.className = 'calc-preview has-value';
+  }
+  input.addEventListener('input', update);
+  if (manualPrev) manualPrev.addEventListener('input', update);
+  update();
+});
+
+// --- Dip variance live calculation ---
+document.querySelectorAll('[id^="dip_"]').forEach(function (input) {
+  const tankId = input.id.replace('dip_', '');
+  const preview = document.getElementById('dipcalc_' + tankId);
+  const book = parseFloat(input.dataset.book);
+  const capacity = parseFloat(input.dataset.capacity) || 0;
+
+  function update() {
+    if (input.value === '') {
+      preview.textContent = '-';
+      preview.className = 'calc-preview';
+      return;
+    }
+    const dip = parseFloat(input.value);
+    if (isNaN(dip)) return;
+    const variance = dip - book;
+    const pct = capacity ? Math.abs(variance) / capacity * 100 : 0;
+    const sign = variance >= 0 ? '+' : '';
+    preview.innerHTML = sign + variance.toFixed(2) + ' L';
+    preview.className = 'calc-preview ' + (pct > 3 ? 'has-warn' : 'has-value');
+  }
+  input.addEventListener('input', update);
+  update();
+});
+
+// --- Credit-to-customer live calculation ---
+const creditFuelSelect = document.getElementById('credit_fuel_type');
+const creditLiters = document.getElementById('credit_liters');
+const creditCalc = document.getElementById('credit_calc');
+function updateCreditCalc() {
+  const opt = creditFuelSelect.options[creditFuelSelect.selectedIndex];
+  const price = opt ? parseFloat(opt.dataset.price) : NaN;
+  const liters = parseFloat(creditLiters.value);
+  if (isNaN(price) || isNaN(liters)) {
+    creditCalc.textContent = 'Amount will be calculated automatically';
+    creditCalc.className = 'calc-preview';
+    return;
+  }
+  const amount = liters * price;
+  creditCalc.innerHTML = liters.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+  creditCalc.className = 'calc-preview has-value';
+}
+if (creditFuelSelect) {
+  creditFuelSelect.addEventListener('change', updateCreditCalc);
+  creditLiters.addEventListener('input', updateCreditCalc);
+}
+
+// --- "+ Add new ..." toggles, shared by customer/supplier/employee/bank pickers ---
+function wireAddNewToggle(selectClass, fieldClass) {
+  document.querySelectorAll(selectClass).forEach(function (sel) {
+    const scope = sel.dataset.scope;
+    const field = document.querySelector(fieldClass + '[data-scope="' + scope + '"]');
+    if (!field) return;
+    function toggle() {
+      const isNew = sel.value === '__new__';
+      field.style.display = isNew ? '' : 'none';
+      field.querySelector('input').required = isNew;
+    }
+    sel.addEventListener('change', toggle);
+  });
+}
+wireAddNewToggle('.customer-select', '.new-customer-field');
+wireAddNewToggle('.supplier-select', '.new-supplier-field');
+wireAddNewToggle('.employee-select', '.new-employee-field');
+wireAddNewToggle('.bank-select', '.new-bank-field');
+
+// --- Purchase: show supplier field only when "on credit" ---
+const purchasePaymentType = document.getElementById('purchase_payment_type');
+const purchaseSupplierField = document.getElementById('purchase-supplier-field');
+if (purchasePaymentType) {
+  purchasePaymentType.addEventListener('change', function () {
+    const isCredit = purchasePaymentType.value === 'credit';
+    purchaseSupplierField.style.display = isCredit ? '' : 'none';
+    purchaseSupplierField.querySelector('select').required = isCredit;
+  });
+}
+</script>
+{% endblock %}

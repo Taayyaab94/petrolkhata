@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Munchi - Accounts{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Accounts</h1>
+    <div class="subtitle">Customers, suppliers and employees. Record credit/payments/loans from the Ledger screen.</div>
+  </div>
+  <a href="{{ url_for('ledger') }}" class="btn">Open Ledger &rarr;</a>
+</div>
+
+<div class="filter-row">
+  <div class="filter-group">
+    <a href="{{ url_for('accounts', kind='all', type=type_filter) }}" class="filter-pill {{ 'active' if kind == 'all' }}">All</a>
+    <a href="{{ url_for('accounts', kind='debitors', type=type_filter) }}" class="filter-pill {{ 'active' if kind == 'debitors' }}">Debitors <span class="hint-sm">(owe us)</span></a>
+    <a href="{{ url_for('accounts', kind='creditors', type=type_filter) }}" class="filter-pill {{ 'active' if kind == 'creditors' }}">Creditors <span class="hint-sm">(we owe)</span></a>
+  </div>
+  <div class="filter-group">
+    <a href="{{ url_for('accounts', kind=kind, type='all') }}" class="filter-pill {{ 'active' if type_filter == 'all' }}">All types</a>
+    <a href="{{ url_for('accounts', kind=kind, type='customer') }}" class="filter-pill {{ 'active' if type_filter == 'customer' }}">Customers</a>
+    <a href="{{ url_for('accounts', kind=kind, type='supplier') }}" class="filter-pill {{ 'active' if type_filter == 'supplier' }}">Suppliers</a>
+    <a href="{{ url_for('accounts', kind=kind, type='employee') }}" class="filter-pill {{ 'active' if type_filter == 'employee' }}">Employees</a>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Name</th><th>Type</th><th>Phone</th><th>Balance (Rs)</th><th></th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr class="{{ 'row-low' if r.net_owed != 0 else '' }}">
+        <td>{{ r.name }}</td>
+        <td><span class="badge">{{ r.type_label }}</span></td>
+        <td>{{ r.phone or "-" }}</td>
+        <td>{{ "%.2f"|format(r.balance) }}</td>
+        <td>
+          {% if r.type == "customer" %}
+          <a href="{{ url_for('customer_detail', customer_id=r.id) }}">View history</a>
+          {% elif r.type == "supplier" %}
+          <a href="{{ url_for('supplier_detail', supplier_id=r.id) }}">View history</a>
+          {% else %}
+          <a href="{{ url_for('employee_detail', employee_id=r.id) }}">View history</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5">No accounts match this filter.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+{% if current_user.is_owner %}
+<div class="panel">
+  <div class="panel-head"><h3>Add an Account</h3></div>
+  <p class="hint">For migrating from paper records - set the account's opening balance as of a chosen date. New accounts created inline from the Ledger (e.g. "+ Add new customer") always start at zero; use this form instead when they already have a real balance.</p>
+  <form method="post" action="{{ url_for('accounts_add') }}" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Account Type
+      <select name="account_type" required>
+        <option value="">Select...</option>
+        <option value="customer">Customer</option>
+        <option value="supplier">Supplier</option>
+        <option value="employee">Employee</option>
+      </select>
+    </label>
+    <label>Name
+      <input type="text" name="name" required>
+    </label>
+    <label>Phone (optional)
+      <input type="text" name="phone">
+    </label>
+    <label>Opening Balance (Rs)
+      <input type="number" step="0.01" min="0" name="opening_balance" placeholder="0.00">
+    </label>
+    <label>As of Date
+      <input type="date" name="opening_balance_date" max="{{ today.isoformat() }}">
+    </label>
+    <button type="submit" class="btn">Add Account</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

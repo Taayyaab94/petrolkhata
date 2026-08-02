@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}Munchi - Daily Report{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Daily Report</h1>
+    <div class="subtitle">Read-only. Built from ledger entries for the selected date.</div>
+  </div>
+  <form method="get" class="date-picker-form">
+    <label class="date-picker-label">Date
+      <input type="date" name="date" value="{{ selected_date.isoformat() }}" max="{{ today.isoformat() }}" onchange="this.form.submit()">
+    </label>
+    <a href="{{ url_for('reports_trends') }}" class="btn btn-ghost btn-sm">View Trends &rarr;</a>
+  </form>
+</div>
+
+<div class="stat-row">
+  <div class="stat-card accent-brand">
+    <div class="label">Total Sales</div>
+    <div class="value">Rs {{ "%.2f"|format(total_sales) }}</div>
+    <div class="sub">{{ "%.2f"|format(total_liters) }} L sold</div>
+  </div>
+  <div class="stat-card accent-green">
+    <div class="label">Cash Sales</div>
+    <div class="value">Rs {{ "%.2f"|format(cash_sales) }}</div>
+    <div class="sub">Total - credit - bank</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Bank Sales</div>
+    <div class="value">Rs {{ "%.2f"|format(total_bank_sales) }}</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Credit Given</div>
+    <div class="value">Rs {{ "%.2f"|format(total_credit_given) }}</div>
+  </div>
+  <div class="stat-card accent-green">
+    <div class="label">Receipts from Customers</div>
+    <div class="value">Rs {{ "%.2f"|format(total_payments) }}</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Expenses</div>
+    <div class="value">Rs {{ "%.2f"|format(total_expenses) }}</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Payments to Suppliers</div>
+    <div class="value">Rs {{ "%.2f"|format(total_supplier_payments) }}</div>
+  </div>
+  <div class="stat-card accent-brand">
+    <div class="label">Net Cash Flow</div>
+    <div class="value">Rs {{ "%.2f"|format(net_cash_flow) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Outstanding Customer Credit</div>
+    <div class="value">Rs {{ "%.2f"|format(outstanding_credit) }}</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Sales by Fuel Type</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Fuel</th><th>Liters Sold</th><th>Revenue (Rs)</th></tr></thead>
+    <tbody>
+      {% for name, d in by_fuel.items() %}
+      <tr>
+        <td>{{ name }}</td>
+        <td>{{ "%.2f"|format(d.liters) }}</td>
+        <td>{{ "%.2f"|format(d.revenue) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="3">No sales on this date.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Stock Available per Tank</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Tank</th><th>Fuel</th><th>Book Stock (L)</th><th>Dip Reading (L)</th><th>Variance</th></tr></thead>
+    <tbody>
+      {% for row in tank_rows %}
+      <tr>
+        <td>{{ row.tank.label }}</td>
+        <td>{{ row.tank.fuel_type.name }}</td>
+        <td>{{ "%.2f"|format(row.book_stock) }}</td>
+        <td>{{ "%.2f"|format(row.dip) if row.dip is not none else "-" }}</td>
+        <td>{% if row.variance is not none %}{{ "+" if row.variance >= 0 }}{{ "%.2f"|format(row.variance) }} L{% else %}-{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="two-col">
+  <div class="panel">
+    <div class="panel-head"><h3>Inventory Received</h3></div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Tank</th><th>Liters</th><th>Payment</th></tr></thead>
+      <tbody>
+        {% for p in purchases %}
+        <tr>
+          <td>{{ p.tank.label }}</td>
+          <td>{{ "%.2f"|format(p.liters) }}</td>
+          <td>{{ p.payment_type }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3">No deliveries on this date.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Expenses</h3></div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Category</th><th>Amount</th></tr></thead>
+      <tbody>
+        {% for e in expenses %}
+        <tr>
+          <td>{{ e.category }}</td>
+          <td>{{ "%.2f"|format(e.amount) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="2">No expenses on this date.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Bank Sales</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Bank Account</th><th>Amount (Rs)</th></tr></thead>
+    <tbody>
+      {% for b in bank_sales %}
+      <tr>
+        <td>{{ b.bank_account.name }}</td>
+        <td>{{ "%.2f"|format(b.amount) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="2">No bank sales on this date.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p class="hint">Net Cash Flow = sales - credit given + receipts - expenses - cash-paid purchases - supplier payments. Purchases made on supplier credit aren't subtracted at the time of purchase since that cash hasn't left yet - it's counted when the supplier is actually paid.</p>
+{% endblock %}

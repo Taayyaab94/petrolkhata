@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Munchi - Inventory{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Inventory</h1>
+    <div class="subtitle">Read-only. Stock changes automatically from nozzle sales and fuel purchases on the Ledger.</div>
+  </div>
+  <a href="{{ url_for('ledger') }}" class="btn">Open Ledger &rarr;</a>
+</div>
+
+<div class="stat-row">
+  {% for name, agg in by_fuel.items() %}
+  <div class="stat-card">
+    <div class="label">{{ name }}</div>
+    <div class="value">{{ "%.2f"|format(agg.stock) }} L</div>
+    <div class="sub">of {{ "%.0f"|format(agg.capacity) }} L total capacity</div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Stock by Tank</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Tank</th><th>Fuel</th><th>Stock (L)</th><th>Capacity (L)</th><th>% Full</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for row in tank_rows %}
+      <tr class="{{ 'row-low' if row.is_low else '' }}">
+        <td>Tank {{ row.tank.number }}</td>
+        <td>{{ row.tank.fuel_type.name }}</td>
+        <td>{{ "%.2f"|format(row.stock) }}</td>
+        <td>{{ "%.2f"|format(row.tank.capacity_liters) }}</td>
+        <td>{{ "%.0f"|format(row.stock / row.tank.capacity_liters * 100 if row.tank.capacity_liters else 0) }}%</td>
+        <td>{% if row.is_low %}<span class="badge badge-low">LOW STOCK</span>{% else %}<span class="badge badge-ok">OK</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Dispensers &amp; Nozzles</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Dispenser</th><th>Nozzle</th><th>Tank</th><th>Fuel</th></tr></thead>
+    <tbody>
+      {% for d in dispensers %}
+        {% for n in d.nozzles %}
+        <tr>
+          <td>Dispenser {{ d.number }}</td>
+          <td>Nozzle {{ n.nozzle_number }}</td>
+          <td>{{ n.tank.label }}</td>
+          <td>{{ n.tank.fuel_type.name }}</td>
+        </tr>
+        {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+{% if current_user.is_owner %}
+<div class="panel">
+  <div class="panel-head"><h3>Recent Stock Deliveries</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Date</th><th>Tank</th><th>Liters</th><th>Cost</th><th>Payment</th><th>Supplier</th><th>Added by</th></tr></thead>
+    <tbody>
+      {% for p in recent_purchases %}
+      <tr>
+        <td>{{ p.entry_date.strftime("%Y-%m-%d") }}</td>
+        <td>{{ p.tank.label }}</td>
+        <td>{{ "%.2f"|format(p.liters) }}</td>
+        <td>{{ "%.2f"|format(p.cost) if p.cost is not none else "-" }}</td>
+        <td>{{ p.payment_type }}</td>
+        <td>{{ p.supplier.name if p.supplier else "-" }}</td>
+        <td>{{ p.user.username }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7">No stock deliveries recorded yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Supplier Balances</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Supplier</th><th>Balance Owed (Rs)</th></tr></thead>
+    <tbody>
+      {% for s in suppliers %}
+      <tr class="{{ 'row-low' if s.balance > 0 else '' }}">
+        <td>{{ s.name }}</td>
+        <td>{{ "%.2f"|format(s.balance) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="2">No suppliers yet - add one from the Ledger's "Fuel Purchase" or "Payment to Supplier" section.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

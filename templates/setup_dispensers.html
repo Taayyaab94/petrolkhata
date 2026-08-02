@@ -1,0 +1,85 @@
+{% extends "setup_base.html" %}
+{% set step = 3 %}
+{% block wtitle %}Add dispensers &amp; nozzles{% endblock %}
+{% block wdesc %}For each nozzle, pick the specific tank it draws from. You'll enter its first meter reading later, from the Ledger.{% endblock %}
+{% block wcontent %}
+<form method="post" id="dispensers-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="dispenser_count" id="dispenser_count" value="0">
+  <div id="dispenser-list"></div>
+  <button type="button" class="btn btn-ghost btn-sm" onclick="addDispenser()">+ Add Dispenser</button>
+
+  <div class="wizard-actions">
+    <a href="{{ url_for('setup_prices') }}" class="btn btn-ghost">&larr; Back</a>
+    <button type="submit" class="btn">Finish Setup &#10003;</button>
+  </div>
+</form>
+
+<script>
+const tankOptionsHtml = '<option value="">Select tank...</option>' +
+  {% for opt in tank_options %}'<option value="{{ opt.index }}">{{ opt.label|e }}</option>' + {% endfor %} '';
+
+function addDispenser() {
+  const block = document.createElement('div');
+  block.className = 'dispenser-block dispenser-group';
+  block.innerHTML =
+    '<div class="dg-title-row">' +
+      '<span class="dispenser-title dg-title">Dispenser</span>' +
+      '<button type="button" class="row-remove" onclick="removeDispenser(this)">Remove Dispenser</button>' +
+    '</div>' +
+    '<input type="hidden" class="nozzle-count-hidden" value="0">' +
+    '<div class="nozzle-rows"></div>' +
+    '<button type="button" class="btn btn-ghost btn-sm" onclick="addNozzle(this)">+ Add Nozzle</button>';
+  document.getElementById('dispenser-list').appendChild(block);
+  addNozzleRow(block.querySelector('.nozzle-rows'));
+  reindexAll();
+}
+
+function removeDispenser(btn) {
+  const blocks = document.querySelectorAll('#dispenser-list .dispenser-block');
+  if (blocks.length <= 1) return;
+  btn.closest('.dispenser-block').remove();
+  reindexAll();
+}
+
+function addNozzle(btn) {
+  const container = btn.closest('.dispenser-block').querySelector('.nozzle-rows');
+  addNozzleRow(container);
+  reindexAll();
+}
+
+function addNozzleRow(container) {
+  const row = document.createElement('div');
+  row.className = 'nozzle-row-item';
+  row.innerHTML =
+    '<span class="nozzle-title">Nozzle</span>' +
+    '<select class="nozzle-tank-select" required>' + tankOptionsHtml + '</select>' +
+    '<button type="button" class="row-remove-sm" onclick="removeNozzle(this)">&times;</button>';
+  container.appendChild(row);
+}
+
+function removeNozzle(btn) {
+  const container = btn.closest('.nozzle-rows');
+  if (container.querySelectorAll('.nozzle-row-item').length <= 1) return;
+  btn.closest('.nozzle-row-item').remove();
+  reindexAll();
+}
+
+function reindexAll() {
+  const blocks = document.querySelectorAll('#dispenser-list .dispenser-block');
+  blocks.forEach((block, d) => {
+    block.querySelector('.dispenser-title').textContent = 'Dispenser ' + (d + 1);
+    const rows = block.querySelectorAll('.nozzle-row-item');
+    rows.forEach((row, n) => {
+      row.querySelector('.nozzle-title').textContent = 'Nozzle ' + (n + 1);
+      row.querySelector('.nozzle-tank-select').name = 'tank_' + d + '_' + n;
+    });
+    block.querySelector('.nozzle-count-hidden').name = 'nozzle_count_' + d;
+    block.querySelector('.nozzle-count-hidden').value = rows.length;
+  });
+  document.getElementById('dispenser_count').value = blocks.length;
+}
+
+addDispenser();
+</script>
+{% endblock %}
