@@ -25,6 +25,7 @@ from sqlalchemy import func
 import charts
 from extensions import db, login_manager
 from ledger_logic import (
+    account_ledger_events,
     book_stock,
     cash_account_balance,
     nearest_earlier_reading,
@@ -34,15 +35,14 @@ from ledger_logic import (
     stock_series,
 )
 from models import (
+    Account,
     BankAccount,
     BankSale,
     CashAccount,
     CashDeposit,
     CreditGiven,
-    Customer,
     CustomerPayment,
     Dispenser,
-    Employee,
     EmployeeLoan,
     EmployeeRepayment,
     Expense,
@@ -50,7 +50,6 @@ from models import (
     Nozzle,
     Sale,
     StockPurchase,
-    Supplier,
     SupplierPayment,
     Tank,
     TankDip,
@@ -644,9 +643,11 @@ def ledger():
         )
 
     fuel_types = FuelType.query.order_by(FuelType.name).all()
-    customers = Customer.query.order_by(Customer.name).all()
-    suppliers = Supplier.query.order_by(Supplier.name).all()
-    employees = Employee.query.order_by(Employee.name).all()
+    # Every picker on this page (customer, supplier, employee) lists every
+    # account - an account's type label is just a default/hint, not a
+    # restriction, so any account can receive any kind of entry (e.g. an
+    # account labelled "supplier" can still be given customer credit).
+    accounts = Account.query.order_by(Account.name).all()
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
 
     breakdown = sales_breakdown_for_date(selected_date)
@@ -689,9 +690,7 @@ def ledger():
         nozzle_rows=nozzle_rows,
         tank_rows=tank_rows,
         fuel_types=fuel_types,
-        customers=customers,
-        suppliers=suppliers,
-        employees=employees,
+        accounts=accounts,
         bank_accounts=bank_accounts,
         feed=feed,
         total_sales=total_sales,
@@ -700,56 +699,39 @@ def ledger():
     )
 
 
-def resolve_customer(form):
-    customer_id = form.get("customer_id", "")
-    if customer_id == "__new__":
-        name = form.get("new_customer_name", "").strip()
+def resolve_account(form, id_field, new_name_field, default_type, label, new_phone_field=None):
+    """Shared lookup/quick-create for the four account pickers on the
+    Ledger (customer/supplier/employee, each just a differently-labelled
+    view over the same Account pool). default_type only sets the label on
+    a freshly quick-created account - it never restricts what that
+    account can later be used for."""
+    account_id = form.get(id_field, "")
+    if account_id == "__new__":
+        name = form.get(new_name_field, "").strip()
         if not name:
-            return None, "Please enter a name for the new customer."
-        phone = form.get("new_customer_phone", "").strip()
-        customer = Customer(name=name, phone=phone or None)
-        db.session.add(customer)
+            return None, f"Please enter a name for the new {label}."
+        phone = form.get(new_phone_field, "").strip() if new_phone_field else ""
+        account = Account(name=name, phone=phone or None, account_type=default_type)
+        db.session.add(account)
         db.session.flush()
-        return customer, None
+        return account, None
 
-    customer = db.session.get(Customer, int(customer_id)) if customer_id else None
-    if not customer:
-        return None, "Please choose a customer."
-    return customer, None
+    account = db.session.get(Account, int(account_id)) if account_id else None
+    if not account:
+        return None, f"Please choose a {label}."
+    return account, None
+
+
+def resolve_customer(form):
+    return resolve_account(form, "customer_id", "new_customer_name", "customer", "customer", "new_customer_phone")
 
 
 def resolve_supplier(form):
-    supplier_id = form.get("supplier_id", "")
-    if supplier_id == "__new__":
-        name = form.get("new_supplier_name", "").strip()
-        if not name:
-            return None, "Please enter a name for the new supplier."
-        supplier = Supplier(name=name)
-        db.session.add(supplier)
-        db.session.flush()
-        return supplier, None
-
-    supplier = db.session.get(Supplier, int(supplier_id)) if supplier_id else None
-    if not supplier:
-        return None, "Please choose a supplier."
-    return supplier, None
+    return resolve_account(form, "supplier_id", "new_supplier_name", "supplier", "supplier")
 
 
 def resolve_employee(form):
-    employee_id = form.get("employee_id", "")
-    if employee_id == "__new__":
-        name = form.get("new_employee_name", "").strip()
-        if not name:
-            return None, "Please enter a name for the new employee."
-        employee = Employee(name=name)
-        db.session.add(employee)
-        db.session.flush()
-        return employee, None
-
-    employee = db.session.get(Employee, int(employee_id)) if employee_id else None
-    if not employee:
-        return None, "Please choose an employee."
-    return employee, None
+    return resolve_account(form, "employee_id", "new_employee_name", "employee", "employee")
 
 
 def resolve_bank_account(form, field="bank_account_id", new_field="new_bank_account_name"):
@@ -963,7 +945,7 @@ def ledger_payment():
     else:
         db.session.add(
             CustomerPayment(
-                customer_id=customer.id,
+                account_id=customer.id,
                 entry_date=entry_date,
                 amount=amount,
                 note=note or None,
@@ -1000,7 +982,7 @@ def ledger_credit():
         amount = round(liters * fuel.price_per_liter, 2)
         db.session.add(
             CreditGiven(
-                customer_id=customer.id,
+                account_id=customer.id,
                 fuel_type_id=fuel.id,
                 entry_date=entry_date,
                 liters=liters,
@@ -1084,7 +1066,7 @@ def ledger_purchase():
                 liters=liters,
                 cost=cost,
                 payment_type=payment_type,
-                supplier_id=supplier.id if supplier else None,
+                account_id=supplier.id if supplier else None,
                 note=note or None,
                 user_id=current_user.id,
             )
@@ -1113,7 +1095,7 @@ def ledger_supplier_payment():
     else:
         db.session.add(
             SupplierPayment(
-                supplier_id=supplier.id,
+                account_id=supplier.id,
                 entry_date=entry_date,
                 amount=amount,
                 note=note or None,
@@ -1204,7 +1186,7 @@ def ledger_employee_loan():
     else:
         db.session.add(
             EmployeeLoan(
-                employee_id=employee.id,
+                account_id=employee.id,
                 entry_date=entry_date,
                 amount=amount,
                 note=note or None,
@@ -1234,7 +1216,7 @@ def ledger_employee_repayment():
     else:
         db.session.add(
             EmployeeRepayment(
-                employee_id=employee.id,
+                account_id=employee.id,
                 entry_date=entry_date,
                 amount=amount,
                 note=note or None,
@@ -1289,8 +1271,12 @@ def dashboard():
             .filter(CreditGiven.entry_date == today)
             .scalar()
         )
-        outstanding_credit = sum(c.balance for c in Customer.query.all())
-        outstanding_supplier = sum(s.balance for s in Supplier.query.all())
+        # Debitors/creditors are now determined by each account's current
+        # balance sign, not by a fixed type label - an account can owe us
+        # money from one kind of entry while we owe it money from another.
+        all_balances = [a.balance for a in Account.query.all()]
+        outstanding_credit = sum(b for b in all_balances if b > 0)
+        outstanding_supplier = -sum(b for b in all_balances if b < 0)
         bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
         cash_account = get_cash_account()
         context.update(
@@ -1325,7 +1311,13 @@ def inventory():
     recent_purchases = (
         StockPurchase.query.order_by(StockPurchase.recorded_at.desc()).limit(15).all()
     )
-    suppliers = Supplier.query.order_by(Supplier.name).all()
+    # Any account with at least one credit purchase against it, regardless
+    # of its type label (an account doesn't have to be labelled "supplier"
+    # to have sold us fuel on credit).
+    suppliers = sorted(
+        (a for a in Account.query.all() if any(p.payment_type == "credit" for p in a.stock_purchases)),
+        key=lambda a: a.name.lower(),
+    )
     return render_template(
         "inventory.html",
         tank_rows=tank_rows,
@@ -1338,7 +1330,7 @@ def inventory():
 
 # ------------------------------------------------------------ accounts ---
 
-ACCOUNT_MODELS = {"customer": Customer, "supplier": Supplier, "employee": Employee}
+ACCOUNT_TYPES = ("customer", "supplier", "employee")
 
 
 @app.route("/accounts")
@@ -1347,53 +1339,23 @@ def accounts():
     kind = request.args.get("kind", "all")
     type_filter = request.args.get("type", "all")
 
+    query = Account.query
+    if type_filter in ACCOUNT_TYPES:
+        query = query.filter_by(account_type=type_filter)
+
     rows = []
-    if type_filter in ("all", "customer"):
-        for c in Customer.query.all():
-            rows.append(
-                {
-                    "type": "customer",
-                    "type_label": "Customer",
-                    "id": c.id,
-                    "name": c.name,
-                    "phone": c.phone,
-                    "balance": c.balance,
-                    "net_owed": c.balance,
-                }
-            )
-    if type_filter in ("all", "supplier"):
-        for s in Supplier.query.all():
-            rows.append(
-                {
-                    "type": "supplier",
-                    "type_label": "Supplier",
-                    "id": s.id,
-                    "name": s.name,
-                    "phone": s.phone,
-                    "balance": s.balance,
-                    "net_owed": -s.balance,
-                }
-            )
-    if type_filter in ("all", "employee"):
-        for e in Employee.query.all():
-            rows.append(
-                {
-                    "type": "employee",
-                    "type_label": "Employee",
-                    "id": e.id,
-                    "name": e.name,
-                    "phone": e.phone,
-                    "balance": e.balance,
-                    "net_owed": e.balance,
-                }
-            )
+    for a in query.all():
+        # Debitor/creditor is purely a function of the account's current
+        # balance sign - not its type label - so an account's
+        # classification here can shift over time as its balance shifts.
+        rows.append({"account": a, "balance": a.balance})
 
     if kind == "debitors":
-        rows = [r for r in rows if r["net_owed"] > 0]
+        rows = [r for r in rows if r["balance"] > 0]
     elif kind == "creditors":
-        rows = [r for r in rows if r["net_owed"] < 0]
+        rows = [r for r in rows if r["balance"] < 0]
 
-    rows.sort(key=lambda r: r["name"].lower())
+    rows.sort(key=lambda r: r["account"].name.lower())
 
     return render_template(
         "accounts.html", rows=rows, kind=kind, type_filter=type_filter, today=date.today()
@@ -1411,17 +1373,16 @@ def accounts_add():
     raw_date = request.form.get("opening_balance_date", "").strip()
     opening_balance_date = parse_date_param(raw_date) if raw_date else None
 
-    model = ACCOUNT_MODELS.get(account_type)
-
     if not name:
         flash("Please enter a name.", "error")
-    elif not model:
+    elif account_type not in ACCOUNT_TYPES:
         flash("Please choose an account type.", "error")
     else:
         db.session.add(
-            model(
+            Account(
                 name=name,
                 phone=phone or None,
+                account_type=account_type,
                 opening_balance=opening_balance,
                 opening_balance_date=opening_balance_date,
             )
@@ -1432,74 +1393,205 @@ def accounts_add():
     return redirect(url_for("accounts"))
 
 
-@app.route("/accounts/customer/<int:customer_id>")
+@app.route("/accounts/<int:account_id>")
 @login_required
-def customer_detail(customer_id):
-    customer = db.session.get(Customer, customer_id) or abort(404)
-
-    events = []
-    if customer.opening_balance:
-        events.append(
-            {
-                "kind": "opening",
-                "entry_date": customer.opening_balance_date or customer.created_at.date(),
-                "amount": customer.opening_balance,
-            }
-        )
-    for c in customer.credit_entries:
-        events.append({"kind": "credit", "entry_date": c.entry_date, "obj": c})
-    for p in customer.payments:
-        events.append({"kind": "payment", "entry_date": p.entry_date, "obj": p})
-    events.sort(key=lambda e: e["entry_date"], reverse=True)
-
-    return render_template("customer_detail.html", customer=customer, events=events)
+def account_detail(account_id):
+    account = db.session.get(Account, account_id) or abort(404)
+    events = account_ledger_events(account)
+    fuel_types = FuelType.query.order_by(FuelType.name).all()
+    tanks = Tank.query.order_by(Tank.number).all()
+    return render_template(
+        "account_detail.html",
+        account=account,
+        events=events,
+        today=date.today(),
+        fuel_types=fuel_types,
+        tanks=tanks,
+    )
 
 
-@app.route("/accounts/supplier/<int:supplier_id>")
+@app.route("/accounts/<int:account_id>/edit", methods=["POST"])
 @login_required
-def supplier_detail(supplier_id):
-    supplier = db.session.get(Supplier, supplier_id) or abort(404)
+@owner_required
+def account_edit(account_id):
+    account = db.session.get(Account, account_id) or abort(404)
+    name = request.form.get("name", "").strip()
+    phone = request.form.get("phone", "").strip()
+    account_type = request.form.get("account_type", "")
 
-    events = []
-    if supplier.opening_balance:
-        events.append(
-            {
-                "kind": "opening",
-                "entry_date": supplier.opening_balance_date or supplier.created_at.date(),
-                "amount": supplier.opening_balance,
-            }
-        )
-    for p in supplier.purchases:
-        if p.payment_type == "credit":
-            events.append({"kind": "purchase", "entry_date": p.entry_date, "obj": p})
-    for pay in supplier.payments:
-        events.append({"kind": "payment", "entry_date": pay.entry_date, "obj": pay})
-    events.sort(key=lambda e: e["entry_date"], reverse=True)
+    if not name:
+        flash("Please enter a name.", "error")
+    elif account_type not in ACCOUNT_TYPES:
+        flash("Please choose an account type.", "error")
+    else:
+        account.name = name
+        account.phone = phone or None
+        account.account_type = account_type
+        db.session.commit()
+        flash("Account details updated.", "success")
 
-    return render_template("supplier_detail.html", supplier=supplier, events=events)
+    return redirect(url_for("account_detail", account_id=account.id))
 
 
-@app.route("/accounts/employee/<int:employee_id>")
+@app.route("/accounts/<int:account_id>/opening-balance", methods=["POST"])
 @login_required
-def employee_detail(employee_id):
-    employee = db.session.get(Employee, employee_id) or abort(404)
+@owner_required
+def account_opening_balance(account_id):
+    account = db.session.get(Account, account_id) or abort(404)
+    opening_balance = request.form.get("opening_balance", type=float)
+    raw_date = request.form.get("opening_balance_date", "").strip()
 
-    events = []
-    if employee.opening_balance:
-        events.append(
-            {
-                "kind": "opening",
-                "entry_date": employee.opening_balance_date or employee.created_at.date(),
-                "amount": employee.opening_balance,
-            }
-        )
-    for loan in employee.loans:
-        events.append({"kind": "loan", "entry_date": loan.entry_date, "obj": loan})
-    for r in employee.repayments:
-        events.append({"kind": "repayment", "entry_date": r.entry_date, "obj": r})
-    events.sort(key=lambda e: e["entry_date"], reverse=True)
+    if opening_balance is None:
+        flash("Please enter an opening balance (use 0 to clear it).", "error")
+    elif opening_balance and not raw_date:
+        flash("Please choose an as-of date for the opening balance.", "error")
+    else:
+        account.opening_balance = opening_balance
+        account.opening_balance_date = parse_date_param(raw_date) if raw_date else None
+        db.session.commit()
+        flash("Opening balance updated.", "success")
 
-    return render_template("employee_detail.html", employee=employee, events=events)
+    return redirect(url_for("account_detail", account_id=account.id))
+
+
+@app.route("/accounts/entry/credit/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_credit_edit(entry_id):
+    entry = db.session.get(CreditGiven, entry_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    fuel_type_id = request.form.get("fuel_type_id", type=int)
+    liters = request.form.get("liters", type=float)
+    note = request.form.get("note", "").strip()
+    fuel = db.session.get(FuelType, fuel_type_id) if fuel_type_id else None
+
+    if not fuel:
+        flash("Please choose a valid fuel type.", "error")
+    elif not liters or liters <= 0:
+        flash("Liters must be a positive number.", "error")
+    else:
+        entry.entry_date = entry_date
+        entry.fuel_type_id = fuel.id
+        entry.liters = liters
+        entry.price_per_liter = fuel.price_per_liter
+        entry.amount = round(liters * fuel.price_per_liter, 2)
+        entry.note = note or None
+        db.session.commit()
+        flash("Credit entry updated.", "success")
+
+    return redirect(url_for("account_detail", account_id=entry.account_id))
+
+
+@app.route("/accounts/entry/customer-payment/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_customer_payment_edit(entry_id):
+    entry = db.session.get(CustomerPayment, entry_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    amount = request.form.get("amount", type=float)
+    note = request.form.get("note", "").strip()
+
+    if not amount or amount <= 0:
+        flash("Amount must be a positive number.", "error")
+    else:
+        entry.entry_date = entry_date
+        entry.amount = amount
+        entry.note = note or None
+        db.session.commit()
+        flash("Payment updated.", "success")
+
+    return redirect(url_for("account_detail", account_id=entry.account_id))
+
+
+@app.route("/accounts/entry/purchase/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_purchase_edit(entry_id):
+    entry = db.session.get(StockPurchase, entry_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    tank_id = request.form.get("tank_id", type=int)
+    liters = request.form.get("liters", type=float)
+    cost = request.form.get("cost", type=float)
+    note = request.form.get("note", "").strip()
+    tank = db.session.get(Tank, tank_id) if tank_id else None
+
+    if not tank:
+        flash("Please choose a valid tank.", "error")
+    elif not liters or liters <= 0:
+        flash("Liters must be a positive number.", "error")
+    else:
+        entry.entry_date = entry_date
+        entry.tank_id = tank.id
+        entry.liters = liters
+        entry.cost = cost
+        entry.note = note or None
+        db.session.commit()
+        flash("Purchase updated.", "success")
+
+    return redirect(url_for("account_detail", account_id=entry.account_id))
+
+
+@app.route("/accounts/entry/supplier-payment/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_supplier_payment_edit(entry_id):
+    entry = db.session.get(SupplierPayment, entry_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    amount = request.form.get("amount", type=float)
+    note = request.form.get("note", "").strip()
+
+    if not amount or amount <= 0:
+        flash("Amount must be a positive number.", "error")
+    else:
+        entry.entry_date = entry_date
+        entry.amount = amount
+        entry.note = note or None
+        db.session.commit()
+        flash("Payment updated.", "success")
+
+    return redirect(url_for("account_detail", account_id=entry.account_id))
+
+
+@app.route("/accounts/entry/employee-loan/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_employee_loan_edit(entry_id):
+    entry = db.session.get(EmployeeLoan, entry_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    amount = request.form.get("amount", type=float)
+    note = request.form.get("note", "").strip()
+
+    if not amount or amount <= 0:
+        flash("Amount must be a positive number.", "error")
+    else:
+        entry.entry_date = entry_date
+        entry.amount = amount
+        entry.note = note or None
+        db.session.commit()
+        flash("Loan updated.", "success")
+
+    return redirect(url_for("account_detail", account_id=entry.account_id))
+
+
+@app.route("/accounts/entry/employee-repayment/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_employee_repayment_edit(entry_id):
+    entry = db.session.get(EmployeeRepayment, entry_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    amount = request.form.get("amount", type=float)
+    note = request.form.get("note", "").strip()
+
+    if not amount or amount <= 0:
+        flash("Amount must be a positive number.", "error")
+    else:
+        entry.entry_date = entry_date
+        entry.amount = amount
+        entry.note = note or None
+        db.session.commit()
+        flash("Repayment updated.", "success")
+
+    return redirect(url_for("account_detail", account_id=entry.account_id))
 
 
 # -------------------------------------------------------------- reports ---
@@ -1569,7 +1661,7 @@ def reports():
         - cash_purchases_total
         - total_supplier_payments
     )
-    outstanding_credit = sum(c.balance for c in Customer.query.all())
+    outstanding_credit = sum(b for a in Account.query.all() if (b := a.balance) > 0)
 
     return render_template(
         "reports.html",

@@ -126,24 +126,48 @@ edit stock or any account's balance directly.
 ## Accounts (customers, suppliers, employees)
 
 The **Accounts** page is a single ledger for every relationship that
-carries a balance: customers, suppliers, and employees. Each account
-keeps a running balance plus its full transaction history (opening
-balance, then every credit/payment, purchase/payment, or loan/repayment
-in chronological order) - creating or editing these still only happens
-through the Ledger, this page is read-only.
+carries a balance. Under the hood there's just one account pool -
+"customer", "supplier", and "employee" are simple labels for organizing
+and searching, not separate silos. Any account can receive any kind of
+entry: the same account picker on the Ledger (for customer credit,
+supplier purchases, employee loans, everything) lists every account, so
+an account labelled "supplier" can still be given customer credit, and
+vice versa. This is for cases like two petrol pumps that occasionally
+sell fuel to each other - one account, one running balance, instead of
+needing a separate customer record and a separate supplier record for
+the same business.
 
-Two filters at the top narrow the list:
-- **Creditors / Debitors** - debitors owe the pump money (customers,
-  employees with an outstanding loan); creditors are owed money by the
-  pump (suppliers with fuel taken on credit).
-- **Account type** - customers, suppliers, or employees only.
+A balance is positive when the account owes the pump money (a debitor)
+and negative when the pump owes the account money (a creditor) -
+regardless of its type label. The **Creditors / Debitors** filter at the
+top of the Accounts page is based purely on this current balance sign,
+so an account's classification there can shift over time as its balance
+shifts. The **Account type** filter narrows by label only.
 
 Fuel bought on credit ("On Credit (from supplier)" in the Fuel Purchase
-form) is tied to a supplier. Paying that down is its own Ledger entry
+form) is tied to an account. Paying that down is its own Ledger entry
 ("Payment to Supplier"), which reduces what's owed - mirroring how a
 customer receipt reduces what a customer owes. Employees work the same
 way in reverse: a "Loan / Advance to Employee" entry increases what they
 owe the pump, and "Repayment from Employee" reduces it.
+
+### Editing an account
+
+Click into any account from the Accounts page (owner only) to:
+- Edit its name, phone, or type label.
+- Add or update its opening balance and as-of date at any time - not
+  just when the account is first created.
+- Edit any individual entry in its transaction history (amount, date,
+  fuel/tank/liters where relevant, note) via the "Edit" link on that row.
+
+Every balance shown - the account's current balance, and the running
+balance next to each row in its history - is recalculated fresh from the
+full chronological list of entries every time the page loads, the same
+way tank stock is never stored as a mutable counter (see "Where your
+data lives" below). That means editing an entry from any point in the
+account's history, including the opening balance itself, always
+correctly ripples forward through every later entry's running balance
+and the account's current total - there's nothing cached to go stale.
 
 ## Bank accounts &amp; cash in hand
 
@@ -171,11 +195,12 @@ already in the bank, cash already in the register. It shows up as the
 first entry in that account's history, dated on the day you specify, so
 everything after it reads as a correct running balance.
 
-- For customers, suppliers, and employees: use "Add an Account" on the
-  Accounts page (owner only). Quick-adding a new customer/supplier/
-  employee inline from the Ledger (e.g. "+ Add new customer") always
-  starts at zero - use the Accounts page instead when the account
-  already has a real balance.
+- For customers, suppliers, and employees: set it on the account's own
+  detail page (owner only) - either when first creating it via "Add an
+  Account" on the Accounts page, or any time afterward from the account's
+  page. Quick-adding a new account inline from the Ledger (e.g. "+ Add
+  new customer") always starts at zero - use the Accounts page or the
+  account's own page instead when it already has a real balance.
 - For bank accounts: set it when adding the account in Settings.
 - For cash in hand: set it any time from Settings - there's only ever
   one cash-in-hand account, so it's editable rather than something you
@@ -247,3 +272,8 @@ database periodically the same way you'd back up `instance/petrolpump.db`.
   expenses − cash-paid fuel purchases − supplier payments. Fuel bought on
   supplier credit isn't subtracted at the time of purchase (that cash
   hasn't left yet) - it's counted once the supplier is actually paid.
+- Editing an account's transaction entry can change its date, amount,
+  and other details, but not which account it's attached to or (for a
+  fuel purchase) whether it was paid cash vs. on credit. There's also no
+  delete - to correct an entry logged against the wrong account or with
+  the wrong payment method, log an offsetting entry instead.

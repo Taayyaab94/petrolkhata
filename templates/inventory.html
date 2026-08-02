@@ -75,7 +75,7 @@
         <td>{{ "%.2f"|format(p.liters) }}</td>
         <td>{{ "%.2f"|format(p.cost) if p.cost is not none else "-" }}</td>
         <td>{{ p.payment_type }}</td>
-        <td>{{ p.supplier.name if p.supplier else "-" }}</td>
+        <td>{{ p.account.name if p.account else "-" }}</td>
         <td>{{ p.user.username }}</td>
       </tr>
       {% else %}
@@ -90,12 +90,12 @@
   <div class="panel-head"><h3>Supplier Balances</h3></div>
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Supplier</th><th>Balance Owed (Rs)</th></tr></thead>
+    <thead><tr><th>Supplier</th><th>You Owe (Rs)</th></tr></thead>
     <tbody>
       {% for s in suppliers %}
-      <tr class="{{ 'row-low' if s.balance > 0 else '' }}">
-        <td>{{ s.name }}</td>
-        <td>{{ "%.2f"|format(s.balance) }}</td>
+      <tr class="{{ 'row-low' if s.balance < 0 else '' }}">
+        <td><a href="{{ url_for('account_detail', account_id=s.id) }}">{{ s.name }}</a></td>
+        <td>{{ "%.2f"|format(-s.balance if s.balance < 0 else 0) }}</td>
       </tr>
       {% else %}
       <tr><td colspan="2">No suppliers yet - add one from the Ledger's "Fuel Purchase" or "Payment to Supplier" section.</td></tr>

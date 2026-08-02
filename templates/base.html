@@ -25,7 +25,7 @@
       <a href="{{ url_for('inventory') }}" class="{{ 'active' if request.endpoint == 'inventory' }}">
         <span class="icon">&#9970;</span> Inventory
       </a>
-      <a href="{{ url_for('accounts') }}" class="{{ 'active' if request.endpoint in ('accounts', 'customer_detail', 'supplier_detail', 'employee_detail') }}">
+      <a href="{{ url_for('accounts') }}" class="{{ 'active' if request.endpoint in ('accounts', 'account_detail') }}">
         <span class="icon">&#128101;</span> Accounts
       </a>
       {% if current_user.is_owner %}

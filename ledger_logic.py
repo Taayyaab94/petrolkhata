@@ -5,7 +5,7 @@ models.py) - every figure here is derived fresh from ledger rows so that
 editing or backfilling a past date can never leave numbers out of sync.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import func
 
@@ -142,6 +142,66 @@ def sales_breakdown_for_date(entry_date):
     )
     cash = round(total - credit - bank, 2)
     return {"total": total, "credit": credit, "bank": bank, "cash": cash}
+
+
+def account_ledger_events(account):
+    """Full transaction history for one account (opening balance plus all
+    six entry kinds that can be posted to it), each tagged with the
+    running balance immediately after it, most recent first.
+
+    The running balance is computed by walking the events in ascending
+    date order and accumulating - never stored - so editing any entry's
+    amount or date (including the opening balance) and reloading this
+    account always shows every later entry's running balance correctly
+    rippled forward, the same way book_stock() and every other balance in
+    this app is always derived fresh rather than cached.
+    """
+    events = []
+    if account.opening_balance:
+        opening_date = account.opening_balance_date or account.created_at.date()
+        events.append(
+            {
+                "kind": "opening",
+                "entry_date": opening_date,
+                "sort_key": (opening_date, datetime.min),
+                "obj": None,
+                "delta": account.opening_balance,
+            }
+        )
+    for c in account.credit_entries:
+        events.append(
+            {"kind": "credit", "entry_date": c.entry_date, "sort_key": (c.entry_date, c.recorded_at), "obj": c, "delta": c.amount}
+        )
+    for p in account.customer_payments:
+        events.append(
+            {"kind": "customer_payment", "entry_date": p.entry_date, "sort_key": (p.entry_date, p.recorded_at), "obj": p, "delta": -p.amount}
+        )
+    for pu in account.stock_purchases:
+        if pu.payment_type == "credit":
+            events.append(
+                {"kind": "purchase", "entry_date": pu.entry_date, "sort_key": (pu.entry_date, pu.recorded_at), "obj": pu, "delta": -(pu.cost or 0)}
+            )
+    for sp in account.supplier_payments:
+        events.append(
+            {"kind": "supplier_payment", "entry_date": sp.entry_date, "sort_key": (sp.entry_date, sp.recorded_at), "obj": sp, "delta": sp.amount}
+        )
+    for l in account.employee_loans:
+        events.append(
+            {"kind": "employee_loan", "entry_date": l.entry_date, "sort_key": (l.entry_date, l.recorded_at), "obj": l, "delta": l.amount}
+        )
+    for r in account.employee_repayments:
+        events.append(
+            {"kind": "employee_repayment", "entry_date": r.entry_date, "sort_key": (r.entry_date, r.recorded_at), "obj": r, "delta": -r.amount}
+        )
+
+    events.sort(key=lambda e: e["sort_key"])
+    running = 0.0
+    for e in events:
+        running += e["delta"]
+        e["running_balance"] = round(running, 2)
+
+    events.reverse()
+    return events
 
 
 def cash_account_balance(cash_account):
