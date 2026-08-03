@@ -7,10 +7,18 @@ from extensions import db
 
 
 class User(UserMixin, db.Model):
+    """A login. Deactivating rather than deleting is deliberate: every
+    ledger row records which user entered it (user_id), so a user who has
+    ever recorded anything has to stay resolvable for that history to
+    still read correctly."""
+
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
+    display_name = db.Column(db.String(120))
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(20), nullable=False)  # "owner" or "staff"
+    is_active_user = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -21,6 +29,26 @@ class User(UserMixin, db.Model):
     @property
     def is_owner(self):
         return self.role == "owner"
+
+    @property
+    def label(self):
+        return self.display_name or self.username
+
+
+class Shift(db.Model):
+    """A named working period within a day (e.g. Morning/Evening/Night).
+
+    A single "Full Day" shift is seeded automatically so a pump that
+    doesn't split its day never has to think about shifts at all - every
+    reading, credit sale, and bank sale just lands in that one shift, and
+    the Ledger hides the selector entirely while only one active shift
+    exists. Adding more shifts later doesn't disturb existing rows."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(60), nullable=False, unique=True)
+    sort_order = db.Column(db.Integer, nullable=False, default=0)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
 
 
 class FuelType(db.Model):
@@ -143,30 +171,40 @@ class Account(db.Model):
         )
         supplier_payments_total = sum(p.amount for p in self.supplier_payments)
         loans_total = sum(l.amount for l in self.employee_loans)
+        # Only the deducted portion of a salary touches this balance - the
+        # part actually handed over is pay, not a change in what's owed.
+        salary_deductions_total = sum(s.deduction_amount for s in self.salary_payments)
         return round(
             self.opening_balance
             + credit_given_total
             - receipts_total
             - purchases_credit_total
             + supplier_payments_total
-            + loans_total,
+            + loans_total
+            - salary_deductions_total,
             2,
         )
 
 
 class Sale(db.Model):
-    """A debit-side ledger entry: one nozzle's meter reading on one date.
+    """A debit-side ledger entry: one nozzle's meter reading on one date,
+    within one shift.
 
-    At most one Sale exists per (nozzle_id, entry_date) - re-submitting a
-    reading for a date that already has one updates it in place rather
-    than creating a duplicate, which is what makes backfilling/editing a
-    past date safe.
+    At most one Sale exists per (nozzle_id, entry_date, shift_id) -
+    re-submitting a reading for a date/shift that already has one updates
+    it in place rather than creating a duplicate, which is what makes
+    backfilling/editing a past date safe. A pump that doesn't split its
+    day just has every row land in the single seeded "Full Day" shift, so
+    the constraint behaves exactly like one-per-nozzle-per-day.
     """
 
-    __table_args__ = (db.UniqueConstraint("nozzle_id", "entry_date", name="uq_sale_nozzle_date"),)
+    __table_args__ = (
+        db.UniqueConstraint("nozzle_id", "entry_date", "shift_id", name="uq_sale_nozzle_date_shift"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     nozzle_id = db.Column(db.Integer, db.ForeignKey("nozzle.id"), nullable=False)
+    shift_id = db.Column(db.Integer, db.ForeignKey("shift.id"), nullable=False)
     entry_date = db.Column(db.Date, nullable=False)
     previous_reading = db.Column(db.Float, nullable=False)
     current_reading = db.Column(db.Float, nullable=False)
@@ -177,6 +215,7 @@ class Sale(db.Model):
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
     nozzle = db.relationship("Nozzle", backref="sales")
+    shift = db.relationship("Shift")
     user = db.relationship("User")
 
 
@@ -192,16 +231,19 @@ class CreditGiven(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=False)
     fuel_type_id = db.Column(db.Integer, db.ForeignKey("fuel_type.id"), nullable=False)
+    shift_id = db.Column(db.Integer, db.ForeignKey("shift.id"), nullable=False)
     entry_date = db.Column(db.Date, nullable=False)
     liters = db.Column(db.Float, nullable=False)
     price_per_liter = db.Column(db.Float, nullable=False)
     amount = db.Column(db.Float, nullable=False)
+    vehicle_number = db.Column(db.String(30))
     note = db.Column(db.String(200))
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
     account = db.relationship("Account", backref="credit_entries")
     fuel_type = db.relationship("FuelType")
+    shift = db.relationship("Shift")
     user = db.relationship("User")
 
 
@@ -333,6 +375,9 @@ class BankAccount(db.Model):
             (p.cost or 0) for p in self.fuel_purchases if p.payment_type == "cash"
         )
         supplier_payments_total = sum(p.amount for p in self.supplier_payments_paid)
+        # Only the net handed over leaves the bank - the deducted portion
+        # of a salary never moves as money, it just settles an advance.
+        salaries_total = sum(s.net_paid for s in self.salary_payments_paid)
         return round(
             self.opening_balance
             + sales_total
@@ -341,7 +386,8 @@ class BankAccount(db.Model):
             - loans_total
             - expenses_total
             - fuel_purchases_total
-            - supplier_payments_total,
+            - supplier_payments_total
+            - salaries_total,
             2,
         )
 
@@ -356,6 +402,7 @@ class BankSale(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=False)
+    shift_id = db.Column(db.Integer, db.ForeignKey("shift.id"), nullable=False)
     entry_date = db.Column(db.Date, nullable=False)
     amount = db.Column(db.Float, nullable=False)
     note = db.Column(db.String(200))
@@ -363,6 +410,7 @@ class BankSale(db.Model):
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
     bank_account = db.relationship("BankAccount", backref="bank_sales")
+    shift = db.relationship("Shift")
     user = db.relationship("User")
 
 
@@ -397,16 +445,104 @@ class CashAccount(db.Model):
 class TankDip(db.Model):
     """A physical dip measurement for one tank on one date, compared
     against calculated book stock. At most one dip per (tank_id, entry_date).
-    """
+
+    dip_liters is always the figure compared against book stock. A dip
+    stick physically measures depth, not volume, so when the tank has a
+    calibration chart (TankDipChart) the staff enter dip_cm and the liters
+    are interpolated from that chart; dip_cm is then kept alongside as the
+    raw measurement actually taken. Tanks without a chart keep entering
+    liters directly and leave dip_cm empty."""
 
     __table_args__ = (db.UniqueConstraint("tank_id", "entry_date", name="uq_tankdip_tank_date"),)
 
     id = db.Column(db.Integer, primary_key=True)
     tank_id = db.Column(db.Integer, db.ForeignKey("tank.id"), nullable=False)
     entry_date = db.Column(db.Date, nullable=False)
+    dip_cm = db.Column(db.Float, nullable=True)
     dip_liters = db.Column(db.Float, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
     tank = db.relationship("Tank", backref="dips")
     user = db.relationship("User")
+
+
+class TankDipChart(db.Model):
+    """One row of a tank's calibration table: at depth_cm of fuel, the tank
+    holds liters. Tank-specific because it depends on physical shape.
+    ledger_logic.liters_from_dip_cm() linearly interpolates between the two
+    nearest rows, so the chart doesn't need a row for every millimetre."""
+
+    __table_args__ = (
+        db.UniqueConstraint("tank_id", "depth_cm", name="uq_dipchart_tank_depth"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    tank_id = db.Column(db.Integer, db.ForeignKey("tank.id"), nullable=False)
+    depth_cm = db.Column(db.Float, nullable=False)
+    liters = db.Column(db.Float, nullable=False)
+
+    tank = db.relationship("Tank", backref="dip_chart_rows")
+
+
+class CashHandover(db.Model):
+    """What was physically counted at the end of a shift, against what the
+    ledger says should have been collected in cash for that shift.
+
+    Deliberately NOT a money movement: cash-in-hand is already derived
+    from sales/credit/bank-sales, so adding the declared figure on top
+    would double-count it. This row exists purely to surface a variance
+    (declared - expected) the same way a tank dip surfaces a stock
+    variance. A confirmed shortfall the owner decides to absorb or recover
+    is recorded separately - as an Expense, or as a loan against the
+    attendant's account - which is what actually moves the numbers."""
+
+    __table_args__ = (
+        db.UniqueConstraint("entry_date", "shift_id", name="uq_handover_date_shift"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    entry_date = db.Column(db.Date, nullable=False)
+    shift_id = db.Column(db.Integer, db.ForeignKey("shift.id"), nullable=False)
+    attendant_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=True)
+    declared_amount = db.Column(db.Float, nullable=False)
+    note = db.Column(db.String(200))
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    shift = db.relationship("Shift")
+    attendant = db.relationship("Account", backref="handovers")
+    user = db.relationship("User")
+
+
+class SalaryPayment(db.Model):
+    """Salary paid to an account for a period, optionally settling part of
+    what that account already owes the pump (an earlier advance/loan).
+
+    gross_amount is the full salary earned - that's the figure the P&L
+    should carry as a wage cost. deduction_amount is the slice withheld
+    against the account's outstanding balance, so it never leaves as money;
+    only net_paid (gross - deduction) actually reduces cash or a bank
+    account. Splitting it this way means an advance can be recovered
+    through payroll without needing a fake "receipt" the employee never
+    physically handed over."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=False)
+    entry_date = db.Column(db.Date, nullable=False)
+    period_label = db.Column(db.String(40))  # e.g. "Jul 2026"
+    gross_amount = db.Column(db.Float, nullable=False)
+    deduction_amount = db.Column(db.Float, nullable=False, default=0)
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank
+    bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
+    note = db.Column(db.String(200))
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    account = db.relationship("Account", backref="salary_payments")
+    bank_account = db.relationship("BankAccount", backref="salary_payments_paid")
+    user = db.relationship("User")
+
+    @property
+    def net_paid(self):
+        return round(self.gross_amount - self.deduction_amount, 2)

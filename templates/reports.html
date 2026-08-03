@@ -10,6 +10,7 @@
     <label class="date-picker-label">Date
       <input type="date" name="date" value="{{ selected_date.isoformat() }}" max="{{ today.isoformat() }}" onchange="this.form.submit()">
     </label>
+    <a href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}" class="btn btn-ghost btn-sm">Monthly &rarr;</a>
     <a href="{{ url_for('reports_trends') }}" class="btn btn-ghost btn-sm">View Trends &rarr;</a>
   </form>
 </div>
@@ -44,6 +45,11 @@
   <div class="stat-card accent-red">
     <div class="label">Payments to Suppliers</div>
     <div class="value">Rs {{ "%.2f"|format(total_supplier_payments) }}</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Salaries Paid Out</div>
+    <div class="value">Rs {{ "%.2f"|format(total_salaries_net) }}</div>
+    <div class="sub">Net of any advance deductions</div>
   </div>
   <div class="stat-card accent-brand">
     <div class="label">Net Cash Flow</div>
@@ -151,6 +157,55 @@
 </div>
 
 <div class="panel">
+  <div class="panel-head"><h3>Cash Handover - Shift Reconciliation</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Shift</th><th>Expected Cash</th><th>Counted</th><th>Variance</th><th>Attendant</th></tr></thead>
+    <tbody>
+      {% for row in handover_rows %}
+      <tr class="{{ 'row-low' if row.variance is not none and row.variance < -0.01 else '' }}">
+        <td>{{ row.shift.name }}</td>
+        <td>{{ "%.2f"|format(row.expected) }}</td>
+        <td>{{ "%.2f"|format(row.declared) if row.declared is not none else "-" }}</td>
+        <td>
+          {% if row.variance is none %}<span class="badge">Not reconciled</span>
+          {% elif row.variance < -0.01 %}<span class="badge badge-low">Short {{ "%.2f"|format(-row.variance) }}</span>
+          {% elif row.variance > 0.01 %}<span class="badge">Over {{ "%.2f"|format(row.variance) }}</span>
+          {% else %}<span class="badge badge-ok">Matches</span>{% endif %}
+        </td>
+        <td>{{ row.handover.attendant.name if row.handover and row.handover.attendant else "-" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="hint">Record handovers on the Ledger. A variance is a check on the register, not a transaction - it doesn't change any balance on its own.</p>
+</div>
+
+{% if salaries %}
+<div class="panel">
+  <div class="panel-head"><h3>Salaries Paid</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Employee</th><th>Period</th><th>Salary (Rs)</th><th>Deducted (Rs)</th><th>Net Paid (Rs)</th><th>Paid via</th></tr></thead>
+    <tbody>
+      {% for s in salaries %}
+      <tr>
+        <td><a href="{{ url_for('account_detail', account_id=s.account_id) }}">{{ s.account.name }}</a></td>
+        <td>{{ s.period_label or "-" }}</td>
+        <td>{{ "%.2f"|format(s.gross_amount) }}</td>
+        <td>{{ "%.2f"|format(s.deduction_amount) }}</td>
+        <td>{{ "%.2f"|format(s.net_paid) }}</td>
+        <td>{{ "Via " + s.bank_account.name if s.method == "bank" else "Cash" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="panel">
   <div class="panel-head"><h3>Bank Sales</h3></div>
   <div class="table-wrap">
   <table class="table">
@@ -169,5 +224,5 @@
   </div>
 </div>
 
-<p class="hint">Net Cash Flow = sales - credit given + receipts - expenses - cash-paid purchases - supplier payments. Purchases made on supplier credit aren't subtracted at the time of purchase since that cash hasn't left yet - it's counted when the supplier is actually paid.</p>
+<p class="hint">Net Cash Flow = sales - credit given + receipts - expenses - cash-paid purchases - supplier payments - salaries paid. Purchases made on supplier credit aren't subtracted at the time of purchase since that cash hasn't left yet - it's counted when the supplier is actually paid. For a period profit view (revenue against the cost of fuel actually sold), see the <a href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}">Monthly Report</a>.</p>
 {% endblock %}

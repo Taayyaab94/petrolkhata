@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Statement - {{ account.name }} - Petrol Khata{% endblock %}
+{% block content %}
+<div class="page-head no-print">
+  <div>
+    <h1>Statement</h1>
+    <div class="subtitle">{{ account.name }} &middot; {{ from_date.strftime("%d %b %Y") }} to {{ to_date.strftime("%d %b %Y") }}</div>
+  </div>
+  <div>
+    <a href="{{ url_for('account_detail', account_id=account.id) }}" class="btn btn-ghost btn-sm">&larr; Back to account</a>
+    <button type="button" class="btn btn-sm" onclick="window.print()">Print / Save PDF</button>
+  </div>
+</div>
+
+<form method="get" class="date-picker-form no-print">
+  <label class="date-picker-label">From
+    <input type="date" name="from" value="{{ from_date.isoformat() }}" max="{{ today.isoformat() }}">
+  </label>
+  <label class="date-picker-label">To
+    <input type="date" name="to" value="{{ to_date.isoformat() }}" max="{{ today.isoformat() }}">
+  </label>
+  <button type="submit" class="btn btn-sm">Update</button>
+</form>
+
+<div class="panel statement-sheet">
+  <div class="statement-head">
+    <div>
+      <div class="statement-brand">Petrol Khata</div>
+      <h2 style="margin:4px 0;">Account Statement</h2>
+    </div>
+    <div class="statement-meta">
+      <div><strong>{{ account.name }}</strong></div>
+      <div>{{ account.account_type|capitalize }}{% if account.phone %} &middot; {{ account.phone }}{% endif %}</div>
+      <div>{{ from_date.strftime("%d %b %Y") }} &ndash; {{ to_date.strftime("%d %b %Y") }}</div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+  <table class="table">
+    <thead>
+      <tr><th>Date</th><th>Type</th><th>Details</th><th>Debit (Rs)</th><th>Credit (Rs)</th><th>Balance (Rs)</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>{{ from_date.strftime("%Y-%m-%d") }}</td>
+        <td><span class="badge">Brought Forward</span></td>
+        <td>Balance carried into this period</td>
+        <td></td><td></td>
+        <td>{{ "%.2f"|format(opening) }}</td>
+      </tr>
+      {% for e in events %}
+      <tr>
+        <td>{{ e.entry_date.strftime("%Y-%m-%d") }}</td>
+        <td>
+          {% if e.kind == "opening" %}Opening Balance
+          {% elif e.kind == "credit" %}Fuel on Credit
+          {% elif e.kind == "receipt" %}Payment Received
+          {% elif e.kind == "purchase" %}Purchase (Credit)
+          {% elif e.kind == "supplier_payment" %}Payment Made
+          {% elif e.kind == "employee_loan" %}Loan / Advance
+          {% elif e.kind == "salary" %}Salary
+          {% endif %}
+        </td>
+        <td>
+          {% if e.kind == "credit" %}
+            {{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }}{% if e.obj.vehicle_number %} &middot; {{ e.obj.vehicle_number }}{% endif %}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
+          {% elif e.kind == "purchase" %}
+            {{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.tank.label }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
+          {% elif e.kind == "salary" %}
+            {{ e.obj.period_label or "Salary" }}{% if e.obj.deduction_amount %} &middot; Rs {{ "%.2f"|format(e.obj.deduction_amount) }} deducted against advance{% endif %}
+          {% elif e.obj %}
+            {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
+          {% else %}-{% endif %}
+        </td>
+        <td>{% if e.delta > 0 %}{{ "%.2f"|format(e.delta) }}{% endif %}</td>
+        <td>{% if e.delta < 0 %}{{ "%.2f"|format(-e.delta) }}{% endif %}</td>
+        <td>{{ "%.2f"|format(e.running_balance) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6">No transactions in this period.</td></tr>
+      {% endfor %}
+      <tr class="statement-total">
+        <td colspan="5"><strong>Closing balance as of {{ to_date.strftime("%d %b %Y") }}</strong></td>
+        <td><strong>{{ "%.2f"|format(closing) }}</strong></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p class="hint">
+    {% if closing > 0 %}Rs {{ "%.2f"|format(closing) }} is owed to Petrol Khata.
+    {% elif closing < 0 %}Rs {{ "%.2f"|format(-closing) }} is owed by Petrol Khata to {{ account.name }}.
+    {% else %}This account is fully settled.{% endif %}
+  </p>
+
+  {% if aging and aging.outstanding %}
+  <div class="panel-head"><h3>Age of Outstanding Amount</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>0-30 days</th><th>31-60 days</th><th>61-90 days</th><th>Over 90 days</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>{{ "%.2f"|format(aging.buckets["0-30"]) }}</td>
+        <td>{{ "%.2f"|format(aging.buckets["31-60"]) }}</td>
+        <td>{{ "%.2f"|format(aging.buckets["61-90"]) }}</td>
+        <td>{{ "%.2f"|format(aging.buckets["90+"]) }}</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  {% if aging.oldest_days is not none %}
+  <p class="hint">Oldest unpaid amount dates from {{ aging.oldest_date.strftime("%d %b %Y") }} ({{ aging.oldest_days }} days ago).</p>
+  {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

@@ -31,7 +31,7 @@
 <div class="panel">
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Name</th><th>Type</th><th>Phone</th><th>Balance (Rs)</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Type</th><th>Phone</th><th>Balance (Rs)</th><th>Oldest Unpaid</th><th></th></tr></thead>
     <tbody>
       {% for r in rows %}
       <tr class="{{ 'row-low' if r.balance != 0 else '' }}">
@@ -40,22 +40,61 @@
         <td>{{ r.obj.phone or "-" if r.kind == "account" else "-" }}</td>
         {% if r.kind == "bank" %}
         <td>{{ "%.2f"|format(r.balance) }}</td>
+        <td>-</td>
         <td><a href="{{ url_for('bank_account_detail', bank_account_id=r.obj.id) }}">View history</a></td>
         {% elif r.kind == "cash" %}
         <td>{{ "%.2f"|format(r.balance) }}</td>
+        <td>-</td>
         <td><a href="{{ url_for('cash_account_detail') }}">View history</a></td>
         {% else %}
         <td>{{ "%.2f"|format(r.balance) }} <span class="hint-sm">{{ "owed to you" if r.balance > 0 else ("you owe" if r.balance < 0 else "") }}</span></td>
-        <td><a href="{{ url_for('account_detail', account_id=r.obj.id) }}">View history</a></td>
+        <td>
+          {% if r.aging and r.aging.oldest_days is not none %}
+            <span class="badge {{ 'badge-low' if r.aging.oldest_days > 60 else '' }}">{{ r.aging.oldest_days }} days</span>
+          {% else %}-{% endif %}
+        </td>
+        <td>
+          <a href="{{ url_for('account_detail', account_id=r.obj.id) }}">View history</a>
+          &middot; <a href="{{ url_for('account_statement', account_id=r.obj.id) }}">Statement</a>
+        </td>
         {% endif %}
       </tr>
       {% else %}
-      <tr><td colspan="5">No accounts match this filter.</td></tr>
+      <tr><td colspan="6">No accounts match this filter.</td></tr>
       {% endfor %}
     </tbody>
   </table>
   </div>
 </div>
+
+{% if aging_total %}
+<div class="panel">
+  <div class="panel-head"><h3>How Old Is the Money Owed to You</h3></div>
+  <p class="hint">Across every account that owes you. Payments are applied against the oldest unpaid entries first, so what's left in the older buckets is genuinely stale credit worth chasing.</p>
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="label">0-30 days</div>
+      <div class="value">Rs {{ "%.2f"|format(aging_totals["0-30"]) }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">31-60 days</div>
+      <div class="value">Rs {{ "%.2f"|format(aging_totals["31-60"]) }}</div>
+    </div>
+    <div class="stat-card {{ 'accent-red' if aging_totals['61-90'] else '' }}">
+      <div class="label">61-90 days</div>
+      <div class="value">Rs {{ "%.2f"|format(aging_totals["61-90"]) }}</div>
+    </div>
+    <div class="stat-card {{ 'accent-red' if aging_totals['90+'] else '' }}">
+      <div class="label">Over 90 days</div>
+      <div class="value">Rs {{ "%.2f"|format(aging_totals["90+"]) }}</div>
+    </div>
+    <div class="stat-card accent-brand">
+      <div class="label">Total Owed To You</div>
+      <div class="value">Rs {{ "%.2f"|format(aging_total) }}</div>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 {% if current_user.is_owner %}
 <div class="panel">
@@ -63,7 +102,7 @@
   <p class="hint">All-time expense records - not tied to any account, but editable here since there's nowhere else to see them all at once.</p>
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Paid via</th><th>Amount (Rs)</th><th></th></tr></thead>
+    <thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Paid via</th><th>Amount (Rs)</th><th>Recorded by</th><th></th></tr></thead>
     <tbody>
       {% for e in expenses %}
       <tr>
@@ -72,10 +111,11 @@
         <td>{{ e.description or "-" }}</td>
         <td>{{ "Via " + e.bank_account.name if e.method == "bank" else "Cash" }}</td>
         <td>{{ "%.2f"|format(e.amount) }}</td>
+        <td>{{ e.user.label if e.user else "-" }}</td>
         <td><a href="#" class="edit-toggle">Edit</a></td>
       </tr>
       <tr class="edit-row" style="display:none;">
-        <td colspan="6">
+        <td colspan="7">
           <form method="post" action="{{ url_for('account_entry_expense_edit', entry_id=e.id) }}" class="form-grid">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="next" value="{{ url_for('accounts', kind=kind, type=type_filter) }}">
@@ -104,7 +144,7 @@
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="6">No expenses logged yet.</td></tr>
+      <tr><td colspan="7">No expenses logged yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>

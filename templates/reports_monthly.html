@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Petrol Khata - Monthly Report{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Monthly Report</h1>
+    <div class="subtitle">{{ month_label }} &middot; {{ start.strftime("%d %b") }} to {{ end.strftime("%d %b %Y") }}</div>
+  </div>
+  <form method="get" class="date-picker-form">
+    <a href="{{ url_for('reports_monthly', month=prev_month) }}" class="btn btn-ghost btn-sm">&larr; Prev</a>
+    {% if next_month %}
+    <a href="{{ url_for('reports_monthly', month=next_month) }}" class="btn btn-ghost btn-sm">Next &rarr;</a>
+    {% endif %}
+    <label class="date-picker-label">Month
+      <input type="month" name="month" value="{{ start.strftime('%Y-%m') }}" onchange="this.form.submit()">
+    </label>
+    <button type="button" class="btn btn-sm" onclick="window.print()">Print</button>
+  </form>
+</div>
+
+<div class="stat-row">
+  <div class="stat-card accent-brand">
+    <div class="label">Revenue</div>
+    <div class="value">Rs {{ "%.2f"|format(revenue) }}</div>
+    <div class="sub">{{ "%.2f"|format(liters_sold) }} L sold</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Cost of Fuel Sold</div>
+    <div class="value">Rs {{ "%.2f"|format(cogs) }}</div>
+    <div class="sub">Liters sold &times; avg purchase cost</div>
+  </div>
+  <div class="stat-card accent-green">
+    <div class="label">Gross Margin</div>
+    <div class="value">Rs {{ "%.2f"|format(gross_margin) }}</div>
+    <div class="sub">{{ "%.1f"|format(gross_margin / revenue * 100 if revenue else 0) }}% of revenue</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Expenses</div>
+    <div class="value">Rs {{ "%.2f"|format(expenses_total) }}</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Salaries</div>
+    <div class="value">Rs {{ "%.2f"|format(salaries_total) }}</div>
+    <div class="sub">Full salary earned, before deductions</div>
+  </div>
+  <div class="stat-card {{ 'accent-green' if net_profit >= 0 else 'accent-red' }}">
+    <div class="label">Net Profit</div>
+    <div class="value">Rs {{ "%.2f"|format(net_profit) }}</div>
+    <div class="sub">Gross margin &minus; expenses &minus; salaries</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Margin by Fuel Type</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Fuel</th><th>Liters Sold</th><th>Revenue (Rs)</th><th>Avg Cost / L</th><th>Cost (Rs)</th><th>Margin (Rs)</th><th>Margin / L</th></tr></thead>
+    <tbody>
+      {% for r in cogs_detail %}
+      <tr>
+        <td>{{ r.fuel }}</td>
+        <td>{{ "%.2f"|format(r.liters) }}</td>
+        <td>{{ "%.2f"|format(r.revenue) }}</td>
+        <td>{{ "%.4f"|format(r.unit_cost) }}</td>
+        <td>{{ "%.2f"|format(r.cost) }}</td>
+        <td>{{ "%.2f"|format(r.margin) }}</td>
+        <td>{{ "%.2f"|format(r.margin / r.liters if r.liters else 0) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7">No sales in this month.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="hint">Cost per liter is the weighted average of every purchase of that fuel up to the end of this month - a stable, explainable approximation rather than strict per-delivery (FIFO) lot tracking.</p>
+</div>
+
+<div class="two-col">
+  <div class="panel">
+    <div class="panel-head"><h3>Expenses by Category</h3></div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Category</th><th>Amount (Rs)</th></tr></thead>
+      <tbody>
+        {% for category, amount in expenses_by_category %}
+        <tr><td>{{ category }}</td><td>{{ "%.2f"|format(amount) }}</td></tr>
+        {% else %}
+        <tr><td colspan="2">No expenses this month.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Credit &amp; Stock Movement</h3></div>
+    <div class="table-wrap">
+    <table class="table">
+      <tbody>
+        <tr><td>Credit given to customers</td><td>Rs {{ "%.2f"|format(credit_given) }}</td></tr>
+        <tr><td>Payments received</td><td>Rs {{ "%.2f"|format(receipts_total) }}</td></tr>
+        <tr><td>Fuel purchased</td><td>{{ "%.2f"|format(purchases_liters) }} L</td></tr>
+        <tr><td>Spent on fuel purchases</td><td>Rs {{ "%.2f"|format(purchases_cost) }}</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="hint">Fuel purchased is what came in this month; Cost of Fuel Sold above is what went out. They differ by whatever is still sitting in the tanks.</p>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Cash Variance by Attendant</h3></div>
+  <p class="hint">Across every reconciled shift this month. A repeated shortfall is worth investigating; an occasional small one either way is normal.</p>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Attendant</th><th>Shifts Reconciled</th><th>Shifts Short</th><th>Net Variance (Rs)</th></tr></thead>
+    <tbody>
+      {% for r in attendant_variances %}
+      <tr class="{{ 'row-low' if r.total_variance < -0.01 else '' }}">
+        <td>{% if r.account %}<a href="{{ url_for('account_detail', account_id=r.account.id) }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</td>
+        <td>{{ r.shifts }}</td>
+        <td>{{ r.shortfalls }}</td>
+        <td>{{ "+" if r.total_variance > 0 }}{{ "%.2f"|format(r.total_variance) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4">No shifts reconciled this month - record a cash handover on the Ledger to start tracking this.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endblock %}

@@ -27,19 +27,28 @@ import charts
 from extensions import db, login_manager
 from ledger_logic import (
     account_ledger_events,
+    active_shifts,
+    attendant_variance_summary,
     bank_account_ledger_events,
     book_stock,
     cash_account_balance,
     cash_account_ledger_events,
+    cogs_for_period,
+    credit_aging,
+    default_shift,
     fuel_sales_for_date,
+    handover_rows_for_date,
     latest_reset_for,
+    liters_from_dip_cm,
     nearest_earlier_reading,
     next_sale_on_or_after,
     previous_reading_for,
+    previous_slot,
     price_on_date,
     record_fuel_price,
     sales_breakdown_for_date,
     stock_series,
+    weighted_avg_cost,
 )
 from models import (
     Account,
@@ -47,6 +56,7 @@ from models import (
     BankSale,
     CashAccount,
     CashDeposit,
+    CashHandover,
     CreditGiven,
     Dispenser,
     EmployeeLoan,
@@ -56,11 +66,14 @@ from models import (
     Nozzle,
     NozzleReset,
     Receipt,
+    SalaryPayment,
     Sale,
+    Shift,
     StockPurchase,
     SupplierPayment,
     Tank,
     TankDip,
+    TankDipChart,
     User,
 )
 
@@ -160,7 +173,7 @@ def would_overdraw_cash(reduction, restoration=0):
 
 @app.before_request
 def enforce_setup_flow():
-    if request.endpoint in (None, "static", "login", "logout"):
+    if request.endpoint in (None, "static", "login", "logout", "change_password"):
         return
     if not current_user.is_authenticated:
         return
@@ -192,11 +205,40 @@ def login():
         password = request.form.get("password", "")
         user = User.query.filter_by(username=username).first()
         if user and user.check_password(password):
+            if not user.is_active_user:
+                flash("That account has been deactivated. Ask the owner to re-enable it.", "error")
+                return render_template("login.html")
             login_user(user)
             return redirect(url_for("ledger"))
         flash("Incorrect username or password.", "error")
 
     return render_template("login.html")
+
+
+@app.route("/change-password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    """Self-service, available to owner and staff alike - previously there
+    was no way to change a password at all, which left the seeded
+    owner/staff defaults in place on a publicly reachable deployment."""
+    if request.method == "POST":
+        current = request.form.get("current_password", "")
+        new = request.form.get("new_password", "")
+        confirm = request.form.get("confirm_password", "")
+
+        if not current_user.check_password(current):
+            flash("Your current password is incorrect.", "error")
+        elif len(new) < 6:
+            flash("New password must be at least 6 characters.", "error")
+        elif new != confirm:
+            flash("The two new passwords don't match.", "error")
+        else:
+            current_user.set_password(new)
+            db.session.commit()
+            flash("Password changed.", "success")
+            return redirect(url_for("ledger"))
+
+    return render_template("change_password.html")
 
 
 @app.route("/logout")
@@ -389,6 +431,11 @@ def settings():
     dispensers = Dispenser.query.order_by(Dispenser.number).all()
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
     cash_account = get_cash_account()
+    users = User.query.order_by(User.role, User.username).all()
+    shifts = Shift.query.order_by(Shift.sort_order, Shift.id).all()
+    dip_charts = {
+        t.id: sorted(t.dip_chart_rows, key=lambda r: r.depth_cm) for t in tanks
+    }
     return render_template(
         "settings.html",
         tanks=tanks,
@@ -397,6 +444,9 @@ def settings():
         bank_accounts=bank_accounts,
         cash_account=cash_account,
         cash_balance=cash_account_balance(cash_account),
+        users=users,
+        shifts=shifts,
+        dip_charts=dip_charts,
         today=date.today(),
     )
 
@@ -704,6 +754,190 @@ def settings_add_bank_account():
     return redirect(url_for("settings"))
 
 
+@app.route("/settings/add-user", methods=["POST"])
+@login_required
+@owner_required
+def settings_add_user():
+    username = request.form.get("username", "").strip()
+    display_name = request.form.get("display_name", "").strip()
+    password = request.form.get("password", "")
+    role = request.form.get("role", "")
+
+    if not username:
+        flash("Please enter a username.", "error")
+    elif User.query.filter(func.lower(User.username) == username.lower()).first():
+        flash(f'A user named "{username}" already exists.', "error")
+    elif role not in ("owner", "staff"):
+        flash("Please choose a role.", "error")
+    elif len(password) < 6:
+        flash("Password must be at least 6 characters.", "error")
+    else:
+        user = User(username=username, display_name=display_name or None, role=role)
+        user.set_password(password)
+        db.session.add(user)
+        db.session.commit()
+        flash(f'Added {role} "{username}".', "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/users/<int:user_id>/toggle", methods=["POST"])
+@login_required
+@owner_required
+def settings_toggle_user(user_id):
+    """Deactivate rather than delete - see the User docstring: entry
+    history references user_id, so a user who has recorded anything has to
+    stay resolvable. Guards against locking yourself out or removing the
+    last active owner."""
+    user = db.session.get(User, user_id) or abort(404)
+    active_owners = User.query.filter_by(role="owner", is_active_user=True).count()
+
+    if user.id == current_user.id:
+        flash("You can't deactivate your own account.", "error")
+    elif user.is_active_user and user.is_owner and active_owners <= 1:
+        flash("There has to be at least one active owner.", "error")
+    else:
+        user.is_active_user = not user.is_active_user
+        db.session.commit()
+        state = "reactivated" if user.is_active_user else "deactivated"
+        flash(f'User "{user.username}" {state}.', "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/users/<int:user_id>/reset-password", methods=["POST"])
+@login_required
+@owner_required
+def settings_reset_user_password(user_id):
+    user = db.session.get(User, user_id) or abort(404)
+    password = request.form.get("password", "")
+
+    if len(password) < 6:
+        flash("Password must be at least 6 characters.", "error")
+    else:
+        user.set_password(password)
+        db.session.commit()
+        flash(f'Password reset for "{user.username}".', "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/add-shift", methods=["POST"])
+@login_required
+@owner_required
+def settings_add_shift():
+    name = request.form.get("name", "").strip()
+    sort_order = request.form.get("sort_order", type=int)
+
+    if not name:
+        flash("Please enter a shift name.", "error")
+    elif Shift.query.filter(func.lower(Shift.name) == name.lower()).first():
+        flash(f'A shift named "{name}" already exists.', "error")
+    else:
+        if sort_order is None:
+            sort_order = (db.session.query(func.coalesce(func.max(Shift.sort_order), -1)).scalar()) + 1
+        db.session.add(Shift(name=name, sort_order=sort_order))
+        db.session.commit()
+        flash(f'Added shift "{name}".', "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/shifts/<int:shift_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def settings_edit_shift(shift_id):
+    shift = db.session.get(Shift, shift_id) or abort(404)
+    name = request.form.get("name", "").strip()
+    sort_order = request.form.get("sort_order", type=int)
+
+    clash = Shift.query.filter(func.lower(Shift.name) == name.lower(), Shift.id != shift.id).first()
+    if not name:
+        flash("Please enter a shift name.", "error")
+    elif clash:
+        flash(f'A shift named "{name}" already exists.', "error")
+    else:
+        shift.name = name
+        if sort_order is not None:
+            shift.sort_order = sort_order
+        db.session.commit()
+        flash("Shift updated.", "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/shifts/<int:shift_id>/toggle", methods=["POST"])
+@login_required
+@owner_required
+def settings_toggle_shift(shift_id):
+    """Deactivating hides a shift from new entries without disturbing rows
+    already recorded against it. At least one active shift must remain,
+    since every reading/credit/bank-sale needs one."""
+    shift = db.session.get(Shift, shift_id) or abort(404)
+    active_count = Shift.query.filter_by(is_active=True).count()
+
+    if shift.is_active and active_count <= 1:
+        flash("There has to be at least one active shift.", "error")
+    else:
+        shift.is_active = not shift.is_active
+        db.session.commit()
+        state = "reactivated" if shift.is_active else "deactivated"
+        flash(f'Shift "{shift.name}" {state}.', "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/dip-chart/<int:tank_id>", methods=["POST"])
+@login_required
+@owner_required
+def settings_dip_chart(tank_id):
+    """Replace a tank's calibration table wholesale from a pasted block of
+    "depth_cm,liters" lines - that's how these charts arrive (a printed
+    sheet from the tank maker), and editing 100+ rows individually would
+    be unusable."""
+    tank = db.session.get(Tank, tank_id) or abort(404)
+    raw = request.form.get("chart", "")
+    rows = []
+    errors = []
+
+    for lineno, line in enumerate(raw.splitlines(), start=1):
+        line = line.strip().replace("\t", ",")
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split(",") if p.strip()]
+        if len(parts) < 2:
+            errors.append(f"Line {lineno}: expected \"depth,liters\".")
+            continue
+        try:
+            depth, liters = float(parts[0]), float(parts[1])
+        except ValueError:
+            errors.append(f"Line {lineno}: not valid numbers.")
+            continue
+        if depth < 0 or liters < 0:
+            errors.append(f"Line {lineno}: values can't be negative.")
+            continue
+        rows.append((depth, liters))
+
+    seen = {}
+    for depth, liters in rows:
+        seen[depth] = liters
+
+    if errors:
+        for e in errors[:5]:
+            flash(e, "error")
+    else:
+        TankDipChart.query.filter_by(tank_id=tank.id).delete()
+        for depth in sorted(seen):
+            db.session.add(TankDipChart(tank_id=tank.id, depth_cm=depth, liters=seen[depth]))
+        db.session.commit()
+        if seen:
+            flash(f"Saved a {len(seen)}-point dip chart for {tank.label}.", "success")
+        else:
+            flash(f"Cleared the dip chart for {tank.label}.", "success")
+
+    return redirect(url_for("settings"))
+
+
 @app.route("/settings/edit-cash-account", methods=["POST"])
 @login_required
 @owner_required
@@ -740,6 +974,16 @@ def get_feed_for_date(entry_date, full_visibility):
         events.append({"kind": "bank_sale", "sort": bs.recorded_at, "obj": bs})
     for el in EmployeeLoan.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "employee_loan", "sort": el.recorded_at, "obj": el})
+    for h in CashHandover.query.filter_by(entry_date=entry_date).all():
+        expected = sales_breakdown_for_date(entry_date, shift_id=h.shift_id)["cash"]
+        events.append(
+            {
+                "kind": "handover",
+                "sort": h.recorded_at,
+                "obj": h,
+                "variance": round(h.declared_amount - expected, 2),
+            }
+        )
 
     if full_visibility:
         for e in Expense.query.filter_by(entry_date=entry_date).all():
@@ -750,6 +994,8 @@ def get_feed_for_date(entry_date, full_visibility):
             events.append({"kind": "supplier_payment", "sort": sp.recorded_at, "obj": sp})
         for cd in CashDeposit.query.filter_by(entry_date=entry_date).all():
             events.append({"kind": "cash_deposit", "sort": cd.recorded_at, "obj": cd})
+        for sal in SalaryPayment.query.filter_by(entry_date=entry_date).all():
+            events.append({"kind": "salary", "sort": sal.recorded_at, "obj": sal})
 
     events.sort(key=lambda e: e["sort"], reverse=True)
     return events
@@ -759,13 +1005,22 @@ def get_feed_for_date(entry_date, full_visibility):
 @login_required
 def ledger():
     selected_date = parse_date_param(request.args.get("date"))
+    shifts = active_shifts()
+    # Which shift's readings this page is editing. With a single shift
+    # configured there's nothing to choose and the selector stays hidden.
+    requested_shift_id = request.args.get("shift", type=int)
+    selected_shift = next((s for s in shifts if s.id == requested_shift_id), None) or (
+        shifts[0] if shifts else None
+    )
 
     dispensers = Dispenser.query.order_by(Dispenser.number).all()
     nozzle_rows = []
     for d in dispensers:
         for n in d.nozzles:
-            existing = Sale.query.filter_by(nozzle_id=n.id, entry_date=selected_date).first()
-            prev_value, prev_auto = previous_reading_for(n, selected_date)
+            existing = Sale.query.filter_by(
+                nozzle_id=n.id, entry_date=selected_date, shift_id=selected_shift.id
+            ).first()
+            prev_value, prev_auto = previous_reading_for(n, selected_date, selected_shift)
             if not prev_auto and existing:
                 prev_value = existing.previous_reading
             nozzle_rows.append(
@@ -793,9 +1048,22 @@ def ledger():
                 "tank": t,
                 "book_stock": stock,
                 "existing_dip": existing_dip.dip_liters if existing_dip else None,
+                "existing_dip_cm": existing_dip.dip_cm if existing_dip else None,
                 "is_low": stock <= t.low_stock_threshold,
+                # A tank with a calibration chart collects a depth reading
+                # (what a dip stick actually measures) and converts; one
+                # without keeps taking liters directly. The chart is handed
+                # to the page as [cm, liters] pairs so the live variance
+                # preview can interpolate the same way the server does.
+                "has_chart": bool(t.dip_chart_rows),
+                "chart": [
+                    [r.depth_cm, r.liters]
+                    for r in sorted(t.dip_chart_rows, key=lambda r: r.depth_cm)
+                ],
             }
         )
+
+    handover_rows = handover_rows_for_date(selected_date)
 
     fuel_types = FuelType.query.order_by(FuelType.name).all()
     # Price shown/used for selected_date, not necessarily today's current
@@ -843,9 +1111,19 @@ def ledger():
             .filter(SupplierPayment.entry_date == selected_date)
             .scalar()
         )
+        salaries_total = (
+            db.session.query(
+                func.coalesce(func.sum(SalaryPayment.gross_amount - SalaryPayment.deduction_amount), 0)
+            )
+            .filter(SalaryPayment.entry_date == selected_date)
+            .scalar()
+        )
         summary = dict(
             debit_total=total_sales + receipts_total - credit_total,
-            credit_total=expenses_total + cash_purchases_total + supplier_payments_total,
+            credit_total=expenses_total
+            + cash_purchases_total
+            + supplier_payments_total
+            + salaries_total,
         )
         cash_balance = cash_account_balance(get_cash_account())
 
@@ -853,8 +1131,11 @@ def ledger():
         "ledger.html",
         selected_date=selected_date,
         today=date.today(),
+        shifts=shifts,
+        selected_shift=selected_shift,
         nozzle_rows=nozzle_rows,
         tank_rows=tank_rows,
+        handover_rows=handover_rows,
         fuel_types=fuel_types,
         fuel_prices_by_id=fuel_prices_by_id,
         accounts=accounts,
@@ -986,6 +1267,7 @@ def resolve_payment_method(form, field="paid_via", new_field="new_bank_account_n
 @login_required
 def ledger_readings():
     entry_date = parse_date_param(request.form.get("entry_date"))
+    shift = resolve_shift(request.form)
     nozzles = Nozzle.query.all()
     saved = 0
     errors = []
@@ -1000,7 +1282,7 @@ def ledger_readings():
             errors.append(f"{nozzle.label}: not a valid number.")
             continue
 
-        auto_previous, is_auto = previous_reading_for(nozzle, entry_date)
+        auto_previous, is_auto = previous_reading_for(nozzle, entry_date, shift)
         backfill_prior = None
 
         if is_auto:
@@ -1009,7 +1291,7 @@ def ledger_readings():
             raw_previous = request.form.get(f"previous_{nozzle.id}", "").strip()
             if not raw_previous:
                 errors.append(
-                    f"{nozzle.label}: there's no entry for the day before {entry_date}, so "
+                    f"{nozzle.label}: there's no entry for the slot before this one, so "
                     f"please enter both the previous and current reading."
                 )
                 continue
@@ -1019,7 +1301,7 @@ def ledger_readings():
                 errors.append(f"{nozzle.label}: previous reading is not a valid number.")
                 continue
 
-            floor = nearest_earlier_reading(nozzle, entry_date)
+            floor = nearest_earlier_reading(nozzle, entry_date, shift)
             if previous < floor:
                 errors.append(
                     f"{nozzle.label}: previous reading ({previous:g}) can't be lower than an "
@@ -1027,19 +1309,22 @@ def ledger_readings():
                 )
                 continue
 
-            # Close the gap: the prior calendar day gets a Sale of its own,
-            # using the previous reading just typed in as ITS current
-            # reading - but only when that day is still empty (never
-            # overwrite a real entry) and only when ITS own previous
-            # reading can be determined automatically. A deeper multi-day
-            # gap is left for the user to fill in when they visit those
-            # dates directly, rather than guessing on their behalf.
-            prior_date = entry_date - timedelta(days=1)
-            if not Sale.query.filter_by(nozzle_id=nozzle.id, entry_date=prior_date).first():
-                prior_previous, prior_is_auto = previous_reading_for(nozzle, prior_date)
+            # Close the gap: the immediately preceding slot gets a Sale of
+            # its own, using the previous reading just typed in as ITS
+            # current reading - but only when that slot is still empty
+            # (never overwrite a real entry) and only when ITS own previous
+            # reading can be determined automatically. A deeper gap is left
+            # for the user to fill in when they visit those slots directly,
+            # rather than guessing on their behalf.
+            prior_date, prior_shift = previous_slot(entry_date, shift)
+            if prior_shift is not None and not Sale.query.filter_by(
+                nozzle_id=nozzle.id, entry_date=prior_date, shift_id=prior_shift.id
+            ).first():
+                prior_previous, prior_is_auto = previous_reading_for(nozzle, prior_date, prior_shift)
                 if prior_is_auto:
                     backfill_prior = {
                         "entry_date": prior_date,
+                        "shift_id": prior_shift.id,
                         "previous_reading": prior_previous,
                         "current_reading": previous,
                     }
@@ -1051,7 +1336,7 @@ def ledger_readings():
             )
             continue
 
-        next_sale = next_sale_on_or_after(nozzle.id, entry_date)
+        next_sale = next_sale_on_or_after(nozzle.id, entry_date, shift)
         if next_sale and current_reading > next_sale.current_reading:
             errors.append(
                 f"{nozzle.label}: reading ({current_reading:g}) is more than a later reading "
@@ -1060,7 +1345,9 @@ def ledger_readings():
             continue
 
         liters = round(current_reading - previous, 2)
-        existing = Sale.query.filter_by(nozzle_id=nozzle.id, entry_date=entry_date).first()
+        existing = Sale.query.filter_by(
+            nozzle_id=nozzle.id, entry_date=entry_date, shift_id=shift.id
+        ).first()
         if liters == 0 and not existing and not backfill_prior:
             continue
 
@@ -1078,6 +1365,7 @@ def ledger_readings():
             db.session.add(
                 Sale(
                     nozzle_id=nozzle.id,
+                    shift_id=backfill_prior["shift_id"],
                     entry_date=backfill_prior["entry_date"],
                     previous_reading=backfill_prior["previous_reading"],
                     current_reading=backfill_prior["current_reading"],
@@ -1099,6 +1387,7 @@ def ledger_readings():
             db.session.add(
                 Sale(
                     nozzle_id=nozzle.id,
+                    shift_id=shift.id,
                     entry_date=entry_date,
                     previous_reading=previous,
                     current_reading=current_reading,
@@ -1113,10 +1402,10 @@ def ledger_readings():
     if saved:
         try:
             db.session.commit()
-            flash(f"Saved {saved} nozzle reading(s) for {entry_date}.", "success")
+            flash(f"Saved {saved} nozzle reading(s) for {entry_date} ({shift.name}).", "success")
         except IntegrityError:
-            # Two near-simultaneous submits for the same nozzle/date (a
-            # double-tap, a network retry) - the DB's own uniqueness
+            # Two near-simultaneous submits for the same nozzle/date/shift
+            # (a double-tap, a network retry) - the DB's own uniqueness
             # constraint caught it. Fail safely instead of creating a
             # duplicate Sale that would silently double-count the day.
             db.session.rollback()
@@ -1131,7 +1420,16 @@ def ledger_readings():
     if not saved and not errors:
         flash("No new readings entered.", "error")
 
-    return redirect(url_for("ledger", date=entry_date))
+    return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+
+
+def resolve_shift(form, field="shift_id"):
+    """The shift an entry belongs to. Falls back to the default (first
+    active) shift so a single-shift pump never has to send this field at
+    all, and so an entry can't end up shiftless."""
+    shift_id = form.get(field, type=int)
+    shift = db.session.get(Shift, shift_id) if shift_id else None
+    return shift or default_shift()
 
 
 @app.route("/ledger/dip", methods=["POST"])
@@ -1142,26 +1440,46 @@ def ledger_dip():
     saved = 0
 
     for tank in tanks:
-        raw = request.form.get(f"dip_{tank.id}", "").strip()
+        # A tank with a calibration chart is measured in cm (what a dip
+        # stick actually reads) and converted; one without keeps taking
+        # liters directly.
+        has_chart = bool(tank.dip_chart_rows)
+        field = f"dipcm_{tank.id}" if has_chart else f"dip_{tank.id}"
+        raw = request.form.get(field, "").strip()
         if not raw:
             continue
         try:
-            dip_value = float(raw)
+            entered = float(raw)
         except ValueError:
             flash(f"Tank {tank.number}: not a valid number.", "error")
             continue
-        if dip_value < 0:
+        if entered < 0:
             flash(f"Tank {tank.number}: dip must be zero or more.", "error")
             continue
 
+        if has_chart:
+            dip_cm = entered
+            dip_value = liters_from_dip_cm(tank, entered)
+            if dip_value is None:
+                flash(f"Tank {tank.number}: no dip chart found.", "error")
+                continue
+        else:
+            dip_cm = None
+            dip_value = entered
+
         existing = TankDip.query.filter_by(tank_id=tank.id, entry_date=entry_date).first()
         if existing:
+            existing.dip_cm = dip_cm
             existing.dip_liters = dip_value
             existing.user_id = current_user.id
         else:
             db.session.add(
                 TankDip(
-                    tank_id=tank.id, entry_date=entry_date, dip_liters=dip_value, user_id=current_user.id
+                    tank_id=tank.id,
+                    entry_date=entry_date,
+                    dip_cm=dip_cm,
+                    dip_liters=dip_value,
+                    user_id=current_user.id,
                 )
             )
         saved += 1
@@ -1179,6 +1497,175 @@ def ledger_dip():
             )
     else:
         flash("No dip readings entered.", "error")
+
+    return redirect(url_for("ledger", date=entry_date))
+
+
+@app.route("/ledger/handover", methods=["POST"])
+@login_required
+def ledger_handover():
+    """Record what was physically counted at the end of a shift. Purely a
+    reconciliation record - see CashHandover in models.py for why it
+    deliberately doesn't move any money itself."""
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    shift = resolve_shift(request.form)
+    declared = request.form.get("declared_amount", type=float)
+    attendant_id = request.form.get("attendant_id", type=int)
+    note = request.form.get("note", "").strip()
+    attendant = db.session.get(Account, attendant_id) if attendant_id else None
+
+    if declared is None or declared < 0:
+        flash("Please enter the cash counted (zero or more).", "error")
+    else:
+        existing = CashHandover.query.filter_by(entry_date=entry_date, shift_id=shift.id).first()
+        if existing:
+            existing.declared_amount = declared
+            existing.attendant_id = attendant.id if attendant else None
+            existing.note = note or None
+            existing.user_id = current_user.id
+        else:
+            db.session.add(
+                CashHandover(
+                    entry_date=entry_date,
+                    shift_id=shift.id,
+                    attendant_id=attendant.id if attendant else None,
+                    declared_amount=declared,
+                    note=note or None,
+                    user_id=current_user.id,
+                )
+            )
+        try:
+            db.session.commit()
+            expected = sales_breakdown_for_date(entry_date, shift_id=shift.id)["cash"]
+            variance = round(declared - expected, 2)
+            if abs(variance) < 0.01:
+                flash(f"{shift.name}: cash counted matches the ledger exactly.", "success")
+            elif variance < 0:
+                flash(
+                    f"{shift.name}: short by Rs {abs(variance):,.2f} "
+                    f"(expected Rs {expected:,.2f}, counted Rs {declared:,.2f}).",
+                    "error",
+                )
+            else:
+                flash(
+                    f"{shift.name}: over by Rs {variance:,.2f} "
+                    f"(expected Rs {expected:,.2f}, counted Rs {declared:,.2f}).",
+                    "error",
+                )
+        except IntegrityError:
+            db.session.rollback()
+            flash("That shift was just reconciled by someone else - please reload and check.", "error")
+
+    return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+
+
+@app.route("/ledger/handover/<int:handover_id>/write-off", methods=["POST"])
+@login_required
+@owner_required
+def ledger_handover_write_off(handover_id):
+    """Turn a confirmed shortfall into a real Expense, which is what
+    actually moves cash-in-hand down to match what's physically there.
+    Kept as a separate deliberate step rather than automatic, because
+    absorbing a shortfall and recovering it from the attendant are
+    different decisions with different bookkeeping."""
+    handover = db.session.get(CashHandover, handover_id) or abort(404)
+    expected = sales_breakdown_for_date(handover.entry_date, shift_id=handover.shift_id)["cash"]
+    shortfall = round(expected - handover.declared_amount, 2)
+
+    if shortfall <= 0.01:
+        flash("That shift isn't short, so there's nothing to write off.", "error")
+    elif would_overdraw_cash(shortfall):
+        flash(
+            f"Not enough cash in hand to write that off (available: "
+            f"Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
+    else:
+        who = f" ({handover.attendant.name})" if handover.attendant else ""
+        db.session.add(
+            Expense(
+                entry_date=handover.entry_date,
+                category="Cash Shortfall",
+                description=f"{handover.shift.name} shift shortfall{who}",
+                amount=shortfall,
+                method="cash",
+                user_id=current_user.id,
+            )
+        )
+        db.session.commit()
+        flash(f"Recorded Rs {shortfall:,.2f} shortfall as a cash expense.", "success")
+
+    return redirect(url_for("ledger", date=handover.entry_date, shift=handover.shift_id))
+
+
+@app.route("/ledger/salary", methods=["POST"])
+@login_required
+@owner_required
+def ledger_salary():
+    """Pay an employee's salary for a period, optionally withholding part of
+    it against an advance they already owe - see SalaryPayment in models.py
+    for how gross/deduction/net split across the books."""
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    employee, error = resolve_employee(request.form)
+    gross = request.form.get("gross_amount", type=float)
+    deduction = request.form.get("deduction_amount", type=float) or 0
+    period_label = request.form.get("period_label", "").strip()
+    note = request.form.get("note", "").strip()
+    method, bank_account, method_error = resolve_payment_method(request.form)
+    net = round((gross or 0) - deduction, 2)
+    outstanding = employee.balance if employee else 0
+
+    if error:
+        db.session.rollback()
+        flash(error, "error")
+    elif not gross or gross <= 0:
+        db.session.rollback()
+        flash("Salary amount must be a positive number.", "error")
+    elif deduction < 0:
+        db.session.rollback()
+        flash("Deduction can't be negative.", "error")
+    elif deduction > gross:
+        db.session.rollback()
+        flash("Deduction can't be more than the salary itself.", "error")
+    elif deduction > outstanding + 0.01:
+        db.session.rollback()
+        flash(
+            f"{employee.name} only owes Rs {max(outstanding, 0):,.2f}, so you can't deduct "
+            f"Rs {deduction:,.2f}.",
+            "error",
+        )
+    elif method_error:
+        db.session.rollback()
+        flash(method_error, "error")
+    elif method == "cash" and would_overdraw_cash(net):
+        db.session.rollback()
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
+    else:
+        db.session.add(
+            SalaryPayment(
+                account_id=employee.id,
+                entry_date=entry_date,
+                period_label=period_label or None,
+                gross_amount=gross,
+                deduction_amount=deduction,
+                method=method,
+                bank_account_id=bank_account.id if bank_account else None,
+                note=note or None,
+                user_id=current_user.id,
+            )
+        )
+        db.session.commit()
+        if deduction:
+            flash(
+                f"Paid {employee.name} Rs {net:,.2f} (Rs {gross:,.2f} salary less "
+                f"Rs {deduction:,.2f} against their advance).",
+                "success",
+            )
+        else:
+            flash(f"Paid {employee.name} Rs {net:,.2f} salary.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -1230,7 +1717,9 @@ def ledger_credit():
     customer, error = resolve_customer(request.form)
     fuel_type_id = request.form.get("fuel_type_id", type=int)
     liters = request.form.get("liters", type=float)
+    vehicle_number = request.form.get("vehicle_number", "").strip()
     note = request.form.get("note", "").strip()
+    shift = resolve_shift(request.form)
 
     fuel = db.session.get(FuelType, fuel_type_id) if fuel_type_id else None
 
@@ -1250,10 +1739,12 @@ def ledger_credit():
             CreditGiven(
                 account_id=customer.id,
                 fuel_type_id=fuel.id,
+                shift_id=shift.id,
                 entry_date=entry_date,
                 liters=liters,
                 price_per_liter=price,
                 amount=amount,
+                vehicle_number=vehicle_number or None,
                 note=note or None,
                 user_id=current_user.id,
             )
@@ -1424,6 +1915,7 @@ def ledger_bank_sale():
     bank_account, error = resolve_bank_account(request.form)
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
+    shift = resolve_shift(request.form)
 
     if error:
         db.session.rollback()
@@ -1442,6 +1934,7 @@ def ledger_bank_sale():
         db.session.add(
             BankSale(
                 bank_account_id=bank_account.id,
+                shift_id=shift.id,
                 entry_date=entry_date,
                 amount=amount,
                 note=note or None,
@@ -1659,7 +2152,17 @@ def accounts():
             # Debitor/creditor is purely a function of the account's current
             # balance sign - not its type label - so an account's
             # classification here can shift over time as its balance shifts.
-            rows.append({"kind": "account", "obj": a, "name": a.name, "balance": a.balance})
+            balance = a.balance
+            aging = credit_aging(a, date.today()) if balance > 0 else None
+            rows.append(
+                {
+                    "kind": "account",
+                    "obj": a,
+                    "name": a.name,
+                    "balance": balance,
+                    "aging": aging,
+                }
+            )
 
     if kind == "all" and type_filter in ("all", "bank"):
         for b in BankAccount.query.all():
@@ -1689,6 +2192,14 @@ def accounts():
     expenses = Expense.query.order_by(Expense.entry_date.desc(), Expense.recorded_at.desc()).all()
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
 
+    # Aging totals across every debitor, so overdue money is visible at a
+    # glance instead of one account at a time.
+    aging_totals = {"0-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
+    for r in rows:
+        if r.get("aging"):
+            for bucket, value in r["aging"]["buckets"].items():
+                aging_totals[bucket] = round(aging_totals[bucket] + value, 2)
+
     return render_template(
         "accounts.html",
         rows=rows,
@@ -1697,6 +2208,8 @@ def accounts():
         today=date.today(),
         expenses=expenses,
         bank_accounts=bank_accounts,
+        aging_totals=aging_totals,
+        aging_total=round(sum(aging_totals.values()), 2),
     )
 
 
@@ -1749,14 +2262,17 @@ def account_detail(account_id):
     fuel_types = FuelType.query.order_by(FuelType.name).all()
     tanks = Tank.query.order_by(Tank.number).all()
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
+    today = date.today()
     return render_template(
         "account_detail.html",
         account=account,
         events=events,
-        today=date.today(),
+        today=today,
+        month_start=today.replace(day=1),
         fuel_types=fuel_types,
         tanks=tanks,
         bank_accounts=bank_accounts,
+        aging=credit_aging(account, today) if account.balance > 0 else None,
     )
 
 
@@ -1840,6 +2356,7 @@ def account_entry_credit_edit(entry_id):
     entry_date = parse_date_param(request.form.get("entry_date"))
     fuel_type_id = request.form.get("fuel_type_id", type=int)
     liters = request.form.get("liters", type=float)
+    vehicle_number = request.form.get("vehicle_number", "").strip()
     note = request.form.get("note", "").strip()
     fuel = db.session.get(FuelType, fuel_type_id) if fuel_type_id else None
 
@@ -1854,6 +2371,7 @@ def account_entry_credit_edit(entry_id):
         entry.liters = liters
         entry.price_per_liter = price
         entry.amount = round(liters * price, 2)
+        entry.vehicle_number = vehicle_number or None
         entry.note = note or None
         db.session.commit()
         flash("Credit entry updated.", "success")
@@ -1981,6 +2499,89 @@ def account_entry_employee_loan_edit(entry_id):
         flash("Loan updated.", "success")
 
     return redirect(url_for("account_detail", account_id=entry.account_id))
+
+
+@app.route("/accounts/entry/salary/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_salary_edit(entry_id):
+    entry = db.session.get(SalaryPayment, entry_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    gross = request.form.get("gross_amount", type=float)
+    deduction = request.form.get("deduction_amount", type=float) or 0
+    period_label = request.form.get("period_label", "").strip()
+    note = request.form.get("note", "").strip()
+    method, bank_account, method_error = resolve_payment_method(request.form)
+    next_url = request.form.get("next") or url_for("account_detail", account_id=entry.account_id)
+
+    old_cash_net = entry.net_paid if entry.method == "cash" else 0
+    new_net = round((gross or 0) - deduction, 2)
+    new_cash_net = new_net if method == "cash" else 0
+    # What this account would owe with THIS entry's deduction backed out,
+    # so the new deduction is checked against the right ceiling.
+    outstanding_without_entry = round(entry.account.balance + entry.deduction_amount, 2)
+
+    if not gross or gross <= 0:
+        flash("Salary amount must be a positive number.", "error")
+    elif deduction < 0:
+        flash("Deduction can't be negative.", "error")
+    elif deduction > gross:
+        flash("Deduction can't be more than the salary itself.", "error")
+    elif deduction > outstanding_without_entry + 0.01:
+        flash(
+            f"{entry.account.name} only owes Rs {max(outstanding_without_entry, 0):,.2f}, so you "
+            f"can't deduct Rs {deduction:,.2f}.",
+            "error",
+        )
+    elif method_error:
+        flash(method_error, "error")
+    elif would_overdraw_cash(new_cash_net, restoration=old_cash_net):
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
+    else:
+        entry.entry_date = entry_date
+        entry.gross_amount = gross
+        entry.deduction_amount = deduction
+        entry.period_label = period_label or None
+        entry.method = method
+        entry.bank_account_id = bank_account.id if bank_account else None
+        entry.note = note or None
+        db.session.commit()
+        flash("Salary payment updated.", "success")
+
+    return redirect(next_url)
+
+
+@app.route("/accounts/<int:account_id>/statement")
+@login_required
+def account_statement(account_id):
+    """A print-friendly statement for a date range - the thing you actually
+    hand or send to a credit customer. Shows the balance carried into the
+    range, every entry inside it, and the closing balance, all derived from
+    the same account_ledger_events() the detail page uses."""
+    account = db.session.get(Account, account_id) or abort(404)
+    today = date.today()
+    from_date = parse_date_param(request.args.get("from"), fallback=today.replace(day=1))
+    to_date = parse_date_param(request.args.get("to"), fallback=today)
+
+    all_events = list(reversed(account_ledger_events(account)))  # oldest first
+    before = [e for e in all_events if e["entry_date"] < from_date]
+    inside = [e for e in all_events if from_date <= e["entry_date"] <= to_date]
+    opening = round(sum(e["delta"] for e in before), 2)
+
+    return render_template(
+        "account_statement.html",
+        account=account,
+        from_date=from_date,
+        to_date=to_date,
+        opening=opening,
+        events=inside,
+        closing=inside[-1]["running_balance"] if inside else opening,
+        aging=credit_aging(account, to_date),
+        today=today,
+    )
 
 
 @app.route("/accounts/bank/<int:bank_account_id>")
@@ -2291,6 +2892,9 @@ def reports():
     supplier_payments = SupplierPayment.query.filter_by(entry_date=selected_date).all()
     total_supplier_payments = sum(p.amount for p in supplier_payments)
 
+    salaries = SalaryPayment.query.filter_by(entry_date=selected_date).all()
+    total_salaries_net = sum(s.net_paid for s in salaries)
+
     tanks = Tank.query.order_by(Tank.number).all()
     tank_rows = []
     for t in tanks:
@@ -2312,6 +2916,7 @@ def reports():
         - total_expenses
         - cash_purchases_total
         - total_supplier_payments
+        - total_salaries_net
     )
     outstanding_credit = sum(b for a in Account.query.all() if (b := a.balance) > 0)
     cash_balance = cash_account_balance(get_cash_account())
@@ -2339,6 +2944,107 @@ def reports():
         outstanding_credit=outstanding_credit,
         cash_balance=cash_balance,
         bank_accounts=bank_accounts,
+        salaries=salaries,
+        total_salaries_net=total_salaries_net,
+        handover_rows=handover_rows_for_date(selected_date),
+    )
+
+
+@app.route("/reports/monthly")
+@login_required
+@owner_required
+def reports_monthly():
+    """Month-end closing statement. Unlike the Daily Report (which is a
+    cash-movement view of one day), this is a period profit view: revenue
+    against the cost of the fuel actually sold (COGS via weighted average
+    purchase cost), then operating costs, then net."""
+    raw_month = request.args.get("month", "")
+    today = date.today()
+    try:
+        year, month = (int(p) for p in raw_month.split("-"))
+        start = date(year, month, 1)
+    except (ValueError, AttributeError):
+        start = today.replace(day=1)
+    end = (start + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+
+    revenue = (
+        db.session.query(func.coalesce(func.sum(Sale.total_amount), 0))
+        .filter(Sale.entry_date >= start, Sale.entry_date <= end)
+        .scalar()
+    )
+    liters_sold = (
+        db.session.query(func.coalesce(func.sum(Sale.liters), 0))
+        .filter(Sale.entry_date >= start, Sale.entry_date <= end)
+        .scalar()
+    )
+    cogs, cogs_detail = cogs_for_period(start, end)
+    expenses_total = (
+        db.session.query(func.coalesce(func.sum(Expense.amount), 0))
+        .filter(Expense.entry_date >= start, Expense.entry_date <= end)
+        .scalar()
+    )
+    salaries_total = (
+        db.session.query(func.coalesce(func.sum(SalaryPayment.gross_amount), 0))
+        .filter(SalaryPayment.entry_date >= start, SalaryPayment.entry_date <= end)
+        .scalar()
+    )
+    expenses_by_category = (
+        db.session.query(Expense.category, func.sum(Expense.amount))
+        .filter(Expense.entry_date >= start, Expense.entry_date <= end)
+        .group_by(Expense.category)
+        .order_by(func.sum(Expense.amount).desc())
+        .all()
+    )
+
+    credit_given = (
+        db.session.query(func.coalesce(func.sum(CreditGiven.amount), 0))
+        .filter(CreditGiven.entry_date >= start, CreditGiven.entry_date <= end)
+        .scalar()
+    )
+    receipts_total = (
+        db.session.query(func.coalesce(func.sum(Receipt.amount), 0))
+        .filter(Receipt.entry_date >= start, Receipt.entry_date <= end)
+        .scalar()
+    )
+    purchases_liters = (
+        db.session.query(func.coalesce(func.sum(StockPurchase.liters), 0))
+        .filter(StockPurchase.entry_date >= start, StockPurchase.entry_date <= end)
+        .scalar()
+    )
+    purchases_cost = (
+        db.session.query(func.coalesce(func.sum(StockPurchase.cost), 0))
+        .filter(StockPurchase.entry_date >= start, StockPurchase.entry_date <= end)
+        .scalar()
+    )
+
+    gross_margin = round(revenue - cogs, 2)
+    net_profit = round(gross_margin - expenses_total - salaries_total, 2)
+
+    # Previous/next month links, capped so you can't page into the future.
+    prev_month = (start - timedelta(days=1)).replace(day=1)
+    next_month = (end + timedelta(days=1))
+    return render_template(
+        "reports_monthly.html",
+        start=start,
+        end=end,
+        month_label=start.strftime("%B %Y"),
+        prev_month=prev_month.strftime("%Y-%m"),
+        next_month=next_month.strftime("%Y-%m") if next_month <= today else None,
+        revenue=revenue,
+        liters_sold=liters_sold,
+        cogs=cogs,
+        cogs_detail=cogs_detail,
+        gross_margin=gross_margin,
+        expenses_total=expenses_total,
+        expenses_by_category=expenses_by_category,
+        salaries_total=salaries_total,
+        net_profit=net_profit,
+        credit_given=credit_given,
+        receipts_total=receipts_total,
+        purchases_liters=purchases_liters,
+        purchases_cost=purchases_cost,
+        attendant_variances=attendant_variance_summary(start, end),
+        today=today,
     )
 
 
@@ -2372,7 +3078,26 @@ def reports_trends():
     payments_by_day = group_sum(Receipt, Receipt.amount)
     expenses_by_day = group_sum(Expense, Expense.amount)
     purchase_liters_by_day = group_sum(StockPurchase, StockPurchase.liters)
-    purchase_cost_by_day = group_sum(StockPurchase, StockPurchase.cost)
+    salaries_by_day = group_sum(SalaryPayment, SalaryPayment.gross_amount)
+
+    # Daily profit values fuel at its weighted-average purchase cost (COGS)
+    # rather than subtracting whatever was bought that day - otherwise a
+    # tanker delivery shows as a huge "loss" on the day it arrives even
+    # though the stock is still in the tank waiting to be sold.
+    unit_costs = {ft.id: weighted_avg_cost(ft, end) for ft in FuelType.query.all()}
+    cogs_rows = (
+        db.session.query(Sale.entry_date, Tank.fuel_type_id, func.sum(Sale.liters))
+        .join(Nozzle, Sale.nozzle_id == Nozzle.id)
+        .join(Tank, Nozzle.tank_id == Tank.id)
+        .filter(Sale.entry_date >= start, Sale.entry_date <= end)
+        .group_by(Sale.entry_date, Tank.fuel_type_id)
+        .all()
+    )
+    cogs_by_day = {}
+    for entry_date_val, fuel_type_id, liters in cogs_rows:
+        cogs_by_day[entry_date_val] = round(
+            cogs_by_day.get(entry_date_val, 0) + (liters or 0) * unit_costs.get(fuel_type_id, 0), 2
+        )
 
     labels = [d.strftime(label_fmt) for d in all_dates]
     cash_series = [round(sales_by_day.get(d, 0) - credit_by_day.get(d, 0), 2) for d in all_dates]
@@ -2380,12 +3105,14 @@ def reports_trends():
     receipts_series = [round(payments_by_day.get(d, 0), 2) for d in all_dates]
     expenses_series = [round(expenses_by_day.get(d, 0), 2) for d in all_dates]
     purchases_series = [round(purchase_liters_by_day.get(d, 0), 2) for d in all_dates]
-    # Simplified cash-basis profit: sales revenue minus what was spent
-    # buying fuel (regardless of whether it's sold yet) minus expenses.
-    # Not adjusted for unsold inventory, so treat it as an estimate rather
-    # than a strict accounting profit/COGS figure.
     profit_series = [
-        round(sales_by_day.get(d, 0) - purchase_cost_by_day.get(d, 0) - expenses_by_day.get(d, 0), 2)
+        round(
+            sales_by_day.get(d, 0)
+            - cogs_by_day.get(d, 0)
+            - expenses_by_day.get(d, 0)
+            - salaries_by_day.get(d, 0),
+            2,
+        )
         for d in all_dates
     ]
 
@@ -2445,7 +3172,9 @@ def reports_trends():
         total_receipts=sum(payments_by_day.values()),
         total_expenses=sum(expenses_by_day.values()),
         total_purchased_liters=sum(purchase_liters_by_day.values()),
-        total_profit=sum(profit_series),
+        total_cogs=round(sum(cogs_by_day.values()), 2),
+        total_salaries=round(sum(salaries_by_day.values()), 2),
+        total_profit=round(sum(profit_series), 2),
     )
 
     return render_template(
@@ -2467,6 +3196,13 @@ def reports_trends():
 
 def ensure_seed_users():
     db.create_all()
+
+    # Every reading/credit/bank-sale row needs a shift, so one always has
+    # to exist. A pump that doesn't split its day just leaves this single
+    # shift in place and never sees a shift selector anywhere.
+    if Shift.query.count() == 0:
+        db.session.add(Shift(name="Full Day", sort_order=0))
+        db.session.commit()
 
     if User.query.count() == 0:
         owner = User(username="owner", role="owner")

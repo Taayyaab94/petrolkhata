@@ -39,15 +39,23 @@
     <div class="label">Fuel Purchased</div>
     <div class="value">{{ "%.2f"|format(totals.total_purchased_liters) }} L</div>
   </div>
-  <div class="stat-card accent-green">
-    <div class="label">Profit (Est.)</div>
+  <div class="stat-card accent-red">
+    <div class="label">Cost of Fuel Sold</div>
+    <div class="value">Rs {{ "%.2f"|format(totals.total_cogs) }}</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Salaries</div>
+    <div class="value">Rs {{ "%.2f"|format(totals.total_salaries) }}</div>
+  </div>
+  <div class="stat-card {{ 'accent-green' if totals.total_profit >= 0 else 'accent-red' }}">
+    <div class="label">Profit</div>
     <div class="value">Rs {{ "%.2f"|format(totals.total_profit) }}</div>
   </div>
 </div>
 
 <div class="panel">
   <div class="panel-head"><h3>Profit Over Time</h3></div>
-  <p class="hint">Sales revenue minus fuel purchase cost minus expenses, cash-basis - an estimate, not adjusted for unsold inventory.</p>
+  <p class="hint">Revenue minus the cost of the fuel actually sold (liters sold &times; weighted average purchase cost) minus expenses and salaries. Costing the fuel sold rather than the fuel bought is what stops a tanker delivery from showing as a loss on the day it arrives. For a full month-end breakdown see the <a href="{{ url_for('reports_monthly') }}">Monthly Report</a>.</p>
   <div class="chart-wrap">{{ profit_chart|safe }}</div>
 </div>
 

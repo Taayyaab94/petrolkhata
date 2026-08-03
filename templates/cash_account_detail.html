@@ -40,7 +40,7 @@
   <table class="table">
     <thead>
       <tr>
-        <th>Date</th><th>Type</th><th>Details</th><th>Amount (Rs)</th><th>Running Balance (Rs)</th>
+        <th>Date</th><th>Type</th><th>Details</th><th>Amount (Rs)</th><th>Running Balance (Rs)</th><th>Recorded by</th>
         {% if current_user.is_owner %}<th></th>{% endif %}
       </tr>
     </thead>
@@ -80,15 +80,20 @@
         <td><span class="badge badge-low">Fuel Purchase</span></td>
         <td>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.tank.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
         <td>-{{ "%.2f"|format(e.obj.cost or 0) }}</td>
+        {% elif e.kind == "salary" %}
+        <td><span class="badge badge-low">Salary &middot; <a href="{{ url_for('account_detail', account_id=e.obj.account_id) }}">{{ e.obj.account.name }}</a></span></td>
+        <td>{% if e.obj.period_label %}{{ e.obj.period_label }}{% else %}Salary{% endif %}{% if e.obj.deduction_amount %} &middot; Rs {{ "%.2f"|format(e.obj.deduction_amount) }} held against advance{% endif %}</td>
+        <td>-{{ "%.2f"|format(e.obj.net_paid) }}</td>
         {% endif %}
         <td>{{ "%.2f"|format(e.running_balance) }}</td>
+        <td>{{ e.obj.user.label if e.obj and e.obj.user else "-" }}</td>
         {% if current_user.is_owner %}
         <td>{% if e.kind in ("expense", "fuel_purchase") %}<a href="#" class="edit-toggle">Edit</a>{% endif %}</td>
         {% endif %}
       </tr>
       {% if current_user.is_owner and e.kind in ("expense", "fuel_purchase") %}
       <tr class="edit-row" style="display:none;">
-        <td colspan="6">
+        <td colspan="7">
           {% if e.kind == "expense" %}
           <form method="post" action="{{ url_for('account_entry_expense_edit', entry_id=e.obj.id) }}" class="form-grid">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -154,7 +159,7 @@
       </tr>
       {% endif %}
       {% else %}
-      <tr><td colspan="{{ 6 if current_user.is_owner else 5 }}">No transactions yet.</td></tr>
+      <tr><td colspan="{{ 7 if current_user.is_owner else 6 }}">No transactions yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>

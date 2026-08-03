@@ -44,8 +44,9 @@ terminal as well):
 | Owner | owner    | owner123  |
 | Staff | staff    | staff123  |
 
-**Change these passwords** before real use — there's no self-service
-"change password" screen yet.
+**Change these passwords** before real use, especially on a public
+deployment - use the "Change password" link in the sidebar once logged
+in, or have the owner reset either one from Settings.
 
 ## Business setup wizard
 
@@ -176,17 +177,64 @@ page lets the owner edit its details, opening balance, and individual
 transactions (see "Accounts" below) - creating a *new* entry, though,
 always still happens from the Ledger.
 
+### Shifts
+
+If the pump runs one shift a day, there's nothing to set up - a single
+"Full Day" shift is created automatically and stays invisible everywhere
+(no selector, no extra clicks). An owner can add more shifts from
+**Settings** (e.g. Morning / Evening / Night); once there's more than
+one, a shift selector appears on the Ledger, and nozzle readings, credit
+sales, and bank sales are all recorded per shift. The meter-reading chain
+threads through shifts in order (Morning's closing reading becomes
+Evening's opening reading), only rolling to the previous calendar day at
+the first shift of the day.
+
+### Cash Handover - shift reconciliation
+
+For each shift, **Cash Handover** on the Ledger shows the cash the
+ledger says should have been collected (that shift's sales minus credit
+given minus bank sales) next to whatever the owner or attendant actually
+counted. This is a check, not a transaction - recording it never changes
+any balance, the same way a tank dip doesn't. A real shortfall can be
+turned into an actual cash expense with one click ("write off as
+expense"), which is what actually reduces cash in hand to match what's
+physically there. The Monthly Report totals variance per attendant, so a
+one-off shortfall and a repeated pattern read very differently.
+
+### Payroll
+
+**Salary Payment** (owner only, on the Ledger) pays an employee the full
+salary they earned, optionally withholding part of it against a loan/
+advance they already owe - the deduction can never exceed what they're
+actually into the pump for. Only the net amount (salary minus deduction)
+leaves cash or a bank account; the deduction settles the account's
+balance without any money changing hands twice.
+
+### Tank dip charts
+
+A dip stick measures depth, not volume. A tank with a calibration chart
+set up in **Settings** (paste `depth_cm,liters` pairs, one per line, or
+straight from a spreadsheet) takes its dip in cm on the Ledger and
+converts to liters automatically, interpolating between the points
+given. A tank without a chart keeps taking dips in liters directly, same
+as before.
+
 ## Reports
 
 - **Daily Report** — pick a date to see that day's total sales (by
-  nozzle/fuel), cash vs. bank vs. credit split, receipts, expenses, bank
-  sales, inventory received, and stock available per tank.
+  nozzle/fuel), cash vs. bank vs. credit split, receipts, expenses,
+  salaries, shift cash-handover variances, bank sales, inventory
+  received, and stock available per tank.
+- **Monthly Report** — a period profit view: revenue against the cost of
+  the fuel *actually sold* (COGS, via each fuel's weighted-average
+  purchase cost), gross margin, expenses, salaries, net profit, margin by
+  fuel type, expenses by category, and cash variance by attendant.
 - **Trends** — the same metrics as charts over the past 15 days, month,
-  3 months, or year, so patterns are visible over time, plus a
-  **Profit (Est.)** figure and chart: sales revenue minus fuel purchase
-  cost minus expenses, cash-basis. It's an estimate, not a strict
-  accounting profit/margin figure - it isn't adjusted for fuel bought but
-  not yet sold.
+  3 months, or year, so patterns are visible over time, including the
+  same COGS-based Profit figure as the Monthly Report. Costing the fuel
+  actually *sold* rather than subtracting whatever was *bought* that day
+  is what stops a large delivery from showing up as a big fake loss on
+  the day it arrives - the stock is still sitting in the tank, unsold.
 
 ## Accounts (customers, suppliers, employees)
 
@@ -208,6 +256,15 @@ regardless of its type label. The **Creditors / Debitors** filter at the
 top of the Accounts page is based purely on this current balance sign,
 so an account's classification there can shift over time as its balance
 shifts. The **Account type** filter narrows by label only.
+
+Every account's history table shows **who recorded each entry**, and
+each account has a **Statement** link - a print/PDF-friendly page for a
+chosen date range with the balance carried in, every entry, and the
+closing balance, plus an **aging** breakdown (0-30 / 31-60 / 61-90 /
+90+ days) for a debitor. Payments are applied against the *oldest*
+unpaid entries first, so aging reflects genuinely stale credit rather
+than just whatever's most recent. A "How Old Is the Money Owed to You"
+panel on the Accounts page totals aging across every debitor at once.
 
 Below the main table, an **Expenses** panel (owner only) lists every
 expense ever logged, all-time and in one place - expenses aren't tied to
@@ -308,14 +365,24 @@ everything after it reads as a correct running balance.
   on Accounts - there's only ever one cash-in-hand account, so it's
   editable rather than something you "add".
 
-## Roles
+## Users &amp; Roles
 
-- **Owner** — full access: everything on the Ledger, Settings, and both
-  Reports pages.
+- **Owner** — full access: everything on the Ledger, Settings, and all
+  Reports pages, including adding/deactivating users and resetting
+  passwords.
 - **Staff** — can log nozzle readings, receipts, customer credit, bank
-  sales, and employee loans, and tank dips. Cannot log expenses, fuel
-  purchases, supplier payments, or cash deposits, cannot edit any
-  account, and cannot see Settings, Reports, or live cash/bank balances.
+  sales, employee loans, tank dips, and cash handovers. Cannot log
+  expenses, fuel purchases, supplier payments, cash deposits, or
+  salaries, cannot edit any account, and cannot see Settings, Reports, or
+  live cash/bank balances.
+
+Every user can change their own password from the link in the sidebar.
+An owner manages logins from **Settings** - adding a user, resetting
+anyone's password, and deactivating (not deleting) an account. Deactivating
+rather than deleting is deliberate: every ledger entry records who
+recorded it, and that has to keep pointing at a real user for the
+"Recorded by" column on every history page to keep making sense. There
+always has to be at least one active owner.
 
 ## Where your data lives
 
@@ -367,9 +434,17 @@ database periodically the same way you'd back up `instance/petrolpump.db`.
 - Editing an already-saved date doesn't automatically recalculate a
   *later* date's stored totals if that later date depended on it - open
   that later date and re-save its readings to reconcile them.
-- Fuel prices apply from whenever they're changed in Settings; the app
-  doesn't keep a history of past prices, so backfilled sales use
-  whatever the price is *now*, not the historical price on that date.
+- Cost of Fuel Sold (in the Monthly Report and Trends) uses a
+  weighted-average purchase cost per fuel type, not strict FIFO/lot
+  tracking - a stable, explainable approximation, not a claim about which
+  specific delivery a given liter came from.
+- A cash handover is a reconciliation check, not a transaction - counting
+  cash never changes cash-in-hand by itself. If a shortfall is real, use
+  "write off as expense" on that shift's row to actually reduce the
+  balance.
+- A nozzle's tank (and therefore its fuel type) can only be reassigned in
+  Settings before it has any reading history, since that history doesn't
+  store its own fuel type - it's derived from the nozzle's tank live.
 - "Net Cash Flow" = nozzle sales − credit given + payments received −
   expenses − cash-paid fuel purchases − supplier payments. Fuel bought on
   supplier credit isn't subtracted at the time of purchase (that cash

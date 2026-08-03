@@ -32,6 +32,9 @@
       <a href="{{ url_for('reports') }}" class="{{ 'active' if request.endpoint == 'reports' }}">
         <span class="icon">&#128202;</span> Daily Report
       </a>
+      <a href="{{ url_for('reports_monthly') }}" class="{{ 'active' if request.endpoint == 'reports_monthly' }}">
+        <span class="icon">&#128197;</span> Monthly Report
+      </a>
       <a href="{{ url_for('reports_trends') }}" class="{{ 'active' if request.endpoint == 'reports_trends' }}">
         <span class="icon">&#128200;</span> Trends
       </a>
@@ -43,8 +46,9 @@
     </nav>
 
     <div class="sidebar-user">
-      <div class="who">{{ current_user.username }}</div>
+      <div class="who">{{ current_user.label }}</div>
       <span class="role-pill">{{ current_user.role }}</span>
+      <a href="{{ url_for('change_password') }}">Change password</a>
       <a href="{{ url_for('logout') }}">Log out</a>
     </div>
   </aside>

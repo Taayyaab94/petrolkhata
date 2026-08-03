@@ -10,6 +10,15 @@
     <label class="date-picker-label">Date
       <input type="date" name="date" value="{{ selected_date.isoformat() }}" max="{{ today.isoformat() }}" onchange="this.form.submit()">
     </label>
+    {% if shifts|length > 1 %}
+    <label class="date-picker-label">Shift
+      <select name="shift" onchange="this.form.submit()">
+        {% for s in shifts %}
+        <option value="{{ s.id }}" {{ "selected" if selected_shift and s.id == selected_shift.id }}>{{ s.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    {% endif %}
     {% if selected_date != today %}
     <a href="{{ url_for('ledger') }}" class="btn btn-ghost btn-sm">Jump to Today</a>
     {% endif %}
@@ -18,6 +27,9 @@
 
 {% if selected_date != today %}
 <div class="flash flash-info">Editing entries for {{ selected_date.strftime("%A, %d %B %Y") }} - not today. Existing entries for this date are pre-filled below.</div>
+{% endif %}
+{% if shifts|length > 1 and selected_shift %}
+<div class="flash flash-info">Nozzle readings, credit sales and bank sales below are being recorded against the <strong>{{ selected_shift.name }}</strong> shift.</div>
 {% endif %}
 
 <div class="ledger-summary">
@@ -119,6 +131,7 @@
       <form method="post" action="{{ url_for('ledger_readings') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
         <div class="nozzle-list">
           {% for row in nozzle_rows %}
           <div class="nozzle-row" data-price="{{ row.price }}" {% if row.previous_is_auto %}data-last="{{ row.previous_reading }}"{% endif %}>
@@ -199,6 +212,7 @@
       <form method="post" action="{{ url_for('ledger_bank_sale') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
         <div class="form-grid">
           <label>Bank Account
             <select name="bank_account_id" class="bank-select" data-scope="bank_sale" required>
@@ -236,6 +250,7 @@
       <form method="post" action="{{ url_for('ledger_credit') }}" id="credit-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
         <div class="form-grid">
           <label>Customer
             <select name="customer_id" class="customer-select" data-scope="credit" required>
@@ -259,6 +274,9 @@
           </label>
           <label>Liters
             <input type="number" step="0.01" min="0.01" name="liters" id="credit_liters" required>
+          </label>
+          <label>Vehicle number (optional)
+            <input type="text" name="vehicle_number" placeholder="e.g. LEA-1234">
           </label>
           <label>Note (optional)
             <input type="text" name="note">
@@ -486,6 +504,127 @@
         </div>
       </form>
     </div>
+
+    {% if current_user.is_owner %}
+    <div class="ledger-section">
+      <h3>Salary Payment <span class="owner-tag">Owner</span></h3>
+      <p class="hint-sm">Enter the full salary earned, and optionally how much of it to hold back against an advance the employee already owes. Only the net is actually paid out.</p>
+      <form method="post" action="{{ url_for('ledger_salary') }}" id="salary-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Employee
+            <select name="employee_id" class="employee-select" data-scope="salary" id="salary_employee" required>
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new employee</option>
+              {% for a in accounts_employee_first %}
+              <option value="{{ a.id }}" data-balance="{{ a.balance }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-employee-field" data-scope="salary" style="display:none;">New employee name
+            <input type="text" name="new_employee_name">
+          </label>
+          <label>Period (optional)
+            <input type="text" name="period_label" placeholder="e.g. {{ selected_date.strftime('%b %Y') }}">
+          </label>
+          <label>Salary (Rs)
+            <input type="number" step="0.01" min="0.01" name="gross_amount" id="salary_gross" required>
+          </label>
+          <label>Deduct against advance (Rs)
+            <input type="number" step="0.01" min="0" name="deduction_amount" id="salary_deduction" placeholder="0.00">
+          </label>
+          <label>Paid via
+            <select name="paid_via" class="paidvia-select" data-scope="salary">
+              <option value="cash">Cash</option>
+              <option value="__new__">+ Add new bank account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-paidvia-field" data-scope="salary" style="display:none;">New bank account name
+            <input type="text" name="new_bank_account_name">
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div class="calc-preview" id="salary_calc" style="margin-top:10px;">Net paid will be calculated automatically</div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Salary</button>
+        </div>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Cash Handover - Shift Reconciliation</h3></div>
+  <p class="hint">Enter the cash actually counted at the end of each shift. Expected cash is that shift's nozzle sales minus credit given minus bank sales. This is a check, not a transaction - it never changes any balance by itself, exactly like a tank dip. If a shortfall is real, an owner can write it off as a cash expense from the row below.</p>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Shift</th><th>Sales</th><th>Credit</th><th>Bank</th><th>Expected Cash</th><th>Counted</th><th>Variance</th><th>Attendant</th><th></th></tr></thead>
+    <tbody>
+      {% for row in handover_rows %}
+      <tr class="{{ 'row-low' if row.variance is not none and row.variance < -0.01 else '' }}">
+        <td>{{ row.shift.name }}</td>
+        <td>{{ "%.2f"|format(row.sales_total) }}</td>
+        <td>{{ "%.2f"|format(row.credit_total) }}</td>
+        <td>{{ "%.2f"|format(row.bank_total) }}</td>
+        <td><strong>{{ "%.2f"|format(row.expected) }}</strong></td>
+        <td>{{ "%.2f"|format(row.declared) if row.declared is not none else "-" }}</td>
+        <td>
+          {% if row.variance is none %}
+            <span class="badge">Not reconciled</span>
+          {% elif row.variance < -0.01 %}
+            <span class="badge badge-low">Short {{ "%.2f"|format(-row.variance) }}</span>
+          {% elif row.variance > 0.01 %}
+            <span class="badge">Over {{ "%.2f"|format(row.variance) }}</span>
+          {% else %}
+            <span class="badge badge-ok">Matches</span>
+          {% endif %}
+        </td>
+        <td>{{ row.handover.attendant.name if row.handover and row.handover.attendant else "-" }}</td>
+        <td><a href="#" class="edit-toggle">{{ "Edit" if row.handover else "Record" }}</a></td>
+      </tr>
+      <tr class="edit-row" style="display:none;">
+        <td colspan="9">
+          <form method="post" action="{{ url_for('ledger_handover') }}" class="form-grid">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+            <input type="hidden" name="shift_id" value="{{ row.shift.id }}">
+            <label>Cash counted (Rs)
+              <input type="number" step="0.01" min="0" name="declared_amount"
+                     value="{{ row.declared if row.declared is not none else '' }}"
+                     placeholder="{{ '%.2f'|format(row.expected) }}" required>
+            </label>
+            <label>Attendant on shift (optional)
+              <select name="attendant_id">
+                <option value="">Not recorded</option>
+                {% for a in accounts_employee_first %}
+                <option value="{{ a.id }}" {{ "selected" if row.handover and row.handover.attendant_id == a.id }}>{{ a.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Note (optional)
+              <input type="text" name="note" value="{{ row.handover.note or '' if row.handover else '' }}">
+            </label>
+            <button type="submit" class="btn btn-sm">Save Handover</button>
+          </form>
+          {% if current_user.is_owner and row.handover and row.variance is not none and row.variance < -0.01 %}
+          <form method="post" action="{{ url_for('ledger_handover_write_off', handover_id=row.handover.id) }}" style="margin-top:10px;"
+                onsubmit="return confirm('Record the Rs {{ '%.2f'|format(-row.variance) }} shortfall as a cash expense? This reduces cash in hand so it matches what is physically there.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-ghost">Write off Rs {{ "%.2f"|format(-row.variance) }} shortfall as expense</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   </div>
 </div>
 
@@ -493,13 +632,13 @@
   <div class="panel-head">
     <h3>Dip - Tank Stock Check</h3>
   </div>
-  <p class="hint">Enter each tank's physical dip reading. Book stock is calculated from starting stock plus purchases minus sales. A small variance is normal (evaporation, temperature, rounding) - it's not treated as an error.</p>
+  <p class="hint">Enter each tank's physical dip reading. Book stock is calculated from starting stock plus purchases minus sales. A small variance is normal (evaporation, temperature, rounding) - it's not treated as an error. Tanks with a calibration chart set up in Settings take a depth in cm (what a dip stick actually measures) and convert to liters automatically; the rest take liters directly.</p>
   <form method="post" action="{{ url_for('ledger_dip') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
     <div class="table-wrap">
     <table class="table">
-      <thead><tr><th>Tank</th><th>Fuel</th><th>Book Stock (L)</th><th>Dip Reading (L)</th><th>Variance</th></tr></thead>
+      <thead><tr><th>Tank</th><th>Fuel</th><th>Book Stock (L)</th><th>Dip Reading</th><th>Variance</th></tr></thead>
       <tbody>
         {% for row in tank_rows %}
         <tr class="{{ 'row-low' if row.is_low else '' }}">
@@ -507,11 +646,22 @@
           <td>{{ row.tank.fuel_type.name }}</td>
           <td>{{ "%.2f"|format(row.book_stock) }}{% if row.is_low %} <span class="badge badge-low">LOW</span>{% endif %}</td>
           <td>
+            {% if row.has_chart %}
+            <input type="number" step="0.1" min="0" id="dip_{{ row.tank.id }}" name="dipcm_{{ row.tank.id }}"
+                   data-book="{{ row.book_stock }}" data-capacity="{{ row.tank.capacity_liters }}"
+                   data-chart="{{ row.chart|tojson|forceescape }}"
+                   data-mode="cm"
+                   placeholder="Depth in cm" value="{{ row.existing_dip_cm if row.existing_dip_cm is not none else '' }}">
+            <span class="hint-sm">cm</span>
+            {% else %}
             <input type="number" step="0.01" min="0" id="dip_{{ row.tank.id }}" name="dip_{{ row.tank.id }}"
                    data-book="{{ row.book_stock }}" data-capacity="{{ row.tank.capacity_liters }}"
+                   data-mode="liters"
                    placeholder="Dip reading" value="{{ row.existing_dip if row.existing_dip is not none else '' }}">
+            <span class="hint-sm">L</span>
+            {% endif %}
           </td>
-          <td><div class="calc-preview" id="dipcalc_{{ row.tank.id }}">-</div></td>
+          <td><div class="calc-preview" id="dipcalc_{{ row.tank.id }}">{% if row.has_chart and row.existing_dip is not none %}= {{ "%.2f"|format(row.existing_dip) }} L{% else %}-{% endif %}</div></td>
         </tr>
         {% endfor %}
       </tbody>
@@ -538,7 +688,7 @@
       <span class="feed-tag feed-tag-debit">Receipt</span>
       <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
       {% elif e.kind == "credit" %}
-      <div class="feed-desc"><strong>Credit to {{ e.obj.account.name }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>Credit to {{ e.obj.account.name }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }}{% if e.obj.vehicle_number %} &middot; {{ e.obj.vehicle_number }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Credit</span>
       <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
       {% elif e.kind == "expense" %}
@@ -566,9 +716,17 @@
       <span class="feed-tag feed-tag-credit">Employee Loan</span>
       <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
       {% elif e.kind == "dip" %}
-      <div class="feed-desc"><strong>{{ e.obj.tank.label }} dip</strong><span>{{ "%.2f"|format(e.obj.dip_liters) }} L &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.tank.label }} dip</strong><span>{% if e.obj.dip_cm is not none %}{{ "%.1f"|format(e.obj.dip_cm) }} cm = {% endif %}{{ "%.2f"|format(e.obj.dip_liters) }} L &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-neutral">Dip</span>
       <div class="feed-amount neutral">{{ "+" if e.variance >= 0 }}{{ "%.2f"|format(e.variance) }} L</div>
+      {% elif e.kind == "handover" %}
+      <div class="feed-desc"><strong>{{ e.obj.shift.name }} cash handover</strong><span>Counted Rs {{ "%.2f"|format(e.obj.declared_amount) }}{% if e.obj.attendant %} &middot; {{ e.obj.attendant.name }}{% endif %}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-neutral">Handover</span>
+      <div class="feed-amount neutral">{{ "+" if e.variance >= 0 }}Rs {{ "%.2f"|format(e.variance) }}</div>
+      {% elif e.kind == "salary" %}
+      <div class="feed-desc"><strong>Salary to {{ e.obj.account.name }}</strong><span>{% if e.obj.period_label %}{{ e.obj.period_label }} &middot; {% endif %}{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.deduction_amount %} &middot; Rs {{ "%.2f"|format(e.obj.deduction_amount) }} deducted{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-credit">Salary</span>
+      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.net_paid) }}</div>
       {% endif %}
     </div>
     {% else %}
@@ -622,11 +780,35 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
 });
 
 // --- Dip variance live calculation ---
+// Tanks with a calibration chart are measured in cm; interpolate the same
+// way the server does (ledger_logic.liters_from_dip_cm) so the preview and
+// the saved figure always agree.
+function litersFromChart(chart, depthCm) {
+  if (!chart || !chart.length) return null;
+  if (depthCm <= chart[0][0]) return depthCm === chart[0][0] ? chart[0][1] : 0;
+  if (depthCm >= chart[chart.length - 1][0]) return chart[chart.length - 1][1];
+  for (let i = 0; i < chart.length - 1; i++) {
+    const [lowCm, lowL] = chart[i];
+    const [highCm, highL] = chart[i + 1];
+    if (lowCm <= depthCm && depthCm <= highCm) {
+      const span = highCm - lowCm;
+      if (span <= 0) return lowL;
+      return lowL + ((depthCm - lowCm) / span) * (highL - lowL);
+    }
+  }
+  return chart[chart.length - 1][1];
+}
+
 document.querySelectorAll('[id^="dip_"]').forEach(function (input) {
   const tankId = input.id.replace('dip_', '');
   const preview = document.getElementById('dipcalc_' + tankId);
   const book = parseFloat(input.dataset.book);
   const capacity = parseFloat(input.dataset.capacity) || 0;
+  const isCm = input.dataset.mode === 'cm';
+  let chart = null;
+  if (isCm && input.dataset.chart) {
+    try { chart = JSON.parse(input.dataset.chart); } catch (e) { chart = null; }
+  }
 
   function update() {
     if (input.value === '') {
@@ -634,12 +816,19 @@ document.querySelectorAll('[id^="dip_"]').forEach(function (input) {
       preview.className = 'calc-preview';
       return;
     }
-    const dip = parseFloat(input.value);
-    if (isNaN(dip)) return;
-    const variance = dip - book;
+    const entered = parseFloat(input.value);
+    if (isNaN(entered)) return;
+    const dipLiters = isCm ? litersFromChart(chart, entered) : entered;
+    if (dipLiters === null) {
+      preview.textContent = 'No dip chart';
+      preview.className = 'calc-preview has-error';
+      return;
+    }
+    const variance = dipLiters - book;
     const pct = capacity ? Math.abs(variance) / capacity * 100 : 0;
     const sign = variance >= 0 ? '+' : '';
-    preview.innerHTML = sign + variance.toFixed(2) + ' L';
+    const converted = isCm ? '= ' + fmtMoney(dipLiters) + ' L &middot; ' : '';
+    preview.innerHTML = converted + sign + variance.toFixed(2) + ' L';
     preview.className = 'calc-preview ' + (pct > 3 ? 'has-warn' : 'has-value');
   }
   input.addEventListener('input', update);
@@ -709,6 +898,57 @@ wireAddNewToggle('.employee-select', '.new-employee-field');
 wireAddNewToggle('.bank-select', '.new-bank-field');
 wireAddNewToggle('.account-select', '.new-account-field');
 wireAddNewToggle('.paidvia-select', '.new-paidvia-field');
+
+// --- Salary: live net-paid calculation + deduction ceiling ---
+const salaryEmployee = document.getElementById('salary_employee');
+const salaryGross = document.getElementById('salary_gross');
+const salaryDeduction = document.getElementById('salary_deduction');
+const salaryCalc = document.getElementById('salary_calc');
+function updateSalaryCalc() {
+  const gross = parseFloat(salaryGross.value);
+  const deduction = parseFloat(salaryDeduction.value) || 0;
+  const opt = salaryEmployee.options[salaryEmployee.selectedIndex];
+  const owed = opt && opt.dataset.balance ? parseFloat(opt.dataset.balance) : null;
+
+  if (isNaN(gross)) {
+    salaryCalc.textContent = 'Net paid will be calculated automatically';
+    salaryCalc.className = 'calc-preview';
+    return;
+  }
+  const net = gross - deduction;
+  let msg = 'Rs ' + fmtMoney(gross) + ' salary';
+  if (deduction) msg += ' &minus; Rs ' + fmtMoney(deduction) + ' deduction';
+  msg += ' = <strong>Rs ' + fmtMoney(net) + ' paid out</strong>';
+  let cls = 'has-value';
+  if (owed !== null && owed > 0) {
+    msg += ' &middot; owes Rs ' + fmtMoney(owed);
+  }
+  if (net < 0) {
+    msg = 'Deduction is more than the salary itself';
+    cls = 'has-error';
+  } else if (owed !== null && deduction > owed + 0.01) {
+    msg += ' &middot; can only deduct up to Rs ' + fmtMoney(Math.max(owed, 0));
+    cls = 'has-error';
+  }
+  salaryCalc.innerHTML = msg;
+  salaryCalc.className = 'calc-preview ' + cls;
+}
+if (salaryEmployee && salaryGross && salaryDeduction) {
+  salaryEmployee.addEventListener('change', updateSalaryCalc);
+  salaryGross.addEventListener('input', updateSalaryCalc);
+  salaryDeduction.addEventListener('input', updateSalaryCalc);
+}
+
+// --- Cash handover rows: same edit-toggle pattern as the account pages ---
+document.querySelectorAll('.edit-toggle').forEach(function (link) {
+  link.addEventListener('click', function (e) {
+    e.preventDefault();
+    const row = link.closest('tr').nextElementSibling;
+    if (row && row.classList.contains('edit-row')) {
+      row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+    }
+  });
+});
 
 // --- Purchase: show supplier field only when "on credit" ---
 const purchasePaymentType = document.getElementById('purchase_payment_type');
