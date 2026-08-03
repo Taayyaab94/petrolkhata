@@ -16,7 +16,9 @@ from models import (
     CreditGiven,
     EmployeeLoan,
     Expense,
+    FuelPriceHistory,
     Nozzle,
+    NozzleReset,
     Receipt,
     Sale,
     StockPurchase,
@@ -55,7 +57,15 @@ def previous_reading_for(nozzle, entry_date):
     There's no setup-time baseline to fall back on - a nozzle with no
     Sale history at all behaves exactly like a gap: the very first
     reading ever logged for it always has to be entered by hand.
+
+    A meter reset (NozzleReset) also forces a manual entry on its own
+    reset_date, the same as a gap - a physically replaced/rolled-over
+    meter has no continuous chain with what came before it.
     """
+    reset = latest_reset_for(nozzle, entry_date)
+    if reset and reset.reset_date == entry_date:
+        return None, False
+
     prior_date = entry_date - timedelta(days=1)
     prior_sale = Sale.query.filter_by(nozzle_id=nozzle.id, entry_date=prior_date).first()
     if prior_sale:
@@ -64,25 +74,75 @@ def previous_reading_for(nozzle, entry_date):
     return None, False
 
 
+def latest_reset_for(nozzle, entry_date):
+    """Most recent meter reset for this nozzle on or before entry_date, or
+    None if it's never been reset (as of this date)."""
+    return (
+        NozzleReset.query.filter(
+            NozzleReset.nozzle_id == nozzle.id, NozzleReset.reset_date <= entry_date
+        )
+        .order_by(NozzleReset.reset_date.desc(), NozzleReset.id.desc())
+        .first()
+    )
+
+
 def nearest_earlier_reading(nozzle, entry_date):
     """Nearest known reading strictly before entry_date, regardless of any
     gap. Used only to sanity-check a manually typed previous reading -
     meter readings can't go backwards over time even across a gap. Falls
-    back to 0 when nothing has ever been recorded for this nozzle."""
-    sale = (
-        Sale.query.filter(Sale.nozzle_id == nozzle.id, Sale.entry_date < entry_date)
-        .order_by(Sale.entry_date.desc(), Sale.id.desc())
-        .first()
-    )
+    back to 0 when nothing has ever been recorded for this nozzle, or when
+    a meter reset means nothing before the reset date counts anymore."""
+    reset = latest_reset_for(nozzle, entry_date)
+    query = Sale.query.filter(Sale.nozzle_id == nozzle.id, Sale.entry_date < entry_date)
+    if reset:
+        query = query.filter(Sale.entry_date >= reset.reset_date)
+    sale = query.order_by(Sale.entry_date.desc(), Sale.id.desc()).first()
     return sale.current_reading if sale else 0.0
 
 
 def next_sale_on_or_after(nozzle_id, entry_date):
-    return (
-        Sale.query.filter(Sale.nozzle_id == nozzle_id, Sale.entry_date > entry_date)
-        .order_by(Sale.entry_date.asc(), Sale.id.asc())
+    """The next recorded Sale after entry_date, used to stop an edit from
+    exceeding a later reading already on file. A meter reset that happens
+    after entry_date breaks that comparison (the new era can legitimately
+    start lower), so readings past the next reset aren't considered."""
+    next_reset = (
+        NozzleReset.query.filter(NozzleReset.nozzle_id == nozzle_id, NozzleReset.reset_date > entry_date)
+        .order_by(NozzleReset.reset_date.asc(), NozzleReset.id.asc())
         .first()
     )
+    query = Sale.query.filter(Sale.nozzle_id == nozzle_id, Sale.entry_date > entry_date)
+    if next_reset:
+        query = query.filter(Sale.entry_date < next_reset.reset_date)
+    return query.order_by(Sale.entry_date.asc(), Sale.id.asc()).first()
+
+
+def price_on_date(fuel_type, entry_date):
+    """The price per liter actually in effect on entry_date, from
+    FuelPriceHistory - not necessarily today's FuelType.price_per_liter.
+    Falls back to the current price if no history row applies (e.g. a
+    fuel type that predates price history being tracked)."""
+    row = (
+        FuelPriceHistory.query.filter(
+            FuelPriceHistory.fuel_type_id == fuel_type.id,
+            FuelPriceHistory.effective_date <= entry_date,
+        )
+        .order_by(FuelPriceHistory.effective_date.desc(), FuelPriceHistory.id.desc())
+        .first()
+    )
+    return row.price_per_liter if row else fuel_type.price_per_liter
+
+
+def record_fuel_price(fuel_type, price, effective_date):
+    """Log a price change effective as of effective_date, and keep
+    FuelType.price_per_liter (the "current price" cache read everywhere
+    that just wants today's price) pointing at whichever history row is
+    latest as of today - so a same-day change becomes today's price, and
+    a correction to an older date doesn't make today's price stale."""
+    db.session.add(
+        FuelPriceHistory(fuel_type_id=fuel_type.id, price_per_liter=price, effective_date=effective_date)
+    )
+    db.session.flush()
+    fuel_type.price_per_liter = price_on_date(fuel_type, datetime.now().date())
 
 
 def stock_series(tank, dates):

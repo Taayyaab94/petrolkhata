@@ -12,7 +12,7 @@
   <div class="panel-head"><h3>Tanks</h3></div>
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Tank</th><th>Fuel</th><th>Starting Stock (L)</th><th>Capacity &amp; alert level</th></tr></thead>
+    <thead><tr><th>Tank</th><th>Fuel</th><th>Starting Stock (L)</th><th>Capacity &amp; alert level</th><th></th></tr></thead>
     <tbody>
       {% for t in tanks %}
       <tr>
@@ -27,11 +27,19 @@
             <button type="submit" class="btn btn-sm">Save</button>
           </form>
         </td>
+        <td>
+          <form method="post" action="{{ url_for('settings_delete_tank', tank_id=t.id) }}" class="inline-edit-form"
+                onsubmit="return confirm('Delete Tank {{ t.number }}? Only possible if it has no purchases, sales, or dip readings yet.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-ghost">Delete</button>
+          </form>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
   </div>
+  <p class="hint">Delete only works for a tank with no purchases, sales, or dip readings yet - a genuine setup mistake, not real history.</p>
 </div>
 
 <div class="panel">
@@ -84,20 +92,71 @@
   <div class="panel-head"><h3>Dispensers &amp; Nozzles</h3></div>
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Dispenser</th><th>Nozzle</th><th>Tank</th></tr></thead>
+    <thead><tr><th>Dispenser</th><th>Nozzle</th><th>Tank</th><th>Reassign tank</th><th></th></tr></thead>
     <tbody>
       {% for d in dispensers %}
         {% for n in d.nozzles %}
         <tr>
-          <td>Dispenser {{ d.number }}</td>
+          <td>Dispenser {{ d.number }}
+            <form method="post" action="{{ url_for('settings_delete_dispenser', dispenser_id=d.id) }}" class="inline-edit-form" style="display:inline;"
+                  onsubmit="return confirm('Delete Dispenser {{ d.number }} and all its nozzles? Only possible if none of them have reading history yet.');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              {% if loop.first %}<button type="submit" class="btn btn-sm btn-ghost" title="Delete this whole dispenser">Delete dispenser</button>{% endif %}
+            </form>
+          </td>
           <td>Nozzle {{ n.nozzle_number }}</td>
           <td>{{ n.tank.label }}</td>
+          <td>
+            <form method="post" action="{{ url_for('settings_edit_nozzle_tank', nozzle_id=n.id) }}" class="inline-edit-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <select name="tank_id">
+                {% for t in tanks %}
+                <option value="{{ t.id }}" {{ "selected" if t.id == n.tank_id }}>{{ t.label }}</option>
+                {% endfor %}
+              </select>
+              <button type="submit" class="btn btn-sm">Save</button>
+            </form>
+          </td>
+          <td>
+            <form method="post" action="{{ url_for('settings_delete_nozzle', nozzle_id=n.id) }}" class="inline-edit-form"
+                  onsubmit="return confirm('Delete Nozzle {{ n.nozzle_number }} on Dispenser {{ d.number }}? Only possible if it has no reading history yet.');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn btn-sm btn-ghost">Delete</button>
+            </form>
+          </td>
         </tr>
         {% endfor %}
       {% endfor %}
     </tbody>
   </table>
   </div>
+  <p class="hint">Reassigning a tank or deleting a nozzle/dispenser/tank only works before it has any reading, purchase, or dip history - a genuine setup mistake, not real history.</p>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Nozzle Meter Reset</h3></div>
+  <p class="hint">If a nozzle's physical meter was replaced or rolled over, mark it here - readings before the reset date are unaffected, but the app stops requiring the next reading to continue where the old meter left off.</p>
+  <form method="post" action="{{ url_for('settings_reset_nozzle_meter') }}" class="form-grid"
+        onsubmit="return confirm('Reset the meter for this nozzle? Readings before the chosen date stay as they are, but the app will no longer check that the next reading continues on from them - only do this if the physical meter was actually replaced or rolled over.');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Nozzle
+      <select name="nozzle_id" required>
+        <option value="">Select...</option>
+        {% for d in dispensers %}
+          {% for n in d.nozzles %}
+          <option value="{{ n.id }}">Dispenser {{ d.number }} - Nozzle {{ n.nozzle_number }} ({{ n.tank.label }})</option>
+          {% endfor %}
+        {% endfor %}
+      </select>
+    </label>
+    <label>Reset date <span class="hint-sm">first date on the new meter</span>
+      <input type="date" name="reset_date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" required>
+    </label>
+    <label>Note (optional)
+      <input type="text" name="note" placeholder="e.g. Meter replaced by vendor">
+    </label>
+    <button type="submit" class="btn">Reset Meter</button>
+  </form>
 </div>
 
 <div class="two-col">

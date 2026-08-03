@@ -78,6 +78,35 @@
 </div>
 {% endif %}
 
+{% if current_user.is_owner %}
+<div class="panel">
+  <div class="panel-head"><h3>Fuel Prices <span class="hint-sm">as of {{ selected_date.strftime("%d %b %Y") }}</span></h3></div>
+  <p class="hint">Changing a price here takes effect from {{ selected_date.strftime("%d %b %Y") }} onward - paging back to an earlier date will still show whatever price was in effect then.</p>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Fuel</th><th>Price / L (Rs)</th><th></th></tr></thead>
+    <tbody>
+      {% for f in fuel_types %}
+      <tr>
+        <td>{{ f.name }}</td>
+        <td>{{ "%.2f"|format(fuel_prices_by_id.get(f.id)) }}</td>
+        <td>
+          <form method="post" action="{{ url_for('ledger_fuel_price') }}" class="inline-edit-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+            <input type="hidden" name="fuel_type_id" value="{{ f.id }}">
+            <input type="number" step="0.01" min="0.01" name="price" value="{{ fuel_prices_by_id.get(f.id) }}" required>
+            <button type="submit" class="btn btn-sm">Save</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
 <div class="ledger-grid">
   <!-- DEBIT SIDE -->
   <div class="ledger-col ledger-col-debit">
@@ -92,10 +121,10 @@
         <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
         <div class="nozzle-list">
           {% for row in nozzle_rows %}
-          <div class="nozzle-row" data-price="{{ row.nozzle.tank.fuel_type.price_per_liter }}" {% if row.previous_is_auto %}data-last="{{ row.previous_reading }}"{% endif %}>
+          <div class="nozzle-row" data-price="{{ row.price }}" {% if row.previous_is_auto %}data-last="{{ row.previous_reading }}"{% endif %}>
             <div>
               <div class="nz-label">D{{ row.dispenser.number }} &middot; Nozzle {{ row.nozzle.nozzle_number }}</div>
-              <div class="nz-fuel">{{ row.nozzle.tank.label }} &middot; Rs {{ "%.2f"|format(row.nozzle.tank.fuel_type.price_per_liter) }}/L</div>
+              <div class="nz-fuel">{{ row.nozzle.tank.label }} &middot; Rs {{ "%.2f"|format(row.price) }}/L{% if selected_date != today %} (as of {{ selected_date.strftime("%d %b") }}){% endif %}</div>
             </div>
             {% if row.previous_is_auto %}
             <div class="nz-last">Previous<strong>{{ "%.2f"|format(row.previous_reading) }}</strong></div>
@@ -224,7 +253,7 @@
             <select name="fuel_type_id" id="credit_fuel_type" required>
               <option value="">Select...</option>
               {% for f in fuel_types %}
-              <option value="{{ f.id }}" data-price="{{ f.price_per_liter }}">{{ f.name }} (Rs {{ "%.2f"|format(f.price_per_liter) }}/L)</option>
+              <option value="{{ f.id }}" data-price="{{ fuel_prices_by_id.get(f.id) }}">{{ f.name }} (Rs {{ "%.2f"|format(fuel_prices_by_id.get(f.id)) }}/L)</option>
               {% endfor %}
             </select>
           </label>
@@ -324,10 +353,10 @@
             </select>
           </label>
           <label>Liters
-            <input type="number" step="0.01" min="0.01" name="liters" required>
+            <input type="number" step="0.01" min="0.01" name="liters" id="purchase_liters" required>
           </label>
           <label>Cost (Rs)
-            <input type="number" step="0.01" min="0" name="cost">
+            <input type="number" step="0.01" min="0.01" name="cost" id="purchase_cost" required>
           </label>
           <label>Payment
             <select name="payment_type" id="purchase_payment_type">
@@ -363,6 +392,7 @@
             <input type="text" name="note">
           </label>
         </div>
+        <div class="calc-preview" id="purchase_calc" style="margin-top:10px;">Cost per liter will be calculated automatically</div>
         <div style="margin-top:12px;">
           <button type="submit" class="btn btn-sm">Add Stock</button>
         </div>
@@ -636,6 +666,27 @@ function updateCreditCalc() {
 if (creditFuelSelect) {
   creditFuelSelect.addEventListener('change', updateCreditCalc);
   creditLiters.addEventListener('input', updateCreditCalc);
+}
+
+// --- Fuel purchase: live cost-per-liter calculation ---
+const purchaseLiters = document.getElementById('purchase_liters');
+const purchaseCost = document.getElementById('purchase_cost');
+const purchaseCalc = document.getElementById('purchase_calc');
+function updatePurchaseCalc() {
+  const liters = parseFloat(purchaseLiters.value);
+  const cost = parseFloat(purchaseCost.value);
+  if (isNaN(liters) || isNaN(cost) || liters <= 0) {
+    purchaseCalc.textContent = 'Cost per liter will be calculated automatically';
+    purchaseCalc.className = 'calc-preview';
+    return;
+  }
+  const perLiter = cost / liters;
+  purchaseCalc.innerHTML = 'Rs ' + fmtMoney(cost) + ' &divide; ' + liters.toFixed(2) + ' L = <strong>Rs ' + perLiter.toFixed(2) + ' / L</strong>';
+  purchaseCalc.className = 'calc-preview has-value';
+}
+if (purchaseLiters && purchaseCost) {
+  purchaseLiters.addEventListener('input', updatePurchaseCalc);
+  purchaseCost.addEventListener('input', updatePurchaseCalc);
 }
 
 // --- "+ Add new ..." toggles, shared by customer/supplier/employee/bank pickers ---

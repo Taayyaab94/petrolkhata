@@ -39,6 +39,16 @@
     <div class="label">Fuel Purchased</div>
     <div class="value">{{ "%.2f"|format(totals.total_purchased_liters) }} L</div>
   </div>
+  <div class="stat-card accent-green">
+    <div class="label">Profit (Est.)</div>
+    <div class="value">Rs {{ "%.2f"|format(totals.total_profit) }}</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Profit Over Time</h3></div>
+  <p class="hint">Sales revenue minus fuel purchase cost minus expenses, cash-basis - an estimate, not adjusted for unsold inventory.</p>
+  <div class="chart-wrap">{{ profit_chart|safe }}</div>
 </div>
 
 <div class="panel">

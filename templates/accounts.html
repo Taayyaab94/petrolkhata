@@ -10,11 +10,13 @@
 </div>
 
 <div class="filter-row">
+  {% if type_filter not in ('bank', 'cash') %}
   <div class="filter-group">
     <a href="{{ url_for('accounts', kind='all', type=type_filter) }}" class="filter-pill {{ 'active' if kind == 'all' }}">All</a>
     <a href="{{ url_for('accounts', kind='debitors', type=type_filter) }}" class="filter-pill {{ 'active' if kind == 'debitors' }}">Debitors <span class="hint-sm">(owe us)</span></a>
     <a href="{{ url_for('accounts', kind='creditors', type=type_filter) }}" class="filter-pill {{ 'active' if kind == 'creditors' }}">Creditors <span class="hint-sm">(we owe)</span></a>
   </div>
+  {% endif %}
   <div class="filter-group">
     <a href="{{ url_for('accounts', kind=kind, type='all') }}" class="filter-pill {{ 'active' if type_filter == 'all' }}">All types</a>
     <a href="{{ url_for('accounts', kind=kind, type='customer') }}" class="filter-pill {{ 'active' if type_filter == 'customer' }}">Customers</a>

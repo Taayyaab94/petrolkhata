@@ -29,6 +29,23 @@ class FuelType(db.Model):
     price_per_liter = db.Column(db.Float, nullable=False, default=0)
 
 
+class FuelPriceHistory(db.Model):
+    """One row per price change, effective from effective_date onward until
+    the next row for the same fuel type. FuelType.price_per_liter is kept
+    as a denormalized "current price" cache; this table is the source of
+    truth for what a fuel cost on any given past date, so correcting an
+    old Sale/CreditGiven entry can re-price at the rate that was actually
+    in effect then instead of today's rate (see ledger_logic.price_on_date)."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    fuel_type_id = db.Column(db.Integer, db.ForeignKey("fuel_type.id"), nullable=False)
+    price_per_liter = db.Column(db.Float, nullable=False)
+    effective_date = db.Column(db.Date, nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    fuel_type = db.relationship("FuelType", backref="price_history")
+
+
 class Tank(db.Model):
     """A physical storage tank. Several tanks can share a fuel type.
 
@@ -76,6 +93,24 @@ class Nozzle(db.Model):
     @property
     def label(self):
         return f"Dispenser {self.dispenser.number} - Nozzle {self.nozzle_number}"
+
+
+class NozzleReset(db.Model):
+    """Marks that a nozzle's physical meter was replaced/rolled over as of
+    reset_date - readings from that date onward start a fresh counting era.
+    previous_reading_for/nearest_earlier_reading/next_sale_on_or_after in
+    ledger_logic.py all stop enforcing continuity across this boundary, so
+    a lower reading right after a reset isn't rejected as an error."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    nozzle_id = db.Column(db.Integer, db.ForeignKey("nozzle.id"), nullable=False)
+    reset_date = db.Column(db.Date, nullable=False)
+    note = db.Column(db.String(200))
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    nozzle = db.relationship("Nozzle", backref="resets")
+    user = db.relationship("User")
 
 
 class Account(db.Model):
@@ -127,6 +162,8 @@ class Sale(db.Model):
     than creating a duplicate, which is what makes backfilling/editing a
     past date safe.
     """
+
+    __table_args__ = (db.UniqueConstraint("nozzle_id", "entry_date", name="uq_sale_nozzle_date"),)
 
     id = db.Column(db.Integer, primary_key=True)
     nozzle_id = db.Column(db.Integer, db.ForeignKey("nozzle.id"), nullable=False)
@@ -361,6 +398,8 @@ class TankDip(db.Model):
     """A physical dip measurement for one tank on one date, compared
     against calculated book stock. At most one dip per (tank_id, entry_date).
     """
+
+    __table_args__ = (db.UniqueConstraint("tank_id", "entry_date", name="uq_tankdip_tank_date"),)
 
     id = db.Column(db.Integer, primary_key=True)
     tank_id = db.Column(db.Integer, db.ForeignKey("tank.id"), nullable=False)

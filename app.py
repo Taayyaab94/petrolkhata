@@ -21,6 +21,7 @@ from flask_login import (
 )
 from flask_wtf import CSRFProtect
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 
 import charts
 from extensions import db, login_manager
@@ -31,9 +32,12 @@ from ledger_logic import (
     cash_account_balance,
     cash_account_ledger_events,
     fuel_sales_for_date,
+    latest_reset_for,
     nearest_earlier_reading,
     next_sale_on_or_after,
     previous_reading_for,
+    price_on_date,
+    record_fuel_price,
     sales_breakdown_for_date,
     stock_series,
 )
@@ -47,8 +51,10 @@ from models import (
     Dispenser,
     EmployeeLoan,
     Expense,
+    FuelPriceHistory,
     FuelType,
     Nozzle,
+    NozzleReset,
     Receipt,
     Sale,
     StockPurchase,
@@ -140,6 +146,16 @@ def get_cash_account():
         db.session.add(cash_account)
         db.session.commit()
     return cash_account
+
+
+def would_overdraw_cash(reduction, restoration=0):
+    """True if applying a cash-in-hand reduction (an expense, loan, cash
+    purchase, supplier payment, deposit, or bank-sale reclassification)
+    would push the register below zero - a physical cash drawer can't go
+    negative. `restoration` is the amount an in-place edit is undoing from
+    an entry's old value, for edits rather than brand-new entries."""
+    projected = cash_account_balance(get_cash_account()) + restoration - reduction
+    return projected < -0.01
 
 
 @app.before_request
@@ -319,6 +335,14 @@ def setup_dispensers():
                 db.session.add(fuel_type)
                 fuel_type_by_name[name_lower] = fuel_type
             db.session.flush()
+            for fuel_type in fuel_type_by_name.values():
+                db.session.add(
+                    FuelPriceHistory(
+                        fuel_type_id=fuel_type.id,
+                        price_per_liter=fuel_type.price_per_liter,
+                        effective_date=date.today(),
+                    )
+                )
 
             created_tanks = []
             for i, t in enumerate(setup["tanks"]):
@@ -398,6 +422,9 @@ def settings_add_tank():
             fuel_type = FuelType(name=fuel_name, price_per_liter=price)
             db.session.add(fuel_type)
             db.session.flush()
+            db.session.add(
+                FuelPriceHistory(fuel_type_id=fuel_type.id, price_per_liter=price, effective_date=date.today())
+            )
         number = (db.session.query(func.coalesce(func.max(Tank.number), 0)).scalar()) + 1
         db.session.add(
             Tank(
@@ -445,7 +472,7 @@ def settings_edit_price(fuel_type_id):
     if not price or price <= 0:
         flash("Please enter a valid price.", "error")
     else:
-        fuel.price_per_liter = price
+        record_fuel_price(fuel, price, date.today())
         db.session.commit()
         flash(f"Updated price for {fuel.name}.", "success")
 
@@ -521,6 +548,129 @@ def settings_add_nozzle():
         )
         db.session.commit()
         flash(f"Added Nozzle {next_number} to Dispenser {dispenser.number}.", "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/edit-nozzle-tank/<int:nozzle_id>", methods=["POST"])
+@login_required
+@owner_required
+def settings_edit_nozzle_tank(nozzle_id):
+    """Only allowed before the nozzle has any reading history - a Sale's
+    fuel type is derived live from nozzle -> tank -> fuel_type (not frozen
+    at Sale-creation time), so reassigning a nozzle that already has sales
+    would silently relabel their historical fuel type too."""
+    nozzle = db.session.get(Nozzle, nozzle_id) or abort(404)
+    tank_id = request.form.get("tank_id", type=int)
+    tank = db.session.get(Tank, tank_id) if tank_id else None
+
+    if not tank:
+        flash("Please choose a valid tank.", "error")
+    elif Sale.query.filter_by(nozzle_id=nozzle.id).count() > 0:
+        flash(
+            f"Can't reassign {nozzle.label} - it already has reading history, "
+            "and moving it now would silently relabel past sales.",
+            "error",
+        )
+    else:
+        nozzle.tank_id = tank.id
+        db.session.commit()
+        flash(f"{nozzle.label} reassigned to {tank.label}.", "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/delete-nozzle/<int:nozzle_id>", methods=["POST"])
+@login_required
+@owner_required
+def settings_delete_nozzle(nozzle_id):
+    nozzle = db.session.get(Nozzle, nozzle_id) or abort(404)
+
+    if Sale.query.filter_by(nozzle_id=nozzle.id).count() > 0:
+        flash(f"Can't delete {nozzle.label} - it already has reading history.", "error")
+    else:
+        label = nozzle.label
+        db.session.delete(nozzle)
+        db.session.commit()
+        flash(f"Deleted {label}.", "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/delete-dispenser/<int:dispenser_id>", methods=["POST"])
+@login_required
+@owner_required
+def settings_delete_dispenser(dispenser_id):
+    dispenser = db.session.get(Dispenser, dispenser_id) or abort(404)
+    nozzle_ids = [n.id for n in dispenser.nozzles]
+    has_sales = nozzle_ids and Sale.query.filter(Sale.nozzle_id.in_(nozzle_ids)).count() > 0
+
+    if has_sales:
+        flash(f"Can't delete Dispenser {dispenser.number} - one of its nozzles already has reading history.", "error")
+    else:
+        for n in list(dispenser.nozzles):
+            db.session.delete(n)
+        db.session.delete(dispenser)
+        db.session.commit()
+        flash(f"Deleted Dispenser {dispenser.number}.", "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/delete-tank/<int:tank_id>", methods=["POST"])
+@login_required
+@owner_required
+def settings_delete_tank(tank_id):
+    tank = db.session.get(Tank, tank_id) or abort(404)
+    nozzles = Nozzle.query.filter_by(tank_id=tank.id).all()
+    nozzle_ids = [n.id for n in nozzles]
+    has_sales = nozzle_ids and Sale.query.filter(Sale.nozzle_id.in_(nozzle_ids)).count() > 0
+    has_purchases = StockPurchase.query.filter_by(tank_id=tank.id).count() > 0
+    has_dips = TankDip.query.filter_by(tank_id=tank.id).count() > 0
+
+    if has_sales or has_purchases or has_dips:
+        flash(f"Can't delete {tank.label} - it already has purchase, sale, or dip history.", "error")
+    else:
+        for n in nozzles:
+            db.session.delete(n)
+        db.session.delete(tank)
+        db.session.commit()
+        flash(f"Deleted {tank.label}.", "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/reset-nozzle-meter", methods=["POST"])
+@login_required
+@owner_required
+def settings_reset_nozzle_meter():
+    """Marks a nozzle's physical meter as replaced/rolled over as of
+    reset_date - see NozzleReset in models.py. From that date on, reading
+    continuity (previous/floor/later-reading checks) is only enforced
+    within the new era, so a lower reading right after doesn't get
+    rejected as an error."""
+    nozzle_id = request.form.get("nozzle_id", type=int)
+    reset_date = parse_date_param(request.form.get("reset_date"))
+    note = request.form.get("note", "").strip()
+    nozzle = db.session.get(Nozzle, nozzle_id) if nozzle_id else None
+
+    if not nozzle:
+        flash("Please choose a valid nozzle.", "error")
+    else:
+        db.session.add(
+            NozzleReset(
+                nozzle_id=nozzle.id,
+                reset_date=reset_date,
+                note=note or None,
+                user_id=current_user.id,
+            )
+        )
+        db.session.commit()
+        flash(
+            f"{nozzle.label}'s meter is now treated as reset from {reset_date} onward - readings "
+            "before that date are unaffected, but continuity is no longer enforced across it.",
+            "success",
+        )
 
     return redirect(url_for("settings"))
 
@@ -625,6 +775,11 @@ def ledger():
                     "previous_reading": prev_value,
                     "previous_is_auto": prev_auto,
                     "existing_reading": existing.current_reading if existing else None,
+                    # The price in effect ON selected_date, not necessarily
+                    # today's current price - so paging back to an earlier
+                    # date shows what fuel cost then, and a price change
+                    # made today doesn't retroactively relabel past days.
+                    "price": price_on_date(n.fuel_type, selected_date),
                 }
             )
 
@@ -643,6 +798,9 @@ def ledger():
         )
 
     fuel_types = FuelType.query.order_by(FuelType.name).all()
+    # Price shown/used for selected_date, not necessarily today's current
+    # price - see the "price" key on nozzle_rows above for why.
+    fuel_prices_by_id = {f.id: price_on_date(f, selected_date) for f in fuel_types}
     # Every picker on this page (customer, supplier, employee) lists every
     # account - an account's type label is just a default/hint, not a
     # restriction, so any account can receive any kind of entry (e.g. an
@@ -698,6 +856,7 @@ def ledger():
         nozzle_rows=nozzle_rows,
         tank_rows=tank_rows,
         fuel_types=fuel_types,
+        fuel_prices_by_id=fuel_prices_by_id,
         accounts=accounts,
         accounts_customer_first=accounts_customer_first,
         accounts_supplier_first=accounts_supplier_first,
@@ -710,6 +869,31 @@ def ledger():
         summary=summary,
         cash_balance=cash_balance,
     )
+
+
+@app.route("/ledger/fuel-price", methods=["POST"])
+@login_required
+@owner_required
+def ledger_fuel_price():
+    """Change a fuel's price effective as of whichever date is currently
+    selected on the Ledger. Paging back to an earlier date afterward shows
+    the price that was in effect then (from FuelPriceHistory), not this
+    new one - see price_on_date()."""
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    fuel_type_id = request.form.get("fuel_type_id", type=int)
+    price = request.form.get("price", type=float)
+    fuel = db.session.get(FuelType, fuel_type_id) if fuel_type_id else None
+
+    if not fuel:
+        flash("Please choose a valid fuel type.", "error")
+    elif not price or price <= 0:
+        flash("Please enter a valid price.", "error")
+    else:
+        record_fuel_price(fuel, price, entry_date)
+        db.session.commit()
+        flash(f"Updated {fuel.name} price to Rs {price:,.2f}/L, effective {entry_date}.", "success")
+
+    return redirect(url_for("ledger", date=entry_date))
 
 
 def prioritize_accounts(accounts, priority_type):
@@ -880,10 +1064,14 @@ def ledger_readings():
         if liters == 0 and not existing and not backfill_prior:
             continue
 
-        price = nozzle.tank.fuel_type.price_per_liter
+        # Price as of entry_date, not today's current price - so backfilling
+        # or correcting an old date re-prices at the rate that was actually
+        # in effect then, never at whatever the price happens to be today.
+        price = price_on_date(nozzle.fuel_type, entry_date)
         total_amount = round(liters * price, 2)
 
         if backfill_prior:
+            bf_price = price_on_date(nozzle.fuel_type, backfill_prior["entry_date"])
             bf_liters = round(
                 backfill_prior["current_reading"] - backfill_prior["previous_reading"], 2
             )
@@ -894,8 +1082,8 @@ def ledger_readings():
                     previous_reading=backfill_prior["previous_reading"],
                     current_reading=backfill_prior["current_reading"],
                     liters=bf_liters,
-                    price_per_liter=price,
-                    total_amount=round(bf_liters * price, 2),
+                    price_per_liter=bf_price,
+                    total_amount=round(bf_liters * bf_price, 2),
                     user_id=current_user.id,
                 )
             )
@@ -923,8 +1111,20 @@ def ledger_readings():
         saved += 1
 
     if saved:
-        db.session.commit()
-        flash(f"Saved {saved} nozzle reading(s) for {entry_date}.", "success")
+        try:
+            db.session.commit()
+            flash(f"Saved {saved} nozzle reading(s) for {entry_date}.", "success")
+        except IntegrityError:
+            # Two near-simultaneous submits for the same nozzle/date (a
+            # double-tap, a network retry) - the DB's own uniqueness
+            # constraint caught it. Fail safely instead of creating a
+            # duplicate Sale that would silently double-count the day.
+            db.session.rollback()
+            flash(
+                "Someone else just saved a reading for this date at the same time - "
+                "please check the entries below and try again.",
+                "error",
+            )
     if errors:
         for e in errors:
             flash(e, "error")
@@ -967,8 +1167,16 @@ def ledger_dip():
         saved += 1
 
     if saved:
-        db.session.commit()
-        flash(f"Saved {saved} dip reading(s) for {entry_date}.", "success")
+        try:
+            db.session.commit()
+            flash(f"Saved {saved} dip reading(s) for {entry_date}.", "success")
+        except IntegrityError:
+            db.session.rollback()
+            flash(
+                "Someone else just saved a dip reading for this date at the same time - "
+                "please check the entries below and try again.",
+                "error",
+            )
     else:
         flash("No dip readings entered.", "error")
 
@@ -1036,14 +1244,15 @@ def ledger_credit():
         db.session.rollback()
         flash("Liters must be a positive number.", "error")
     else:
-        amount = round(liters * fuel.price_per_liter, 2)
+        price = price_on_date(fuel, entry_date)
+        amount = round(liters * price, 2)
         db.session.add(
             CreditGiven(
                 account_id=customer.id,
                 fuel_type_id=fuel.id,
                 entry_date=entry_date,
                 liters=liters,
-                price_per_liter=fuel.price_per_liter,
+                price_per_liter=price,
                 amount=amount,
                 note=note or None,
                 user_id=current_user.id,
@@ -1074,6 +1283,11 @@ def ledger_expense():
         flash("Amount must be a positive number.", "error")
     elif method_error:
         flash(method_error, "error")
+    elif method == "cash" and would_overdraw_cash(amount):
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         db.session.add(
             Expense(
@@ -1120,12 +1334,25 @@ def ledger_purchase():
     elif not liters or liters <= 0:
         db.session.rollback()
         flash("Liters must be a positive number.", "error")
+    elif not cost or cost <= 0:
+        db.session.rollback()
+        flash(
+            "Cost must be a positive number - a delivery can't be recorded without its cost, "
+            "or the amount owed/paid for it would silently be treated as zero.",
+            "error",
+        )
     elif payment_type == "credit" and supplier_error:
         db.session.rollback()
         flash(supplier_error, "error")
     elif payment_type == "cash" and method_error:
         db.session.rollback()
         flash(method_error, "error")
+    elif payment_type == "cash" and method == "cash" and would_overdraw_cash(cost):
+        db.session.rollback()
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         db.session.add(
             StockPurchase(
@@ -1166,6 +1393,12 @@ def ledger_supplier_payment():
     elif method_error:
         db.session.rollback()
         flash(method_error, "error")
+    elif method == "cash" and would_overdraw_cash(amount):
+        db.session.rollback()
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         db.session.add(
             SupplierPayment(
@@ -1198,6 +1431,13 @@ def ledger_bank_sale():
     elif not amount or amount <= 0:
         db.session.rollback()
         flash("Amount must be a positive number.", "error")
+    elif would_overdraw_cash(amount):
+        db.session.rollback()
+        flash(
+            f"That's more than today's cash sales can cover (cash in hand: "
+            f"Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         db.session.add(
             BankSale(
@@ -1229,6 +1469,13 @@ def ledger_cash_deposit():
     elif not amount or amount <= 0:
         db.session.rollback()
         flash("Amount must be a positive number.", "error")
+    elif would_overdraw_cash(amount):
+        db.session.rollback()
+        flash(
+            f"Not enough cash in hand to deposit that much (available: "
+            f"Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         db.session.add(
             CashDeposit(
@@ -1263,6 +1510,12 @@ def ledger_employee_loan():
     elif method_error:
         db.session.rollback()
         flash(method_error, "error")
+    elif method == "cash" and would_overdraw_cash(amount):
+        db.session.rollback()
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         db.session.add(
             EmployeeLoan(
@@ -1390,6 +1643,12 @@ ACCOUNT_TYPES = ("customer", "supplier", "employee")
 def accounts():
     kind = request.args.get("kind", "all")
     type_filter = request.args.get("type", "all")
+    if type_filter in ("bank", "cash"):
+        # Debtor/creditor is a concept that only applies to customer/
+        # supplier/employee accounts - bank accounts and cash-in-hand are
+        # the pump's own money, not a relationship with someone else, so
+        # they always show under "All" regardless of a stale kind= param.
+        kind = "all"
 
     rows = []
     if type_filter not in ("bank", "cash"):
@@ -1545,6 +1804,34 @@ def account_opening_balance(account_id):
     return redirect(url_for("account_detail", account_id=account.id))
 
 
+@app.route("/accounts/<int:account_id>/delete", methods=["POST"])
+@login_required
+@owner_required
+def account_delete(account_id):
+    """Only allowed for an account with no transaction history and no
+    opening balance - a genuine "made this by mistake" case. An account
+    that's actually been used has to stay for the numbers to add up; you
+    can still just stop using it."""
+    account = db.session.get(Account, account_id) or abort(404)
+    has_entries = (
+        account.credit_entries
+        or account.receipts
+        or account.stock_purchases
+        or account.supplier_payments
+        or account.employee_loans
+    )
+
+    if has_entries or account.opening_balance:
+        flash(f"Can't delete {account.name} - it already has transaction history or a nonzero opening balance.", "error")
+    else:
+        name = account.name
+        db.session.delete(account)
+        db.session.commit()
+        flash(f'Deleted "{name}".', "success")
+
+    return redirect(url_for("accounts"))
+
+
 @app.route("/accounts/entry/credit/<int:entry_id>/edit", methods=["POST"])
 @login_required
 @owner_required
@@ -1561,11 +1848,12 @@ def account_entry_credit_edit(entry_id):
     elif not liters or liters <= 0:
         flash("Liters must be a positive number.", "error")
     else:
+        price = price_on_date(fuel, entry_date)
         entry.entry_date = entry_date
         entry.fuel_type_id = fuel.id
         entry.liters = liters
-        entry.price_per_liter = fuel.price_per_liter
-        entry.amount = round(liters * fuel.price_per_liter, 2)
+        entry.price_per_liter = price
+        entry.amount = round(liters * price, 2)
         entry.note = note or None
         db.session.commit()
         flash("Credit entry updated.", "success")
@@ -1615,6 +1903,8 @@ def account_entry_purchase_edit(entry_id):
         flash("Please choose a valid tank.", "error")
     elif not liters or liters <= 0:
         flash("Liters must be a positive number.", "error")
+    elif not cost or cost <= 0:
+        flash("Cost must be a positive number.", "error")
     else:
         entry.entry_date = entry_date
         entry.tank_id = tank.id
@@ -1636,11 +1926,18 @@ def account_entry_supplier_payment_edit(entry_id):
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
     method, bank_account, method_error = resolve_payment_method(request.form)
+    old_cash_amount = entry.amount if entry.method == "cash" else 0
+    new_cash_amount = amount if (amount and method == "cash") else 0
 
     if not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
     elif method_error:
         flash(method_error, "error")
+    elif would_overdraw_cash(new_cash_amount, restoration=old_cash_amount):
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -1662,11 +1959,18 @@ def account_entry_employee_loan_edit(entry_id):
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
     method, bank_account, method_error = resolve_payment_method(request.form)
+    old_cash_amount = entry.amount if entry.method == "cash" else 0
+    new_cash_amount = amount if (amount and method == "cash") else 0
 
     if not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
     elif method_error:
         flash(method_error, "error")
+    elif would_overdraw_cash(new_cash_amount, restoration=old_cash_amount):
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -1734,6 +2038,37 @@ def bank_account_opening_balance(bank_account_id):
     return redirect(url_for("bank_account_detail", bank_account_id=bank_account.id))
 
 
+@app.route("/accounts/bank/<int:bank_account_id>/delete", methods=["POST"])
+@login_required
+@owner_required
+def bank_account_delete(bank_account_id):
+    """Only allowed for a bank account with no transaction history and no
+    opening balance - see account_delete for the same reasoning."""
+    bank_account = db.session.get(BankAccount, bank_account_id) or abort(404)
+    has_entries = (
+        bank_account.bank_sales
+        or bank_account.deposits
+        or bank_account.receipts
+        or bank_account.employee_loans_paid
+        or bank_account.expenses
+        or bank_account.fuel_purchases
+        or bank_account.supplier_payments_paid
+    )
+
+    if has_entries or bank_account.opening_balance:
+        flash(
+            f"Can't delete {bank_account.name} - it already has transaction history or a nonzero opening balance.",
+            "error",
+        )
+    else:
+        name = bank_account.name
+        db.session.delete(bank_account)
+        db.session.commit()
+        flash(f'Deleted "{name}".', "success")
+
+    return redirect(url_for("accounts"))
+
+
 @app.route("/accounts/entry/bank-sale/<int:entry_id>/edit", methods=["POST"])
 @login_required
 @owner_required
@@ -1745,6 +2080,11 @@ def account_entry_bank_sale_edit(entry_id):
 
     if not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
+    elif would_overdraw_cash(amount, restoration=entry.amount):
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -1766,6 +2106,11 @@ def account_entry_cash_deposit_edit(entry_id):
 
     if not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
+    elif would_overdraw_cash(amount, restoration=entry.amount):
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -1791,6 +2136,8 @@ def account_entry_expense_edit(entry_id):
     amount = request.form.get("amount", type=float)
     method, bank_account, method_error = resolve_payment_method(request.form)
     next_url = request.form.get("next") or url_for("accounts")
+    old_cash_amount = entry.amount if entry.method == "cash" else 0
+    new_cash_amount = amount if (amount and method == "cash") else 0
 
     if not category:
         flash("Please enter an expense category.", "error")
@@ -1798,6 +2145,11 @@ def account_entry_expense_edit(entry_id):
         flash("Amount must be a positive number.", "error")
     elif method_error:
         flash(method_error, "error")
+    elif would_overdraw_cash(new_cash_amount, restoration=old_cash_amount):
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         entry.entry_date = entry_date
         entry.category = category
@@ -1830,13 +2182,22 @@ def account_entry_fuel_purchase_edit(entry_id):
     method, bank_account, method_error = resolve_payment_method(request.form)
     next_url = request.form.get("next") or url_for("accounts")
     tank = db.session.get(Tank, tank_id) if tank_id else None
+    old_cash_amount = (entry.cost or 0) if entry.method == "cash" else 0
+    new_cash_amount = cost if method == "cash" else 0
 
     if not tank:
         flash("Please choose a valid tank.", "error")
     elif not liters or liters <= 0:
         flash("Liters must be a positive number.", "error")
+    elif not cost or cost <= 0:
+        flash("Cost must be a positive number.", "error")
     elif method_error:
         flash(method_error, "error")
+    elif would_overdraw_cash(new_cash_amount, restoration=old_cash_amount):
+        flash(
+            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
+            "error",
+        )
     else:
         entry.entry_date = entry_date
         entry.tank_id = tank.id
@@ -1877,8 +2238,8 @@ def cash_account_opening_balance():
     opening_balance = request.form.get("opening_balance", type=float)
     raw_date = request.form.get("opening_balance_date", "").strip()
 
-    if opening_balance is None:
-        flash("Please enter an opening balance (use 0 to clear it).", "error")
+    if opening_balance is None or opening_balance < 0:
+        flash("Please enter a valid opening balance (0 or more - cash in hand can't be negative).", "error")
     elif opening_balance and not raw_date:
         flash("Please choose an as-of date for the opening balance.", "error")
     else:
@@ -2011,6 +2372,7 @@ def reports_trends():
     payments_by_day = group_sum(Receipt, Receipt.amount)
     expenses_by_day = group_sum(Expense, Expense.amount)
     purchase_liters_by_day = group_sum(StockPurchase, StockPurchase.liters)
+    purchase_cost_by_day = group_sum(StockPurchase, StockPurchase.cost)
 
     labels = [d.strftime(label_fmt) for d in all_dates]
     cash_series = [round(sales_by_day.get(d, 0) - credit_by_day.get(d, 0), 2) for d in all_dates]
@@ -2018,6 +2380,14 @@ def reports_trends():
     receipts_series = [round(payments_by_day.get(d, 0), 2) for d in all_dates]
     expenses_series = [round(expenses_by_day.get(d, 0), 2) for d in all_dates]
     purchases_series = [round(purchase_liters_by_day.get(d, 0), 2) for d in all_dates]
+    # Simplified cash-basis profit: sales revenue minus what was spent
+    # buying fuel (regardless of whether it's sold yet) minus expenses.
+    # Not adjusted for unsold inventory, so treat it as an estimate rather
+    # than a strict accounting profit/COGS figure.
+    profit_series = [
+        round(sales_by_day.get(d, 0) - purchase_cost_by_day.get(d, 0) - expenses_by_day.get(d, 0), 2)
+        for d in all_dates
+    ]
 
     sales_chart = charts.stacked_bar_chart(
         cash_series, credit_series, labels, ["#059669", "#dc2626"], ["Cash Sales", "Credit Given"]
@@ -2026,6 +2396,7 @@ def reports_trends():
         [receipts_series, expenses_series], labels, ["#4f46e5", "#dc2626"], ["Receipts", "Expenses"]
     )
     purchases_chart = charts.bar_chart(purchases_series, labels, "#4f46e5")
+    profit_chart = charts.line_chart([profit_series], labels, ["#059669"], ["Profit (Est.)"])
 
     tanks = Tank.query.order_by(Tank.number).all()
     tank_colors = ["#4f46e5", "#059669", "#d97706", "#dc2626", "#0891b2", "#7c3aed"]
@@ -2074,6 +2445,7 @@ def reports_trends():
         total_receipts=sum(payments_by_day.values()),
         total_expenses=sum(expenses_by_day.values()),
         total_purchased_liters=sum(purchase_liters_by_day.values()),
+        total_profit=sum(profit_series),
     )
 
     return render_template(
@@ -2086,6 +2458,7 @@ def reports_trends():
         stock_chart=stock_chart,
         fuel_sold_chart=fuel_sold_chart,
         fuel_sold_totals=fuel_sold_totals,
+        profit_chart=profit_chart,
         totals=totals,
     )
 

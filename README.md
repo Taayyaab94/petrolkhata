@@ -90,7 +90,10 @@ updates it in place instead of duplicating it.
   a customer, cash physically deposited into a bank account, an expense,
   a fuel purchase/delivery into a specific tank (cash or on credit from
   a supplier), a payment made to a supplier against fuel taken on
-  credit, and a loan/advance to an employee.
+  credit, and a loan/advance to an employee. A Fuel Purchase's cost is
+  required - it can't be saved blank - and shows a live cost-per-liter
+  calculation (cost ÷ liters) as you type, so a mistyped cost is easy to
+  catch before saving.
 - **Dip - Tank Stock Check:** enter each tank's physical dip reading.
   Book stock (starting stock + purchases − sales) is calculated
   automatically; the variance between dip and book stock is shown
@@ -149,6 +152,23 @@ worked out automatically) - so the chain re-links itself as you go, and
 you only ever have to type numbers by hand for the specific day where
 the trail actually goes cold.
 
+### Fuel prices
+
+A **Fuel Prices** panel (owner only) sits right on the Ledger, showing
+each fuel's price as of whichever date is currently selected. Changing
+it there takes effect from that date onward - paging back to an earlier
+date shows whatever price was actually in effect then, and a nozzle
+reading or credit-to-customer entry always prices itself against the
+rate for its own `entry_date`, not whatever the price happens to be
+today. That means correcting an old reading weeks later re-prices it at
+the rate that was actually charged back then, never at today's rate.
+
+Cash in hand can never go negative - any action that would draw it down
+past zero (an expense, loan, cash-paid fuel purchase, supplier payment,
+deposit, or bank-sale reclassification, whether a new entry or an edit
+to an existing one) is rejected with the current available balance
+shown, rather than letting the register go negative.
+
 Dashboard, Inventory, and Reports are **read-only** — they reflect
 what's been entered on the Ledger; there's no separate place to edit
 stock directly. Accounts is the one exception: an account's own detail
@@ -162,7 +182,11 @@ always still happens from the Ledger.
   nozzle/fuel), cash vs. bank vs. credit split, receipts, expenses, bank
   sales, inventory received, and stock available per tank.
 - **Trends** — the same metrics as charts over the past 15 days, month,
-  3 months, or year, so patterns are visible over time.
+  3 months, or year, so patterns are visible over time, plus a
+  **Profit (Est.)** figure and chart: sales revenue minus fuel purchase
+  cost minus expenses, cash-basis. It's an estimate, not a strict
+  accounting profit/margin figure - it isn't adjusted for fuel bought but
+  not yet sold.
 
 ## Accounts (customers, suppliers, employees)
 
