@@ -3,15 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{% block title %}Munchi{% endblock %}</title>
+<title>{% block title %}Petrol Khata{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 <div class="app-shell">
   <aside class="sidebar">
     <div class="sidebar-brand">
-      <div class="mark">M</div>
-      <div class="name">Munchi</div>
+      <div class="mark">P</div>
+      <div class="name">Petrol Khata</div>
     </div>
 
     <nav class="sidebar-nav">
@@ -25,7 +25,7 @@
       <a href="{{ url_for('inventory') }}" class="{{ 'active' if request.endpoint == 'inventory' }}">
         <span class="icon">&#9970;</span> Inventory
       </a>
-      <a href="{{ url_for('accounts') }}" class="{{ 'active' if request.endpoint in ('accounts', 'account_detail') }}">
+      <a href="{{ url_for('accounts') }}" class="{{ 'active' if request.endpoint in ('accounts', 'account_detail', 'bank_account_detail') }}">
         <span class="icon">&#128101;</span> Accounts
       </a>
       {% if current_user.is_owner %}

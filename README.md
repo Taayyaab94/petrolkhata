@@ -1,10 +1,11 @@
-# Munchi
+# Petrol Khata
 
 A local web app for petrol pump accounting, built around a single
-date-based ledger screen - the way a traditional cash book works. Log a
-nozzle meter reading, a customer payment, a credit sale, an expense, a
-fuel delivery, or a tank dip, and everything else (tank stock, customer
-balances, dashboard totals, reports) updates automatically.
+date-based ledger screen - the way a traditional cash book (*khata*)
+works. Log a nozzle meter reading, a receipt, a credit sale, an expense,
+a fuel delivery, or a tank dip, and everything else (tank stock, account
+balances, cash/bank balances, dashboard totals, reports) updates
+automatically.
 
 ## What this is built with
 
@@ -48,7 +49,7 @@ terminal as well):
 
 ## Business setup wizard
 
-The first time an Owner logs in, Munchi walks through a one-time bootstrap:
+The first time an Owner logs in, Petrol Khata walks through a one-time bootstrap:
 
 1. **Tanks** — add each physical storage tank: its fuel type, capacity,
    and current stock. You can add more than one tank of the same fuel
@@ -76,17 +77,20 @@ Re-saving a nozzle reading or tank dip for a date that already has one
 updates it in place instead of duplicating it.
 
 - **Debit - Sales & Receipts:** enter the date's meter reading for each
-  nozzle - Munchi calculates liters sold (this reading − the previous
-  one) and the sale amount (liters × price) live, and reduces the
-  nozzle's tank stock. Also where a customer's payment, an employee's
-  loan repayment, and bank sales (the portion of today's sales that
-  came in via card/bank, reconciled to a specific bank account) are
-  recorded.
-- **Credit - Customer, Expenses & Purchases:** credit given to a
-  customer, a loan/advance to an employee, an expense, a fuel
-  purchase/delivery into a specific tank (cash or on credit from a
-  supplier), a payment made to a supplier against fuel taken on credit,
-  or cash physically deposited into a bank account.
+  nozzle - Petrol Khata calculates liters sold (this reading − the
+  previous one) and the sale amount (liters × price) live, and reduces
+  the nozzle's tank stock. **Payment / Receipt Received** is one merged
+  entry for money coming in from any account - a customer paying down
+  what they owe, or an employee repaying a loan; there's no separate
+  "customer payment" vs. "employee repayment" form, since the account
+  picker already lists every account regardless of type. Bank Sales (the
+  portion of today's sales that came in via card/bank, reconciled to a
+  specific bank account) is also recorded here.
+- **Credit - Customer, Expenses & Purchases**, in order: credit given to
+  a customer, cash physically deposited into a bank account, an expense,
+  a fuel purchase/delivery into a specific tank (cash or on credit from
+  a supplier), a payment made to a supplier against fuel taken on
+  credit, and a loan/advance to an employee.
 - **Dip - Tank Stock Check:** enter each tank's physical dip reading.
   Book stock (starting stock + purchases − sales) is calculated
   automatically; the variance between dip and book stock is shown
@@ -96,13 +100,34 @@ updates it in place instead of duplicating it.
 Right below the date picker, a **sales breakdown** shows Total Sales
 (from nozzle readings) minus Credit Sales minus Bank Sales, leaving Cash
 Sales as the remainder - the actual physical cash the register should
-have taken in that day.
+have taken in that day. Below that (owner only), **Cash in Hand** and
+every bank account's balance are shown live - both reflect every
+transaction to date (sales, receipts, deposits, expenses, loans, cash-
+paid purchases, supplier payments), not just today's, and update the
+moment a new entry is saved.
+
+### Paid via: cash or a specific bank account
+
+**Payment / Receipt Received**, **Loan / Advance to Employee**, and
+**Expense** each have a "Paid via" field: Cash, or a specific bank
+account (pick an existing one or quick-add a new one inline, the same
+"+ Add new..." pattern used throughout the Ledger). Choosing a bank
+account routes that entry's money through the bank instead of the
+register:
+- A receipt paid via a bank increases that bank's balance instead of
+  cash in hand.
+- A loan or expense paid via a bank decreases that bank's balance
+  instead of cash in hand.
+
+Fuel purchases and payments to suppliers don't have this field - they're
+always assumed to be cash (or, for a fuel purchase, on supplier credit),
+same as before.
 
 Each nozzle's reading history forms one continuous chain - a date's
 saved current reading automatically becomes the following day's previous
 reading. The very first reading ever logged for a nozzle works the same
 way as catching up on a missed day: since there's no day before it with
-an entry, Munchi asks you to type both the previous and current reading.
+an entry, Petrol Khata asks you to type both the previous and current reading.
 The same thing happens for any other date with no entry the day before
 it (e.g. backfilling old paper-book records with a gap in them). Once
 saved, that typed previous reading is used to fill in the missing day
@@ -111,9 +136,12 @@ worked out automatically) - so the chain re-links itself as you go, and
 you only ever have to type numbers by hand for the specific day where
 the trail actually goes cold.
 
-Dashboard, Inventory, Accounts, and Reports are **read-only** — they
-reflect what's been entered on the Ledger; there's no separate place to
-edit stock or any account's balance directly.
+Dashboard, Inventory, and Reports are **read-only** — they reflect
+what's been entered on the Ledger; there's no separate place to edit
+stock directly. Accounts is the one exception: an account's own detail
+page lets the owner edit its details, opening balance, and individual
+transactions (see "Accounts" below) - creating a *new* entry, though,
+always still happens from the Ledger.
 
 ## Reports
 
@@ -147,9 +175,11 @@ shifts. The **Account type** filter narrows by label only.
 Fuel bought on credit ("On Credit (from supplier)" in the Fuel Purchase
 form) is tied to an account. Paying that down is its own Ledger entry
 ("Payment to Supplier"), which reduces what's owed - mirroring how a
-customer receipt reduces what a customer owes. Employees work the same
-way in reverse: a "Loan / Advance to Employee" entry increases what they
-owe the pump, and "Repayment from Employee" reduces it.
+receipt reduces what a customer owes. Employees work the same way in
+reverse: a "Loan / Advance to Employee" entry increases what they owe
+the pump, and a "Payment / Receipt Received" entry against that same
+account reduces it - the same merged receipt entry used for customer
+payments.
 
 ### Editing an account
 
@@ -171,19 +201,36 @@ and the account's current total - there's nothing cached to go stale.
 
 ## Bank accounts &amp; cash in hand
 
-The pump can have multiple named bank accounts (e.g. "Meezan", "HBL"),
-each with its own balance, managed from **Settings**. Two Ledger entries
-affect them:
+The pump can have multiple named bank accounts (e.g. "Meezan", "HBL").
+Create one from **Settings** or from the **Accounts** page (owner
+only) - either way it also shows up on Accounts alongside customers,
+suppliers, and employees, with its own detail page: transaction
+history with a running balance, and (owner only) editable name, opening
+balance, and individual entries - the same editing pattern as any other
+account, described below. Unlike customers/suppliers/employees, a bank
+account's balance isn't a debt relationship, so it never shows up under
+the Debitors/Creditors filter - only under "All" or the "Bank Accounts"
+type filter.
+
+Ledger entries that affect a bank account's balance:
 - **Bank Sales** - the portion of a date's sales that were paid by
   card/bank rather than cash, tagged to the account it landed in.
   Increases that bank's balance and reduces Cash Sales for the day.
 - **Cash Deposit** (owner only) - cash physically taken to the bank.
   Increases the chosen bank's balance and decreases cash in hand.
+- **Payment / Receipt Received**, when its "Paid via" is set to this
+  bank instead of Cash - increases the bank's balance instead of cash
+  in hand.
+- **Loan / Advance to Employee** and **Expense**, when "Paid via" is set
+  to this bank - decreases the bank's balance instead of cash in hand.
 
 **Cash in hand** is a single running total (Settings &gt; "Cash in
-Hand"): opening balance, plus every day's cash sales, minus cash
-deposited into banks. Both bank accounts and cash in hand are visible
-on the Dashboard.
+Hand"): opening balance, plus every day's cash sales and every
+cash-method receipt, minus cash deposited into banks, cash-method loans
+and expenses, cash-paid fuel purchases, and payments to suppliers (which
+are always cash - they don't have a "Paid via" field). Cash in hand and
+every bank account's balance are shown live on the Ledger and Daily
+Report pages (owner only), and on the Dashboard.
 
 ## Opening balances
 
@@ -201,7 +248,8 @@ everything after it reads as a correct running balance.
   page. Quick-adding a new account inline from the Ledger (e.g. "+ Add
   new customer") always starts at zero - use the Accounts page or the
   account's own page instead when it already has a real balance.
-- For bank accounts: set it when adding the account in Settings.
+- For bank accounts: set it when adding the account (Settings or
+  Accounts), or any time afterward from the bank account's own page.
 - For cash in hand: set it any time from Settings - there's only ever
   one cash-in-hand account, so it's editable rather than something you
   "add".
@@ -210,10 +258,10 @@ everything after it reads as a correct running balance.
 
 - **Owner** — full access: everything on the Ledger, Settings, and both
   Reports pages.
-- **Staff** — can log nozzle readings, customer payments/credit, bank
-  sales, and employee loans/repayments, and tank dips. Cannot log
-  expenses, fuel purchases, supplier payments, or cash deposits, and
-  cannot see Settings or Reports.
+- **Staff** — can log nozzle readings, receipts, customer credit, bank
+  sales, and employee loans, and tank dips. Cannot log expenses, fuel
+  purchases, supplier payments, or cash deposits, cannot edit any
+  account, and cannot see Settings, Reports, or live cash/bank balances.
 
 ## Where your data lives
 
@@ -223,7 +271,7 @@ that holds your business data.
 
 ## Deploying online (Vercel)
 
-Munchi can also run as a hosted web app on [Vercel](https://vercel.com)
+Petrol Khata can also run as a hosted web app on [Vercel](https://vercel.com)
 instead of (or alongside) running locally. Vercel's serverless functions
 have no persistent disk, so this mode swaps the local SQLite file for a
 real hosted Postgres database — everything else (routes, templates,
@@ -243,7 +291,7 @@ variables, so local `python app.py` still works exactly as before.
    sessions valid across deployments. Without it the app still runs, but
    a fresh key is generated on every cold start and everyone gets logged
    out constantly.
-5. **Deploy.** On first request, Munchi creates its tables in the new
+5. **Deploy.** On first request, Petrol Khata creates its tables in the new
    Postgres database and seeds the default `owner`/`staff` accounts —
    same as the very first local run. Change those passwords immediately
    since the deployment is reachable over the internet.
@@ -277,3 +325,11 @@ database periodically the same way you'd back up `instance/petrolpump.db`.
   fuel purchase) whether it was paid cash vs. on credit. There's also no
   delete - to correct an entry logged against the wrong account or with
   the wrong payment method, log an offsetting entry instead.
+- Fuel purchases and payments to suppliers don't have a "Paid via" field
+  - they're always cash (or, for a purchase, supplier credit), so they
+  can't be routed through a specific bank account the way receipts,
+  loans, and expenses can.
+- A bank account's Receipt and Loan entries are only editable from the
+  account they belong to, not from the bank's own page (which links to
+  it instead) - Bank Sales, Cash Deposits, and Expenses are editable
+  directly from the bank's page.

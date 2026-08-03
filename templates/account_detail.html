@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ account.name }} - Munchi{% endblock %}
+{% block title %}{{ account.name }} - Petrol Khata{% endblock %}
 {% block content %}
 <p><a href="{{ url_for('accounts') }}">&larr; Back to Accounts</a></p>
 <div class="page-head">
@@ -77,9 +77,9 @@
         <td><span class="badge badge-low">Credit Given</span></td>
         <td>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
         <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
-        {% elif e.kind == "customer_payment" %}
-        <td><span class="badge badge-ok">Payment Received</span></td>
-        <td>{{ e.obj.note or "-" }}</td>
+        {% elif e.kind == "receipt" %}
+        <td><span class="badge badge-ok">Receipt</span></td>
+        <td>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
         <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
         {% elif e.kind == "purchase" %}
         <td><span class="badge badge-low">Purchase (Credit)</span></td>
@@ -91,12 +91,8 @@
         <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
         {% elif e.kind == "employee_loan" %}
         <td><span class="badge badge-low">Loan / Advance</span></td>
-        <td>{{ e.obj.note or "-" }}</td>
+        <td>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
         <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
-        {% elif e.kind == "employee_repayment" %}
-        <td><span class="badge badge-ok">Repayment</span></td>
-        <td>{{ e.obj.note or "-" }}</td>
-        <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
         {% endif %}
         <td>{{ "%.2f"|format(e.running_balance) }}</td>
         {% if current_user.is_owner %}
@@ -152,14 +148,12 @@
             <button type="submit" class="btn btn-sm">Save</button>
           </form>
           {% else %}
-          {% if e.kind == "customer_payment" %}
-          {% set edit_action = url_for('account_entry_customer_payment_edit', entry_id=e.obj.id) %}
+          {% if e.kind == "receipt" %}
+          {% set edit_action = url_for('account_entry_receipt_edit', entry_id=e.obj.id) %}
           {% elif e.kind == "supplier_payment" %}
           {% set edit_action = url_for('account_entry_supplier_payment_edit', entry_id=e.obj.id) %}
-          {% elif e.kind == "employee_loan" %}
-          {% set edit_action = url_for('account_entry_employee_loan_edit', entry_id=e.obj.id) %}
           {% else %}
-          {% set edit_action = url_for('account_entry_employee_repayment_edit', entry_id=e.obj.id) %}
+          {% set edit_action = url_for('account_entry_employee_loan_edit', entry_id=e.obj.id) %}
           {% endif %}
           <form method="post" action="{{ edit_action }}" class="form-grid">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -169,6 +163,16 @@
             <label>Amount (Rs)
               <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" required>
             </label>
+            {% if e.kind in ("receipt", "employee_loan") %}
+            <label>Paid via
+              <select name="paid_via">
+                <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
+                {% for b in bank_accounts %}
+                <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            {% endif %}
             <label>Note (optional)
               <input type="text" name="note" value="{{ e.obj.note or '' }}">
             </label>

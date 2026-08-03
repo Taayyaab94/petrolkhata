@@ -10,7 +10,18 @@ from datetime import datetime, timedelta
 from sqlalchemy import func
 
 from extensions import db
-from models import BankSale, CashDeposit, CreditGiven, Nozzle, Sale, StockPurchase
+from models import (
+    BankSale,
+    CashDeposit,
+    CreditGiven,
+    EmployeeLoan,
+    Expense,
+    Nozzle,
+    Receipt,
+    Sale,
+    StockPurchase,
+    SupplierPayment,
+)
 
 
 def book_stock(tank, as_of_date):
@@ -145,9 +156,9 @@ def sales_breakdown_for_date(entry_date):
 
 
 def account_ledger_events(account):
-    """Full transaction history for one account (opening balance plus all
-    six entry kinds that can be posted to it), each tagged with the
-    running balance immediately after it, most recent first.
+    """Full transaction history for one account (opening balance plus every
+    entry kind that can be posted to it), each tagged with the running
+    balance immediately after it, most recent first.
 
     The running balance is computed by walking the events in ascending
     date order and accumulating - never stored - so editing any entry's
@@ -172,9 +183,9 @@ def account_ledger_events(account):
         events.append(
             {"kind": "credit", "entry_date": c.entry_date, "sort_key": (c.entry_date, c.recorded_at), "obj": c, "delta": c.amount}
         )
-    for p in account.customer_payments:
+    for r in account.receipts:
         events.append(
-            {"kind": "customer_payment", "entry_date": p.entry_date, "sort_key": (p.entry_date, p.recorded_at), "obj": p, "delta": -p.amount}
+            {"kind": "receipt", "entry_date": r.entry_date, "sort_key": (r.entry_date, r.recorded_at), "obj": r, "delta": -r.amount}
         )
     for pu in account.stock_purchases:
         if pu.payment_type == "credit":
@@ -189,10 +200,6 @@ def account_ledger_events(account):
         events.append(
             {"kind": "employee_loan", "entry_date": l.entry_date, "sort_key": (l.entry_date, l.recorded_at), "obj": l, "delta": l.amount}
         )
-    for r in account.employee_repayments:
-        events.append(
-            {"kind": "employee_repayment", "entry_date": r.entry_date, "sort_key": (r.entry_date, r.recorded_at), "obj": r, "delta": -r.amount}
-        )
 
     events.sort(key=lambda e: e["sort_key"])
     running = 0.0
@@ -205,18 +212,95 @@ def account_ledger_events(account):
 
 
 def cash_account_balance(cash_account):
-    """Cash-in-hand: opening balance, plus every date's cash sales
-    (total sales minus credit minus bank sales), minus cash physically
-    deposited into a bank account."""
+    """Cash-in-hand: opening balance, plus every date's cash sales (total
+    sales minus credit minus bank sales) and every cash-method receipt,
+    minus cash physically deposited into a bank account and every
+    cash-method outflow (loans, expenses, cash-paid fuel purchases,
+    supplier payments - none of those have a bank-routing option, so
+    they're always assumed to be cash)."""
     total_sales = db.session.query(func.coalesce(func.sum(Sale.total_amount), 0)).scalar()
     total_credit = db.session.query(func.coalesce(func.sum(CreditGiven.amount), 0)).scalar()
     total_bank_sales = db.session.query(func.coalesce(func.sum(BankSale.amount), 0)).scalar()
     total_deposits = db.session.query(func.coalesce(func.sum(CashDeposit.amount), 0)).scalar()
+    total_cash_receipts = (
+        db.session.query(func.coalesce(func.sum(Receipt.amount), 0))
+        .filter(Receipt.method == "cash")
+        .scalar()
+    )
+    total_cash_loans = (
+        db.session.query(func.coalesce(func.sum(EmployeeLoan.amount), 0))
+        .filter(EmployeeLoan.method == "cash")
+        .scalar()
+    )
+    total_cash_expenses = (
+        db.session.query(func.coalesce(func.sum(Expense.amount), 0))
+        .filter(Expense.method == "cash")
+        .scalar()
+    )
+    total_cash_purchases = (
+        db.session.query(func.coalesce(func.sum(StockPurchase.cost), 0))
+        .filter(StockPurchase.payment_type == "cash")
+        .scalar()
+    )
+    total_supplier_payments = db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).scalar()
     return round(
         cash_account.opening_balance
         + total_sales
         - total_credit
         - total_bank_sales
-        - total_deposits,
+        - total_deposits
+        + total_cash_receipts
+        - total_cash_loans
+        - total_cash_expenses
+        - total_cash_purchases
+        - total_supplier_payments,
         2,
     )
+
+
+def bank_account_ledger_events(bank_account):
+    """Full transaction history for one bank account (opening balance plus
+    every entry kind that can be routed to it), each tagged with the
+    running balance immediately after it, most recent first. Same
+    always-recompute-fresh approach as account_ledger_events()."""
+    events = []
+    if bank_account.opening_balance:
+        opening_date = bank_account.opening_balance_date or bank_account.created_at.date()
+        events.append(
+            {
+                "kind": "opening",
+                "entry_date": opening_date,
+                "sort_key": (opening_date, datetime.min),
+                "obj": None,
+                "delta": bank_account.opening_balance,
+            }
+        )
+    for s in bank_account.bank_sales:
+        events.append(
+            {"kind": "bank_sale", "entry_date": s.entry_date, "sort_key": (s.entry_date, s.recorded_at), "obj": s, "delta": s.amount}
+        )
+    for d in bank_account.deposits:
+        events.append(
+            {"kind": "deposit", "entry_date": d.entry_date, "sort_key": (d.entry_date, d.recorded_at), "obj": d, "delta": d.amount}
+        )
+    for r in bank_account.receipts:
+        events.append(
+            {"kind": "receipt", "entry_date": r.entry_date, "sort_key": (r.entry_date, r.recorded_at), "obj": r, "delta": r.amount}
+        )
+    for l in bank_account.employee_loans_paid:
+        events.append(
+            {"kind": "employee_loan", "entry_date": l.entry_date, "sort_key": (l.entry_date, l.recorded_at), "obj": l, "delta": -l.amount}
+        )
+    for e in bank_account.expenses:
+        events.append(
+            {"kind": "expense", "entry_date": e.entry_date, "sort_key": (e.entry_date, e.recorded_at), "obj": e, "delta": -e.amount}
+        )
+
+    events.sort(key=lambda e: e["sort_key"])
+    running = 0.0
+    for e in events:
+        running += e["delta"]
+        e["running_balance"] = round(running, 2)
+
+    events.reverse()
+    return events

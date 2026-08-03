@@ -1,6 +1,6 @@
 """Small dependency-free SVG chart renderers.
 
-Munchi runs fully offline, so charts are generated as plain server-side
+Petrol Khata runs fully offline, so charts are generated as plain server-side
 SVG (no Chart.js / CDN) and returned as HTML-safe strings for templates
 to render with `|safe`. All interpolated values are numbers or
 datetime-formatted strings - never raw user input - so this is safe to

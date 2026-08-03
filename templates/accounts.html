@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Munchi - Accounts{% endblock %}
+{% block title %}Petrol Khata - Accounts{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
     <h1>Accounts</h1>
-    <div class="subtitle">Customers, suppliers and employees. Record credit/payments/loans from the Ledger screen - click an account below to view or edit its history.</div>
+    <div class="subtitle">Customers, suppliers, employees and bank accounts. Record credit/payments/loans from the Ledger screen - click an account below to view or edit its history.</div>
   </div>
   <a href="{{ url_for('ledger') }}" class="btn">Open Ledger &rarr;</a>
 </div>
@@ -20,9 +20,10 @@
     <a href="{{ url_for('accounts', kind=kind, type='customer') }}" class="filter-pill {{ 'active' if type_filter == 'customer' }}">Customers</a>
     <a href="{{ url_for('accounts', kind=kind, type='supplier') }}" class="filter-pill {{ 'active' if type_filter == 'supplier' }}">Suppliers</a>
     <a href="{{ url_for('accounts', kind=kind, type='employee') }}" class="filter-pill {{ 'active' if type_filter == 'employee' }}">Employees</a>
+    <a href="{{ url_for('accounts', kind='all', type='bank') }}" class="filter-pill {{ 'active' if type_filter == 'bank' }}">Bank Accounts</a>
   </div>
 </div>
-<p class="hint">An account's type label is just for organizing/searching - any account can have both credit given to it and credit taken from it (e.g. another pump you sometimes buy from and sometimes sell to). The Debitors/Creditors split above is based purely on each account's current balance, so an account can move between the two as its balance changes.</p>
+<p class="hint">An account's type label is just for organizing/searching - any account can have both credit given to it and credit taken from it (e.g. another pump you sometimes buy from and sometimes sell to). The Debitors/Creditors split above is based purely on each account's current balance, so an account can move between the two as its balance changes. Bank accounts are the pump's own money, not a debitor/creditor relationship, so they only appear under "All".</p>
 
 <div class="panel">
   <div class="table-wrap">
@@ -31,11 +32,16 @@
     <tbody>
       {% for r in rows %}
       <tr class="{{ 'row-low' if r.balance != 0 else '' }}">
-        <td>{{ r.account.name }}</td>
-        <td><span class="badge">{{ r.account.account_type|capitalize }}</span></td>
-        <td>{{ r.account.phone or "-" }}</td>
+        <td>{{ r.name }}</td>
+        <td><span class="badge">{{ "Bank Account" if r.kind == "bank" else r.obj.account_type|capitalize }}</span></td>
+        <td>{{ r.obj.phone or "-" if r.kind == "account" else "-" }}</td>
+        {% if r.kind == "bank" %}
+        <td>{{ "%.2f"|format(r.balance) }}</td>
+        <td><a href="{{ url_for('bank_account_detail', bank_account_id=r.obj.id) }}">View history</a></td>
+        {% else %}
         <td>{{ "%.2f"|format(r.balance) }} <span class="hint-sm">{{ "owed to you" if r.balance > 0 else ("you owe" if r.balance < 0 else "") }}</span></td>
-        <td><a href="{{ url_for('account_detail', account_id=r.account.id) }}">View history</a></td>
+        <td><a href="{{ url_for('account_detail', account_id=r.obj.id) }}">View history</a></td>
+        {% endif %}
       </tr>
       {% else %}
       <tr><td colspan="5">No accounts match this filter.</td></tr>
@@ -52,17 +58,18 @@
   <form method="post" action="{{ url_for('accounts_add') }}" class="form-grid">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label>Account Type
-      <select name="account_type" required>
+      <select name="account_type" id="add_account_type" required>
         <option value="">Select...</option>
         <option value="customer">Customer</option>
         <option value="supplier">Supplier</option>
         <option value="employee">Employee</option>
+        <option value="bank">Bank Account</option>
       </select>
     </label>
     <label>Name
       <input type="text" name="name" required>
     </label>
-    <label>Phone (optional)
+    <label id="add_phone_field">Phone (optional)
       <input type="text" name="phone">
     </label>
     <label>Opening Balance (Rs)
@@ -74,5 +81,10 @@
     <button type="submit" class="btn">Add Account</button>
   </form>
 </div>
+<script>
+document.getElementById('add_account_type').addEventListener('change', function () {
+  document.getElementById('add_phone_field').style.display = this.value === 'bank' ? 'none' : '';
+});
+</script>
 {% endif %}
 {% endblock %}

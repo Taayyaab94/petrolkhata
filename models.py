@@ -102,21 +102,19 @@ class Account(db.Model):
         """Positive balance = this account owes the pump money (debitor).
         Negative balance = the pump owes this account money (creditor)."""
         credit_given_total = sum(c.amount for c in self.credit_entries)
-        customer_payments_total = sum(p.amount for p in self.customer_payments)
+        receipts_total = sum(r.amount for r in self.receipts)
         purchases_credit_total = sum(
             (p.cost or 0) for p in self.stock_purchases if p.payment_type == "credit"
         )
         supplier_payments_total = sum(p.amount for p in self.supplier_payments)
         loans_total = sum(l.amount for l in self.employee_loans)
-        repayments_total = sum(r.amount for r in self.employee_repayments)
         return round(
             self.opening_balance
             + credit_given_total
-            - customer_payments_total
+            - receipts_total
             - purchases_credit_total
             + supplier_payments_total
-            + loans_total
-            - repayments_total,
+            + loans_total,
             2,
         )
 
@@ -205,49 +203,47 @@ class SupplierPayment(db.Model):
     user = db.relationship("User")
 
 
-class CustomerPayment(db.Model):
+class Receipt(db.Model):
+    """A debit-side ledger entry: money received from any account, whether
+    that's a customer paying down what they owe or an employee repaying a
+    loan - account_type doesn't matter, this is one merged entry kind
+    covering both. Optionally routed straight into a bank account instead
+    of being received as cash (method + bank_account_id); when method is
+    "cash" the amount adds to cash-in-hand instead."""
+
     id = db.Column(db.Integer, primary_key=True)
     account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=False)
     entry_date = db.Column(db.Date, nullable=False)
     amount = db.Column(db.Float, nullable=False)
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank
+    bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
     note = db.Column(db.String(200))
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
-    account = db.relationship("Account", backref="customer_payments")
+    account = db.relationship("Account", backref="receipts")
+    bank_account = db.relationship("BankAccount", backref="receipts")
     user = db.relationship("User")
 
 
 class EmployeeLoan(db.Model):
     """A credit-side ledger entry: a loan or advance given to an account,
     the same way CreditGiven works for customers - it increases what the
-    account owes the pump."""
+    account owes the pump. Paid out as cash (reduces cash-in-hand) or from
+    a specific bank account (reduces that bank's balance)."""
 
     id = db.Column(db.Integer, primary_key=True)
     account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=False)
     entry_date = db.Column(db.Date, nullable=False)
     amount = db.Column(db.Float, nullable=False)
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank
+    bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
     note = db.Column(db.String(200))
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
     account = db.relationship("Account", backref="employee_loans")
-    user = db.relationship("User")
-
-
-class EmployeeRepayment(db.Model):
-    """A debit-side ledger entry: an account paying back a loan/advance.
-    Mirrors CustomerPayment."""
-
-    id = db.Column(db.Integer, primary_key=True)
-    account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=False)
-    entry_date = db.Column(db.Date, nullable=False)
-    amount = db.Column(db.Float, nullable=False)
-    note = db.Column(db.String(200))
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    recorded_at = db.Column(db.DateTime, default=datetime.now)
-
-    account = db.relationship("Account", backref="employee_repayments")
+    bank_account = db.relationship("BankAccount", backref="employee_loans_paid")
     user = db.relationship("User")
 
 
@@ -257,9 +253,12 @@ class Expense(db.Model):
     category = db.Column(db.String(80), nullable=False)
     description = db.Column(db.String(200))
     amount = db.Column(db.Float, nullable=False)
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank
+    bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
+    bank_account = db.relationship("BankAccount", backref="expenses")
     user = db.relationship("User")
 
 
@@ -274,7 +273,18 @@ class BankAccount(db.Model):
     def balance(self):
         sales_total = sum(s.amount for s in self.bank_sales)
         deposits_total = sum(d.amount for d in self.deposits)
-        return round(self.opening_balance + sales_total + deposits_total, 2)
+        receipts_total = sum(r.amount for r in self.receipts)
+        loans_total = sum(l.amount for l in self.employee_loans_paid)
+        expenses_total = sum(e.amount for e in self.expenses)
+        return round(
+            self.opening_balance
+            + sales_total
+            + deposits_total
+            + receipts_total
+            - loans_total
+            - expenses_total,
+            2,
+        )
 
 
 class BankSale(db.Model):

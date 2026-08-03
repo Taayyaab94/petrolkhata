@@ -26,6 +26,7 @@ import charts
 from extensions import db, login_manager
 from ledger_logic import (
     account_ledger_events,
+    bank_account_ledger_events,
     book_stock,
     cash_account_balance,
     nearest_earlier_reading,
@@ -41,13 +42,12 @@ from models import (
     CashAccount,
     CashDeposit,
     CreditGiven,
-    CustomerPayment,
     Dispenser,
     EmployeeLoan,
-    EmployeeRepayment,
     Expense,
     FuelType,
     Nozzle,
+    Receipt,
     Sale,
     StockPurchase,
     SupplierPayment,
@@ -346,7 +346,7 @@ def setup_dispensers():
 
             db.session.commit()
             session.pop("setup", None)
-            flash("Setup complete! Munchi is ready to use.", "success")
+            flash("Setup complete! Petrol Khata is ready to use.", "success")
             return redirect(url_for("ledger"))
 
     return render_template("setup_dispensers.html", tank_options=tank_options)
@@ -577,8 +577,8 @@ def get_feed_for_date(entry_date, full_visibility):
     events = []
     for s in Sale.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "sale", "sort": s.recorded_at, "obj": s})
-    for p in CustomerPayment.query.filter_by(entry_date=entry_date).all():
-        events.append({"kind": "payment", "sort": p.recorded_at, "obj": p})
+    for r in Receipt.query.filter_by(entry_date=entry_date).all():
+        events.append({"kind": "receipt", "sort": r.recorded_at, "obj": r})
     for c in CreditGiven.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "credit", "sort": c.recorded_at, "obj": c})
     for dip in TankDip.query.filter_by(entry_date=entry_date).all():
@@ -588,8 +588,6 @@ def get_feed_for_date(entry_date, full_visibility):
         events.append({"kind": "bank_sale", "sort": bs.recorded_at, "obj": bs})
     for el in EmployeeLoan.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "employee_loan", "sort": el.recorded_at, "obj": el})
-    for er in EmployeeRepayment.query.filter_by(entry_date=entry_date).all():
-        events.append({"kind": "employee_repayment", "sort": er.recorded_at, "obj": er})
 
     if full_visibility:
         for e in Expense.query.filter_by(entry_date=entry_date).all():
@@ -656,11 +654,12 @@ def ledger():
     feed = get_feed_for_date(selected_date, full_visibility=current_user.is_owner)
 
     summary = None
+    cash_balance = None
     if current_user.is_owner:
         credit_total = breakdown["credit"]
         receipts_total = (
-            db.session.query(func.coalesce(func.sum(CustomerPayment.amount), 0))
-            .filter(CustomerPayment.entry_date == selected_date)
+            db.session.query(func.coalesce(func.sum(Receipt.amount), 0))
+            .filter(Receipt.entry_date == selected_date)
             .scalar()
         )
         expenses_total = (
@@ -682,6 +681,7 @@ def ledger():
             debit_total=total_sales + receipts_total - credit_total,
             credit_total=expenses_total + cash_purchases_total + supplier_payments_total,
         )
+        cash_balance = cash_account_balance(get_cash_account())
 
     return render_template(
         "ledger.html",
@@ -696,6 +696,7 @@ def ledger():
         total_sales=total_sales,
         breakdown=breakdown,
         summary=summary,
+        cash_balance=cash_balance,
     )
 
 
@@ -749,6 +750,30 @@ def resolve_bank_account(form, field="bank_account_id", new_field="new_bank_acco
     if not bank_account:
         return None, "Please choose a bank account."
     return bank_account, None
+
+
+def resolve_payment_method(form, field="paid_via", new_field="new_bank_account_name"):
+    """Shared "Paid via" lookup for receipts, employee loans, and expenses:
+    either plain cash, or a specific bank account (existing or quick-added
+    inline, same __new__ convention as the other account pickers).
+    Returns (method, bank_account_or_None, error)."""
+    value = form.get(field, "cash")
+    if value in ("", "cash"):
+        return "cash", None, None
+
+    if value == "__new__":
+        name = form.get(new_field, "").strip()
+        if not name:
+            return None, None, "Please enter a name for the new bank account."
+        bank_account = BankAccount(name=name)
+        db.session.add(bank_account)
+        db.session.flush()
+        return "bank", bank_account, None
+
+    bank_account = db.session.get(BankAccount, int(value))
+    if not bank_account:
+        return None, None, "Please choose a valid payment method."
+    return "bank", bank_account, None
 
 
 @app.route("/ledger/readings", methods=["POST"])
@@ -928,32 +953,42 @@ def ledger_dip():
     return redirect(url_for("ledger", date=entry_date))
 
 
-@app.route("/ledger/payment", methods=["POST"])
+def resolve_receipt_account(form):
+    return resolve_account(form, "account_id", "new_account_name", "customer", "account", "new_account_phone")
+
+
+@app.route("/ledger/receipt", methods=["POST"])
 @login_required
-def ledger_payment():
+def ledger_receipt():
     entry_date = parse_date_param(request.form.get("entry_date"))
-    customer, error = resolve_customer(request.form)
+    account, error = resolve_receipt_account(request.form)
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
+    method, bank_account, method_error = resolve_payment_method(request.form)
 
     if error:
         db.session.rollback()
         flash(error, "error")
     elif not amount or amount <= 0:
         db.session.rollback()
-        flash("Payment amount must be a positive number.", "error")
+        flash("Amount must be a positive number.", "error")
+    elif method_error:
+        db.session.rollback()
+        flash(method_error, "error")
     else:
         db.session.add(
-            CustomerPayment(
-                account_id=customer.id,
+            Receipt(
+                account_id=account.id,
                 entry_date=entry_date,
                 amount=amount,
+                method=method,
+                bank_account_id=bank_account.id if bank_account else None,
                 note=note or None,
                 user_id=current_user.id,
             )
         )
         db.session.commit()
-        flash(f"Recorded payment of Rs {amount:,.2f} from {customer.name}.", "success")
+        flash(f"Recorded receipt of Rs {amount:,.2f} from {account.name}.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -1009,11 +1044,14 @@ def ledger_expense():
     category = request.form.get("category", "").strip()
     description = request.form.get("description", "").strip()
     amount = request.form.get("amount", type=float)
+    method, bank_account, method_error = resolve_payment_method(request.form)
 
     if not category:
         flash("Please enter an expense category.", "error")
     elif not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
+    elif method_error:
+        flash(method_error, "error")
     else:
         db.session.add(
             Expense(
@@ -1021,6 +1059,8 @@ def ledger_expense():
                 category=category,
                 description=description or None,
                 amount=amount,
+                method=method,
+                bank_account_id=bank_account.id if bank_account else None,
                 user_id=current_user.id,
             )
         )
@@ -1176,6 +1216,7 @@ def ledger_employee_loan():
     employee, error = resolve_employee(request.form)
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
+    method, bank_account, method_error = resolve_payment_method(request.form)
 
     if error:
         db.session.rollback()
@@ -1183,48 +1224,23 @@ def ledger_employee_loan():
     elif not amount or amount <= 0:
         db.session.rollback()
         flash("Amount must be a positive number.", "error")
+    elif method_error:
+        db.session.rollback()
+        flash(method_error, "error")
     else:
         db.session.add(
             EmployeeLoan(
                 account_id=employee.id,
                 entry_date=entry_date,
                 amount=amount,
+                method=method,
+                bank_account_id=bank_account.id if bank_account else None,
                 note=note or None,
                 user_id=current_user.id,
             )
         )
         db.session.commit()
         flash(f"Recorded loan/advance of Rs {amount:,.2f} to {employee.name}.", "success")
-
-    return redirect(url_for("ledger", date=entry_date))
-
-
-@app.route("/ledger/employee-repayment", methods=["POST"])
-@login_required
-def ledger_employee_repayment():
-    entry_date = parse_date_param(request.form.get("entry_date"))
-    employee, error = resolve_employee(request.form)
-    amount = request.form.get("amount", type=float)
-    note = request.form.get("note", "").strip()
-
-    if error:
-        db.session.rollback()
-        flash(error, "error")
-    elif not amount or amount <= 0:
-        db.session.rollback()
-        flash("Amount must be a positive number.", "error")
-    else:
-        db.session.add(
-            EmployeeRepayment(
-                account_id=employee.id,
-                entry_date=entry_date,
-                amount=amount,
-                note=note or None,
-                user_id=current_user.id,
-            )
-        )
-        db.session.commit()
-        flash(f"Recorded repayment of Rs {amount:,.2f} from {employee.name}.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -1339,23 +1355,30 @@ def accounts():
     kind = request.args.get("kind", "all")
     type_filter = request.args.get("type", "all")
 
-    query = Account.query
-    if type_filter in ACCOUNT_TYPES:
-        query = query.filter_by(account_type=type_filter)
-
     rows = []
-    for a in query.all():
-        # Debitor/creditor is purely a function of the account's current
-        # balance sign - not its type label - so an account's
-        # classification here can shift over time as its balance shifts.
-        rows.append({"account": a, "balance": a.balance})
+    if type_filter != "bank":
+        query = Account.query
+        if type_filter in ACCOUNT_TYPES:
+            query = query.filter_by(account_type=type_filter)
+        for a in query.all():
+            # Debitor/creditor is purely a function of the account's current
+            # balance sign - not its type label - so an account's
+            # classification here can shift over time as its balance shifts.
+            rows.append({"kind": "account", "obj": a, "name": a.name, "balance": a.balance})
+
+    if kind == "all" and type_filter in ("all", "bank"):
+        for b in BankAccount.query.all():
+            # Bank accounts are the pump's own money, not a debitor/creditor
+            # relationship, so they only show up under "All" - not under
+            # the Debitors/Creditors filter.
+            rows.append({"kind": "bank", "obj": b, "name": b.name, "balance": b.balance})
 
     if kind == "debitors":
         rows = [r for r in rows if r["balance"] > 0]
     elif kind == "creditors":
         rows = [r for r in rows if r["balance"] < 0]
 
-    rows.sort(key=lambda r: r["account"].name.lower())
+    rows.sort(key=lambda r: r["name"].lower())
 
     return render_template(
         "accounts.html", rows=rows, kind=kind, type_filter=type_filter, today=date.today()
@@ -1375,6 +1398,16 @@ def accounts_add():
 
     if not name:
         flash("Please enter a name.", "error")
+    elif account_type == "bank":
+        db.session.add(
+            BankAccount(
+                name=name,
+                opening_balance=opening_balance,
+                opening_balance_date=opening_balance_date,
+            )
+        )
+        db.session.commit()
+        flash(f"Added bank account \"{name}\".", "success")
     elif account_type not in ACCOUNT_TYPES:
         flash("Please choose an account type.", "error")
     else:
@@ -1400,6 +1433,7 @@ def account_detail(account_id):
     events = account_ledger_events(account)
     fuel_types = FuelType.query.order_by(FuelType.name).all()
     tanks = Tank.query.order_by(Tank.number).all()
+    bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
     return render_template(
         "account_detail.html",
         account=account,
@@ -1407,6 +1441,7 @@ def account_detail(account_id):
         today=date.today(),
         fuel_types=fuel_types,
         tanks=tanks,
+        bank_accounts=bank_accounts,
     )
 
 
@@ -1482,23 +1517,28 @@ def account_entry_credit_edit(entry_id):
     return redirect(url_for("account_detail", account_id=entry.account_id))
 
 
-@app.route("/accounts/entry/customer-payment/<int:entry_id>/edit", methods=["POST"])
+@app.route("/accounts/entry/receipt/<int:entry_id>/edit", methods=["POST"])
 @login_required
 @owner_required
-def account_entry_customer_payment_edit(entry_id):
-    entry = db.session.get(CustomerPayment, entry_id) or abort(404)
+def account_entry_receipt_edit(entry_id):
+    entry = db.session.get(Receipt, entry_id) or abort(404)
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
+    method, bank_account, method_error = resolve_payment_method(request.form)
 
     if not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
+    elif method_error:
+        flash(method_error, "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
+        entry.method = method
+        entry.bank_account_id = bank_account.id if bank_account else None
         entry.note = note or None
         db.session.commit()
-        flash("Payment updated.", "success")
+        flash("Receipt updated.", "success")
 
     return redirect(url_for("account_detail", account_id=entry.account_id))
 
@@ -1560,12 +1600,17 @@ def account_entry_employee_loan_edit(entry_id):
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
+    method, bank_account, method_error = resolve_payment_method(request.form)
 
     if not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
+    elif method_error:
+        flash(method_error, "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
+        entry.method = method
+        entry.bank_account_id = bank_account.id if bank_account else None
         entry.note = note or None
         db.session.commit()
         flash("Loan updated.", "success")
@@ -1573,11 +1618,59 @@ def account_entry_employee_loan_edit(entry_id):
     return redirect(url_for("account_detail", account_id=entry.account_id))
 
 
-@app.route("/accounts/entry/employee-repayment/<int:entry_id>/edit", methods=["POST"])
+@app.route("/accounts/bank/<int:bank_account_id>")
+@login_required
+def bank_account_detail(bank_account_id):
+    bank_account = db.session.get(BankAccount, bank_account_id) or abort(404)
+    events = bank_account_ledger_events(bank_account)
+    return render_template(
+        "bank_account_detail.html", bank_account=bank_account, events=events, today=date.today()
+    )
+
+
+@app.route("/accounts/bank/<int:bank_account_id>/edit", methods=["POST"])
 @login_required
 @owner_required
-def account_entry_employee_repayment_edit(entry_id):
-    entry = db.session.get(EmployeeRepayment, entry_id) or abort(404)
+def bank_account_edit(bank_account_id):
+    bank_account = db.session.get(BankAccount, bank_account_id) or abort(404)
+    name = request.form.get("name", "").strip()
+
+    if not name:
+        flash("Please enter a name.", "error")
+    else:
+        bank_account.name = name
+        db.session.commit()
+        flash("Bank account details updated.", "success")
+
+    return redirect(url_for("bank_account_detail", bank_account_id=bank_account.id))
+
+
+@app.route("/accounts/bank/<int:bank_account_id>/opening-balance", methods=["POST"])
+@login_required
+@owner_required
+def bank_account_opening_balance(bank_account_id):
+    bank_account = db.session.get(BankAccount, bank_account_id) or abort(404)
+    opening_balance = request.form.get("opening_balance", type=float)
+    raw_date = request.form.get("opening_balance_date", "").strip()
+
+    if opening_balance is None:
+        flash("Please enter an opening balance (use 0 to clear it).", "error")
+    elif opening_balance and not raw_date:
+        flash("Please choose an as-of date for the opening balance.", "error")
+    else:
+        bank_account.opening_balance = opening_balance
+        bank_account.opening_balance_date = parse_date_param(raw_date) if raw_date else None
+        db.session.commit()
+        flash("Opening balance updated.", "success")
+
+    return redirect(url_for("bank_account_detail", bank_account_id=bank_account.id))
+
+
+@app.route("/accounts/entry/bank-sale/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_bank_sale_edit(entry_id):
+    entry = db.session.get(BankSale, entry_id) or abort(404)
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
@@ -1589,9 +1682,56 @@ def account_entry_employee_repayment_edit(entry_id):
         entry.amount = amount
         entry.note = note or None
         db.session.commit()
-        flash("Repayment updated.", "success")
+        flash("Bank sale updated.", "success")
 
-    return redirect(url_for("account_detail", account_id=entry.account_id))
+    return redirect(url_for("bank_account_detail", bank_account_id=entry.bank_account_id))
+
+
+@app.route("/accounts/entry/cash-deposit/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_cash_deposit_edit(entry_id):
+    entry = db.session.get(CashDeposit, entry_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    amount = request.form.get("amount", type=float)
+    note = request.form.get("note", "").strip()
+
+    if not amount or amount <= 0:
+        flash("Amount must be a positive number.", "error")
+    else:
+        entry.entry_date = entry_date
+        entry.amount = amount
+        entry.note = note or None
+        db.session.commit()
+        flash("Cash deposit updated.", "success")
+
+    return redirect(url_for("bank_account_detail", bank_account_id=entry.bank_account_id))
+
+
+@app.route("/accounts/entry/bank-expense/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_bank_expense_edit(entry_id):
+    entry = db.session.get(Expense, entry_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    category = request.form.get("category", "").strip()
+    description = request.form.get("description", "").strip()
+    amount = request.form.get("amount", type=float)
+    bank_account_id = entry.bank_account_id
+
+    if not category:
+        flash("Please enter an expense category.", "error")
+    elif not amount or amount <= 0:
+        flash("Amount must be a positive number.", "error")
+    else:
+        entry.entry_date = entry_date
+        entry.category = category
+        entry.description = description or None
+        entry.amount = amount
+        db.session.commit()
+        flash("Expense updated.", "success")
+
+    return redirect(url_for("bank_account_detail", bank_account_id=bank_account_id))
 
 
 # -------------------------------------------------------------- reports ---
@@ -1624,7 +1764,7 @@ def reports():
     total_bank_sales = sum(b.amount for b in bank_sales)
     cash_sales = total_sales - total_credit_given - total_bank_sales
 
-    payments = CustomerPayment.query.filter_by(entry_date=selected_date).all()
+    payments = Receipt.query.filter_by(entry_date=selected_date).all()
     total_payments = sum(p.amount for p in payments)
 
     expenses = Expense.query.filter_by(entry_date=selected_date).order_by(Expense.recorded_at).all()
@@ -1662,6 +1802,8 @@ def reports():
         - total_supplier_payments
     )
     outstanding_credit = sum(b for a in Account.query.all() if (b := a.balance) > 0)
+    cash_balance = cash_account_balance(get_cash_account())
+    bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
 
     return render_template(
         "reports.html",
@@ -1683,6 +1825,8 @@ def reports():
         tank_rows=tank_rows,
         net_cash_flow=net_cash_flow,
         outstanding_credit=outstanding_credit,
+        cash_balance=cash_balance,
+        bank_accounts=bank_accounts,
     )
 
 
@@ -1713,7 +1857,7 @@ def reports_trends():
 
     sales_by_day = group_sum(Sale, Sale.total_amount)
     credit_by_day = group_sum(CreditGiven, CreditGiven.amount)
-    payments_by_day = group_sum(CustomerPayment, CustomerPayment.amount)
+    payments_by_day = group_sum(Receipt, Receipt.amount)
     expenses_by_day = group_sum(Expense, Expense.amount)
     purchase_liters_by_day = group_sum(StockPurchase, StockPurchase.liters)
 

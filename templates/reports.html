@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Munchi - Daily Report{% endblock %}
+{% block title %}Petrol Khata - Daily Report{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
@@ -53,6 +53,20 @@
     <div class="label">Outstanding Receivables (Owed To You)</div>
     <div class="value">Rs {{ "%.2f"|format(outstanding_credit) }}</div>
   </div>
+</div>
+
+<div class="stat-row">
+  <div class="stat-card accent-green">
+    <div class="label">Cash in Hand</div>
+    <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
+    <div class="sub">Live balance, all transactions to date</div>
+  </div>
+  {% for b in bank_accounts %}
+  <div class="stat-card">
+    <div class="label">{{ b.name }}</div>
+    <div class="value">Rs {{ "%.2f"|format(b.balance) }}</div>
+  </div>
+  {% endfor %}
 </div>
 
 <div class="panel">
