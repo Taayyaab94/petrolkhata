@@ -47,6 +47,24 @@
 </div>
 
 <div class="panel">
+  <div class="panel-head"><h3>Fuel Sold by Type (Liters)</h3></div>
+  <p class="hint">From nozzle meter reading differences, same as the sales figures.</p>
+  {% if fuel_sold_chart %}
+  <div class="chart-wrap">{{ fuel_sold_chart|safe }}</div>
+  <div class="stat-row">
+    {% for name, liters in fuel_sold_totals.items() %}
+    <div class="stat-card">
+      <div class="label">{{ name }}</div>
+      <div class="value">{{ "%.2f"|format(liters) }} L</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="hint">No fuel types configured.</p>
+  {% endif %}
+</div>
+
+<div class="panel">
   <div class="panel-head"><h3>Cash Flow - Receipts vs Expenses</h3></div>
   <div class="chart-wrap">{{ cashflow_chart|safe }}</div>
 </div>

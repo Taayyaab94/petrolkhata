@@ -169,12 +169,22 @@ class CreditGiven(db.Model):
 
 
 class StockPurchase(db.Model):
+    """payment_type decides whether this purchase touches an account at
+    all: "credit" ties it to a supplier account (via account_id) and
+    never touches cash/bank at purchase time; "cash" means it was paid
+    for immediately, and method/bank_account_id (same pattern as Receipt,
+    EmployeeLoan, Expense) decide whether that payment came out of
+    cash-in-hand or a specific bank account. method/bank_account_id are
+    only meaningful when payment_type == "cash"."""
+
     id = db.Column(db.Integer, primary_key=True)
     tank_id = db.Column(db.Integer, db.ForeignKey("tank.id"), nullable=False)
     entry_date = db.Column(db.Date, nullable=False)
     liters = db.Column(db.Float, nullable=False)
     cost = db.Column(db.Float)
     payment_type = db.Column(db.String(10), nullable=False, default="cash")  # cash | credit
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank (only when payment_type == cash)
+    bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
     account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=True)
     note = db.Column(db.String(200))
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
@@ -182,24 +192,30 @@ class StockPurchase(db.Model):
 
     tank = db.relationship("Tank", backref="purchases")
     account = db.relationship("Account", backref="stock_purchases")
+    bank_account = db.relationship("BankAccount", backref="fuel_purchases")
     user = db.relationship("User")
 
 
 class SupplierPayment(db.Model):
     """A credit-side ledger entry: money we paid an account against fuel
-    we previously took on credit. Mirrors CustomerPayment - reduces what
-    we owe the account the same way a customer receipt reduces what a
-    customer owes us."""
+    we previously took on credit. Mirrors Receipt - reduces what we owe
+    the account the same way a receipt reduces what a customer owes us.
+    Paid as cash (reduces cash-in-hand) or from a specific bank account
+    (reduces that bank's balance) - same "Paid via" pattern as Receipt,
+    EmployeeLoan, and Expense."""
 
     id = db.Column(db.Integer, primary_key=True)
     account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=False)
     entry_date = db.Column(db.Date, nullable=False)
     amount = db.Column(db.Float, nullable=False)
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank
+    bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
     note = db.Column(db.String(200))
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
     account = db.relationship("Account", backref="supplier_payments")
+    bank_account = db.relationship("BankAccount", backref="supplier_payments_paid")
     user = db.relationship("User")
 
 
@@ -276,13 +292,19 @@ class BankAccount(db.Model):
         receipts_total = sum(r.amount for r in self.receipts)
         loans_total = sum(l.amount for l in self.employee_loans_paid)
         expenses_total = sum(e.amount for e in self.expenses)
+        fuel_purchases_total = sum(
+            (p.cost or 0) for p in self.fuel_purchases if p.payment_type == "cash"
+        )
+        supplier_payments_total = sum(p.amount for p in self.supplier_payments_paid)
         return round(
             self.opening_balance
             + sales_total
             + deposits_total
             + receipts_total
             - loans_total
-            - expenses_total,
+            - expenses_total
+            - fuel_purchases_total
+            - supplier_payments_total,
             2,
         )
 

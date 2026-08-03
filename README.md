@@ -100,28 +100,41 @@ updates it in place instead of duplicating it.
 Right below the date picker, a **sales breakdown** shows Total Sales
 (from nozzle readings) minus Credit Sales minus Bank Sales, leaving Cash
 Sales as the remainder - the actual physical cash the register should
-have taken in that day. Below that (owner only), **Cash in Hand** and
-every bank account's balance are shown live - both reflect every
-transaction to date (sales, receipts, deposits, expenses, loans, cash-
-paid purchases, supplier payments), not just today's, and update the
-moment a new entry is saved.
+have taken in that day. Next to it, **liters sold per fuel type** (also
+computed from nozzle meter reading differences) shows for the selected
+date - the same figures appear on the Daily Report and, plotted over
+time, on Trends. Below that (owner only), **Cash in Hand** and every
+bank account's balance are shown live - both reflect every transaction
+to date (sales, receipts, deposits, expenses, loans, fuel purchases,
+supplier payments), not just today's, and update the moment a new entry
+is saved.
 
 ### Paid via: cash or a specific bank account
 
-**Payment / Receipt Received**, **Loan / Advance to Employee**, and
-**Expense** each have a "Paid via" field: Cash, or a specific bank
-account (pick an existing one or quick-add a new one inline, the same
-"+ Add new..." pattern used throughout the Ledger). Choosing a bank
-account routes that entry's money through the bank instead of the
-register:
+**Payment / Receipt Received**, **Loan / Advance to Employee**,
+**Expense**, a cash-paid **Fuel Purchase**, and **Payment to Supplier**
+each have a "Paid via" field: Cash, or a specific bank account (pick an
+existing one or quick-add a new one inline, the same "+ Add new..."
+pattern used throughout the Ledger). Choosing a bank account routes that
+entry's money through the bank instead of the register:
 - A receipt paid via a bank increases that bank's balance instead of
   cash in hand.
-- A loan or expense paid via a bank decreases that bank's balance
-  instead of cash in hand.
+- A loan, expense, fuel purchase, or supplier payment paid via a bank
+  decreases that bank's balance instead of cash in hand.
 
-Fuel purchases and payments to suppliers don't have this field - they're
-always assumed to be cash (or, for a fuel purchase, on supplier credit),
-same as before.
+Fuel Purchase also has an **"On Credit (from supplier)"** option
+alongside "Paid Cash" - selecting it hides "Paid via" and shows a
+supplier picker instead, posting the purchase amount to that supplier's
+account rather than touching cash or a bank at all (settled later via a
+"Payment to Supplier" entry, same as before).
+
+Every account picker lists every account regardless of type (see
+"Accounts" below), but sorts its own relevant type first - the Customer
+picker shows customers before suppliers/employees, the Supplier picker
+shows suppliers first, and so on - so the common case doesn't mean
+scrolling past every other type. The one exception is Payment / Receipt
+Received's "Account" picker, which is intentionally generic (plain
+alphabetical) since it isn't tied to one type.
 
 Each nozzle's reading history forms one continuous chain - a date's
 saved current reading automatically becomes the following day's previous
@@ -172,6 +185,12 @@ top of the Accounts page is based purely on this current balance sign,
 so an account's classification there can shift over time as its balance
 shifts. The **Account type** filter narrows by label only.
 
+Below the main table, an **Expenses** panel (owner only) lists every
+expense ever logged, all-time and in one place - expenses aren't tied to
+any account, so this is the only place to see and edit them all
+(individual expenses are also editable from whichever bank/cash page
+they were paid from, but this is the complete list).
+
 Fuel bought on credit ("On Credit (from supplier)" in the Fuel Purchase
 form) is tied to an account. Paying that down is its own Ledger entry
 ("Payment to Supplier"), which reduces what's owed - mirroring how a
@@ -221,16 +240,27 @@ Ledger entries that affect a bank account's balance:
 - **Payment / Receipt Received**, when its "Paid via" is set to this
   bank instead of Cash - increases the bank's balance instead of cash
   in hand.
-- **Loan / Advance to Employee** and **Expense**, when "Paid via" is set
-  to this bank - decreases the bank's balance instead of cash in hand.
+- **Loan / Advance to Employee**, **Expense**, a cash-paid **Fuel
+  Purchase**, and **Payment to Supplier**, when "Paid via" is set to
+  this bank - each decreases the bank's balance instead of cash in hand.
 
-**Cash in hand** is a single running total (Settings &gt; "Cash in
-Hand"): opening balance, plus every day's cash sales and every
-cash-method receipt, minus cash deposited into banks, cash-method loans
-and expenses, cash-paid fuel purchases, and payments to suppliers (which
-are always cash - they don't have a "Paid via" field). Cash in hand and
-every bank account's balance are shown live on the Ledger and Daily
-Report pages (owner only), and on the Dashboard.
+**Cash in hand** works the same way as a bank account now: it appears on
+the Accounts page (as "Cash in Hand", under "All" or its own type
+filter - never Debitors/Creditors, since it isn't a debt relationship
+either) with its own detail page showing opening balance (settable at
+any time, same as any other account) and full transaction history.
+Because the biggest contributor - the cash portion of nozzle sales -
+isn't a single entry but a derived daily figure (that day's total sales
+minus credit given minus bank sales), it shows as one summary row per
+date linking to that day's Ledger rather than something directly
+editable; fuel purchases and expenses paid in cash are editable right
+on the page, and everything else (receipts, loans, supplier payments,
+deposits) links back to wherever it's actually edited. The running total
+itself is: opening balance, plus every day's cash sales and every
+cash-method receipt, minus cash deposited into banks and every
+cash-method loan, expense, fuel purchase, and supplier payment. Cash in
+hand and every bank account's balance are also shown live on the Ledger
+and Daily Report pages (owner only), and on the Dashboard.
 
 ## Opening balances
 
@@ -250,9 +280,9 @@ everything after it reads as a correct running balance.
   account's own page instead when it already has a real balance.
 - For bank accounts: set it when adding the account (Settings or
   Accounts), or any time afterward from the bank account's own page.
-- For cash in hand: set it any time from Settings - there's only ever
-  one cash-in-hand account, so it's editable rather than something you
-  "add".
+- For cash in hand: set it any time from Settings or from its own page
+  on Accounts - there's only ever one cash-in-hand account, so it's
+  editable rather than something you "add".
 
 ## Roles
 
@@ -320,16 +350,18 @@ database periodically the same way you'd back up `instance/petrolpump.db`.
   expenses − cash-paid fuel purchases − supplier payments. Fuel bought on
   supplier credit isn't subtracted at the time of purchase (that cash
   hasn't left yet) - it's counted once the supplier is actually paid.
+- A bank account's or cash-in-hand's Receipt, Loan, and Supplier Payment
+  entries are only editable from the account they belong to, not from
+  the bank/cash page itself (which links to it instead) - Bank Sales and
+  Cash Deposits are only editable from the bank's page, and Fuel
+  Purchases/Expenses are editable from whichever bank or cash-in-hand
+  page they were paid from.
+- Cash-in-hand's "Cash Sales" rows (the cash portion of a date's nozzle
+  sales) are a derived daily figure, not a single entry, so they're
+  read-only on cash-in-hand's page - open that date's Ledger to correct
+  the underlying reading, credit, or bank sale instead.
 - Editing an account's transaction entry can change its date, amount,
-  and other details, but not which account it's attached to or (for a
-  fuel purchase) whether it was paid cash vs. on credit. There's also no
-  delete - to correct an entry logged against the wrong account or with
-  the wrong payment method, log an offsetting entry instead.
-- Fuel purchases and payments to suppliers don't have a "Paid via" field
-  - they're always cash (or, for a purchase, supplier credit), so they
-  can't be routed through a specific bank account the way receipts,
-  loans, and expenses can.
-- A bank account's Receipt and Loan entries are only editable from the
-  account they belong to, not from the bank's own page (which links to
-  it instead) - Bank Sales, Cash Deposits, and Expenses are editable
-  directly from the bank's page.
+  paid-via, and other details, but not which account it's attached to
+  (or, for a fuel purchase, whether it was paid cash/bank vs. on
+  credit). There's also no delete - to correct an entry logged against
+  the wrong account, log an offsetting entry instead.

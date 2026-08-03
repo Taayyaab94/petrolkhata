@@ -52,6 +52,17 @@
   {% endif %}
 </div>
 
+{% if fuel_sales %}
+<div class="ledger-summary">
+  {% for name, d in fuel_sales.items() %}
+  <div class="stat-card">
+    <div class="label">{{ name }} Sold</div>
+    <div class="value">{{ "%.2f"|format(d.liters) }} L</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 {% if current_user.is_owner %}
 <div class="ledger-summary">
   <div class="stat-card accent-green">
@@ -201,7 +212,7 @@
             <select name="customer_id" class="customer-select" data-scope="credit" required>
               <option value="">Select...</option>
               <option value="__new__">+ Add new customer</option>
-              {% for a in accounts %}
+              {% for a in accounts_customer_first %}
               <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
               {% endfor %}
             </select>
@@ -324,11 +335,23 @@
               <option value="credit">On Credit (from supplier)</option>
             </select>
           </label>
+          <label id="purchase-paidvia-field">Paid via
+            <select name="paid_via" class="paidvia-select" data-scope="purchase_cash">
+              <option value="cash">Cash</option>
+              <option value="__new__">+ Add new bank account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-paidvia-field" data-scope="purchase_cash" style="display:none;">New bank account name
+            <input type="text" name="new_bank_account_name">
+          </label>
           <label id="purchase-supplier-field" style="display:none;">Supplier
             <select name="supplier_id" class="supplier-select" data-scope="purchase">
               <option value="">Select...</option>
               <option value="__new__">+ Add new supplier</option>
-              {% for a in accounts %}
+              {% for a in accounts_supplier_first %}
               <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
               {% endfor %}
             </select>
@@ -356,7 +379,7 @@
             <select name="supplier_id" class="supplier-select" data-scope="supplier_payment" required>
               <option value="">Select...</option>
               <option value="__new__">+ Add new supplier</option>
-              {% for a in accounts %}
+              {% for a in accounts_supplier_first %}
               <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
               {% endfor %}
             </select>
@@ -366,6 +389,18 @@
           </label>
           <label>Amount (Rs)
             <input type="number" step="0.01" min="0.01" name="amount" required>
+          </label>
+          <label>Paid via
+            <select name="paid_via" class="paidvia-select" data-scope="supplier_payment">
+              <option value="cash">Cash</option>
+              <option value="__new__">+ Add new bank account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-paidvia-field" data-scope="supplier_payment" style="display:none;">New bank account name
+            <input type="text" name="new_bank_account_name">
           </label>
           <label>Note (optional)
             <input type="text" name="note">
@@ -389,7 +424,7 @@
             <select name="employee_id" class="employee-select" data-scope="loan" required>
               <option value="">Select...</option>
               <option value="__new__">+ Add new employee</option>
-              {% for a in accounts %}
+              {% for a in accounts_employee_first %}
               <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
               {% endfor %}
             </select>
@@ -481,11 +516,11 @@
       <span class="feed-tag feed-tag-credit">Expense</span>
       <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
       {% elif e.kind == "purchase" %}
-      <div class="feed-desc"><strong>{{ e.obj.tank.label }} delivery</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ e.obj.payment_type }} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.tank.label }} delivery</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ ("Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash") if e.obj.payment_type == "cash" else "On credit" }} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Purchase</span>
       <div class="feed-amount credit">{% if e.obj.cost %}-Rs {{ "%.2f"|format(e.obj.cost) }}{% else %}-{% endif %}</div>
       {% elif e.kind == "supplier_payment" %}
-      <div class="feed-desc"><strong>Payment to {{ e.obj.account.name }}</strong><span>{{ e.obj.note or "" }} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>Payment to {{ e.obj.account.name }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Supplier Payment</span>
       <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
       {% elif e.kind == "bank_sale" %}
@@ -627,11 +662,13 @@ wireAddNewToggle('.paidvia-select', '.new-paidvia-field');
 // --- Purchase: show supplier field only when "on credit" ---
 const purchasePaymentType = document.getElementById('purchase_payment_type');
 const purchaseSupplierField = document.getElementById('purchase-supplier-field');
+const purchasePaidViaField = document.getElementById('purchase-paidvia-field');
 if (purchasePaymentType) {
   purchasePaymentType.addEventListener('change', function () {
     const isCredit = purchasePaymentType.value === 'credit';
     purchaseSupplierField.style.display = isCredit ? '' : 'none';
     purchaseSupplierField.querySelector('select').required = isCredit;
+    purchasePaidViaField.style.display = isCredit ? 'none' : '';
   });
 }
 </script>

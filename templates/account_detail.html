@@ -87,7 +87,7 @@
         <td>-{{ "%.2f"|format(e.obj.cost or 0) }}</td>
         {% elif e.kind == "supplier_payment" %}
         <td><span class="badge badge-ok">Payment Made</span></td>
-        <td>{{ e.obj.note or "-" }}</td>
+        <td>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
         <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
         {% elif e.kind == "employee_loan" %}
         <td><span class="badge badge-low">Loan / Advance</span></td>
@@ -163,7 +163,7 @@
             <label>Amount (Rs)
               <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" required>
             </label>
-            {% if e.kind in ("receipt", "employee_loan") %}
+            {% if e.kind in ("receipt", "employee_loan", "supplier_payment") %}
             <label>Paid via
               <select name="paid_via">
                 <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>

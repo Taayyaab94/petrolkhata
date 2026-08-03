@@ -29,6 +29,8 @@ from ledger_logic import (
     bank_account_ledger_events,
     book_stock,
     cash_account_balance,
+    cash_account_ledger_events,
+    fuel_sales_for_date,
     nearest_earlier_reading,
     next_sale_on_or_after,
     previous_reading_for,
@@ -645,11 +647,17 @@ def ledger():
     # account - an account's type label is just a default/hint, not a
     # restriction, so any account can receive any kind of entry (e.g. an
     # account labelled "supplier" can still be given customer credit).
+    # Each picker still sorts its own "relevant" type first, though, so
+    # the common case doesn't require scrolling past every other type.
     accounts = Account.query.order_by(Account.name).all()
+    accounts_customer_first = prioritize_accounts(accounts, "customer")
+    accounts_supplier_first = prioritize_accounts(accounts, "supplier")
+    accounts_employee_first = prioritize_accounts(accounts, "employee")
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
 
     breakdown = sales_breakdown_for_date(selected_date)
     total_sales = breakdown["total"]
+    fuel_sales = fuel_sales_for_date(selected_date)
 
     feed = get_feed_for_date(selected_date, full_visibility=current_user.is_owner)
 
@@ -691,13 +699,27 @@ def ledger():
         tank_rows=tank_rows,
         fuel_types=fuel_types,
         accounts=accounts,
+        accounts_customer_first=accounts_customer_first,
+        accounts_supplier_first=accounts_supplier_first,
+        accounts_employee_first=accounts_employee_first,
         bank_accounts=bank_accounts,
         feed=feed,
         total_sales=total_sales,
+        fuel_sales=fuel_sales,
         breakdown=breakdown,
         summary=summary,
         cash_balance=cash_balance,
     )
+
+
+def prioritize_accounts(accounts, priority_type):
+    """Reorder an already-alphabetical account list so priority_type comes
+    first (still alphabetical within each group) - e.g. a Supplier picker
+    shows suppliers before customers/employees, without hiding the rest,
+    since any account can still receive any kind of entry."""
+    primary = [a for a in accounts if a.account_type == priority_type]
+    rest = [a for a in accounts if a.account_type != priority_type]
+    return primary + rest
 
 
 def resolve_account(form, id_field, new_name_field, default_type, label, new_phone_field=None):
@@ -1086,8 +1108,11 @@ def ledger_purchase():
 
     supplier = None
     supplier_error = None
+    method, bank_account, method_error = "cash", None, None
     if payment_type == "credit":
         supplier, supplier_error = resolve_supplier(request.form)
+    else:
+        method, bank_account, method_error = resolve_payment_method(request.form)
 
     if not tank:
         db.session.rollback()
@@ -1098,6 +1123,9 @@ def ledger_purchase():
     elif payment_type == "credit" and supplier_error:
         db.session.rollback()
         flash(supplier_error, "error")
+    elif payment_type == "cash" and method_error:
+        db.session.rollback()
+        flash(method_error, "error")
     else:
         db.session.add(
             StockPurchase(
@@ -1106,6 +1134,8 @@ def ledger_purchase():
                 liters=liters,
                 cost=cost,
                 payment_type=payment_type,
+                method=method,
+                bank_account_id=bank_account.id if bank_account else None,
                 account_id=supplier.id if supplier else None,
                 note=note or None,
                 user_id=current_user.id,
@@ -1125,6 +1155,7 @@ def ledger_supplier_payment():
     supplier, error = resolve_supplier(request.form)
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
+    method, bank_account, method_error = resolve_payment_method(request.form)
 
     if error:
         db.session.rollback()
@@ -1132,12 +1163,17 @@ def ledger_supplier_payment():
     elif not amount or amount <= 0:
         db.session.rollback()
         flash("Payment amount must be a positive number.", "error")
+    elif method_error:
+        db.session.rollback()
+        flash(method_error, "error")
     else:
         db.session.add(
             SupplierPayment(
                 account_id=supplier.id,
                 entry_date=entry_date,
                 amount=amount,
+                method=method,
+                bank_account_id=bank_account.id if bank_account else None,
                 note=note or None,
                 user_id=current_user.id,
             )
@@ -1356,7 +1392,7 @@ def accounts():
     type_filter = request.args.get("type", "all")
 
     rows = []
-    if type_filter != "bank":
+    if type_filter not in ("bank", "cash"):
         query = Account.query
         if type_filter in ACCOUNT_TYPES:
             query = query.filter_by(account_type=type_filter)
@@ -1368,10 +1404,21 @@ def accounts():
 
     if kind == "all" and type_filter in ("all", "bank"):
         for b in BankAccount.query.all():
-            # Bank accounts are the pump's own money, not a debitor/creditor
-            # relationship, so they only show up under "All" - not under
-            # the Debitors/Creditors filter.
+            # Bank accounts (and cash-in-hand) are the pump's own money,
+            # not a debitor/creditor relationship, so they only show up
+            # under "All" - not under the Debitors/Creditors filter.
             rows.append({"kind": "bank", "obj": b, "name": b.name, "balance": b.balance})
+
+    if kind == "all" and type_filter in ("all", "cash"):
+        cash_account = get_cash_account()
+        rows.append(
+            {
+                "kind": "cash",
+                "obj": cash_account,
+                "name": "Cash in Hand",
+                "balance": cash_account_balance(cash_account),
+            }
+        )
 
     if kind == "debitors":
         rows = [r for r in rows if r["balance"] > 0]
@@ -1380,8 +1427,17 @@ def accounts():
 
     rows.sort(key=lambda r: r["name"].lower())
 
+    expenses = Expense.query.order_by(Expense.entry_date.desc(), Expense.recorded_at.desc()).all()
+    bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
+
     return render_template(
-        "accounts.html", rows=rows, kind=kind, type_filter=type_filter, today=date.today()
+        "accounts.html",
+        rows=rows,
+        kind=kind,
+        type_filter=type_filter,
+        today=date.today(),
+        expenses=expenses,
+        bank_accounts=bank_accounts,
     )
 
 
@@ -1579,12 +1635,17 @@ def account_entry_supplier_payment_edit(entry_id):
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
+    method, bank_account, method_error = resolve_payment_method(request.form)
 
     if not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
+    elif method_error:
+        flash(method_error, "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
+        entry.method = method
+        entry.bank_account_id = bank_account.id if bank_account else None
         entry.note = note or None
         db.session.commit()
         flash("Payment updated.", "success")
@@ -1623,8 +1684,15 @@ def account_entry_employee_loan_edit(entry_id):
 def bank_account_detail(bank_account_id):
     bank_account = db.session.get(BankAccount, bank_account_id) or abort(404)
     events = bank_account_ledger_events(bank_account)
+    bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
+    tanks = Tank.query.order_by(Tank.number).all()
     return render_template(
-        "bank_account_detail.html", bank_account=bank_account, events=events, today=date.today()
+        "bank_account_detail.html",
+        bank_account=bank_account,
+        events=events,
+        today=date.today(),
+        bank_accounts=bank_accounts,
+        tanks=tanks,
     )
 
 
@@ -1708,30 +1776,118 @@ def account_entry_cash_deposit_edit(entry_id):
     return redirect(url_for("bank_account_detail", bank_account_id=entry.bank_account_id))
 
 
-@app.route("/accounts/entry/bank-expense/<int:entry_id>/edit", methods=["POST"])
+@app.route("/accounts/entry/expense/<int:entry_id>/edit", methods=["POST"])
 @login_required
 @owner_required
-def account_entry_bank_expense_edit(entry_id):
+def account_entry_expense_edit(entry_id):
+    """Shared expense editor, reachable from the Accounts page's all-time
+    Expenses list, cash-in-hand's page, or a bank account's page -
+    wherever the entry happens to be shown - redirecting back to
+    whichever of those pages linked here via the hidden "next" field."""
     entry = db.session.get(Expense, entry_id) or abort(404)
     entry_date = parse_date_param(request.form.get("entry_date"))
     category = request.form.get("category", "").strip()
     description = request.form.get("description", "").strip()
     amount = request.form.get("amount", type=float)
-    bank_account_id = entry.bank_account_id
+    method, bank_account, method_error = resolve_payment_method(request.form)
+    next_url = request.form.get("next") or url_for("accounts")
 
     if not category:
         flash("Please enter an expense category.", "error")
     elif not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
+    elif method_error:
+        flash(method_error, "error")
     else:
         entry.entry_date = entry_date
         entry.category = category
         entry.description = description or None
         entry.amount = amount
+        entry.method = method
+        entry.bank_account_id = bank_account.id if bank_account else None
         db.session.commit()
         flash("Expense updated.", "success")
 
-    return redirect(url_for("bank_account_detail", bank_account_id=bank_account_id))
+    return redirect(next_url)
+
+
+@app.route("/accounts/entry/fuel-purchase/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def account_entry_fuel_purchase_edit(entry_id):
+    """Editor for a cash-paid fuel purchase (payment_type == "cash"),
+    reachable from cash-in-hand's page or the bank account it was paid
+    from - redirects back via the hidden "next" field. Credit purchases
+    are edited from the supplier account's page instead
+    (account_entry_purchase_edit) since payment_type can't be changed
+    here."""
+    entry = db.session.get(StockPurchase, entry_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    tank_id = request.form.get("tank_id", type=int)
+    liters = request.form.get("liters", type=float)
+    cost = request.form.get("cost", type=float)
+    note = request.form.get("note", "").strip()
+    method, bank_account, method_error = resolve_payment_method(request.form)
+    next_url = request.form.get("next") or url_for("accounts")
+    tank = db.session.get(Tank, tank_id) if tank_id else None
+
+    if not tank:
+        flash("Please choose a valid tank.", "error")
+    elif not liters or liters <= 0:
+        flash("Liters must be a positive number.", "error")
+    elif method_error:
+        flash(method_error, "error")
+    else:
+        entry.entry_date = entry_date
+        entry.tank_id = tank.id
+        entry.liters = liters
+        entry.cost = cost
+        entry.method = method
+        entry.bank_account_id = bank_account.id if bank_account else None
+        entry.note = note or None
+        db.session.commit()
+        flash("Fuel purchase updated.", "success")
+
+    return redirect(next_url)
+
+
+@app.route("/accounts/cash")
+@login_required
+def cash_account_detail():
+    cash_account = get_cash_account()
+    events = cash_account_ledger_events(cash_account)
+    bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
+    tanks = Tank.query.order_by(Tank.number).all()
+    return render_template(
+        "cash_account_detail.html",
+        cash_account=cash_account,
+        balance=cash_account_balance(cash_account),
+        events=events,
+        today=date.today(),
+        bank_accounts=bank_accounts,
+        tanks=tanks,
+    )
+
+
+@app.route("/accounts/cash/opening-balance", methods=["POST"])
+@login_required
+@owner_required
+def cash_account_opening_balance():
+    cash_account = get_cash_account()
+    opening_balance = request.form.get("opening_balance", type=float)
+    raw_date = request.form.get("opening_balance_date", "").strip()
+
+    if opening_balance is None:
+        flash("Please enter an opening balance (use 0 to clear it).", "error")
+    elif opening_balance and not raw_date:
+        flash("Please choose an as-of date for the opening balance.", "error")
+    else:
+        cash_account.opening_balance = opening_balance
+        cash_account.opening_balance_date = parse_date_param(raw_date) if raw_date else None
+        db.session.commit()
+        flash("Opening balance updated.", "success")
+
+    return redirect(url_for("cash_account_detail"))
 
 
 # -------------------------------------------------------------- reports ---
@@ -1750,12 +1906,7 @@ def reports():
     )
     total_sales = sum(s.total_amount for s in sales)
     total_liters = sum(s.liters for s in sales)
-
-    by_fuel = {}
-    for s in sales:
-        d = by_fuel.setdefault(s.nozzle.tank.fuel_type.name, {"liters": 0.0, "revenue": 0.0})
-        d["liters"] += s.liters
-        d["revenue"] += s.total_amount
+    by_fuel = fuel_sales_for_date(selected_date)
 
     credit_given = CreditGiven.query.filter_by(entry_date=selected_date).all()
     total_credit_given = sum(c.amount for c in credit_given)
@@ -1890,6 +2041,33 @@ def reports_trends():
         else ""
     )
 
+    fuel_types = FuelType.query.order_by(FuelType.name).all()
+    fuel_sold_by_day = {}
+    for ft in fuel_types:
+        rows = (
+            db.session.query(Sale.entry_date, func.sum(Sale.liters))
+            .join(Nozzle, Sale.nozzle_id == Nozzle.id)
+            .join(Tank, Nozzle.tank_id == Tank.id)
+            .filter(Tank.fuel_type_id == ft.id, Sale.entry_date >= start, Sale.entry_date <= end)
+            .group_by(Sale.entry_date)
+            .all()
+        )
+        fuel_sold_by_day[ft.name] = {r[0]: r[1] or 0 for r in rows}
+    fuel_sold_series_list = [
+        [round(fuel_sold_by_day[ft.name].get(d, 0), 2) for d in all_dates] for ft in fuel_types
+    ]
+    fuel_sold_totals = {ft.name: round(sum(fuel_sold_by_day[ft.name].values()), 2) for ft in fuel_types}
+    fuel_sold_chart = (
+        charts.line_chart(
+            fuel_sold_series_list,
+            labels,
+            [tank_colors[i % len(tank_colors)] for i in range(len(fuel_types))],
+            [ft.name for ft in fuel_types],
+        )
+        if fuel_types
+        else ""
+    )
+
     totals = dict(
         total_sales=sum(sales_by_day.values()),
         total_credit_given=sum(credit_by_day.values()),
@@ -1906,6 +2084,8 @@ def reports_trends():
         cashflow_chart=cashflow_chart,
         purchases_chart=purchases_chart,
         stock_chart=stock_chart,
+        fuel_sold_chart=fuel_sold_chart,
+        fuel_sold_totals=fuel_sold_totals,
         totals=totals,
     )
 

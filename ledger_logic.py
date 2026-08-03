@@ -155,6 +155,19 @@ def sales_breakdown_for_date(entry_date):
     return {"total": total, "credit": credit, "bank": bank, "cash": cash}
 
 
+def fuel_sales_for_date(entry_date):
+    """Liters sold and revenue for entry_date, grouped by fuel type name -
+    computed from nozzle meter reading differences (Sale rows), the same
+    figures the sales stat cards are built from."""
+    sales = Sale.query.filter_by(entry_date=entry_date).join(Nozzle).all()
+    by_fuel = {}
+    for s in sales:
+        d = by_fuel.setdefault(s.nozzle.tank.fuel_type.name, {"liters": 0.0, "revenue": 0.0})
+        d["liters"] += s.liters
+        d["revenue"] += s.total_amount
+    return by_fuel
+
+
 def account_ledger_events(account):
     """Full transaction history for one account (opening balance plus every
     entry kind that can be posted to it), each tagged with the running
@@ -215,9 +228,10 @@ def cash_account_balance(cash_account):
     """Cash-in-hand: opening balance, plus every date's cash sales (total
     sales minus credit minus bank sales) and every cash-method receipt,
     minus cash physically deposited into a bank account and every
-    cash-method outflow (loans, expenses, cash-paid fuel purchases,
-    supplier payments - none of those have a bank-routing option, so
-    they're always assumed to be cash)."""
+    cash-method outflow (loans, expenses, fuel purchases, supplier
+    payments - each of those can instead be routed through a specific
+    bank account via "Paid via", in which case it hits that bank's
+    balance instead and is excluded here)."""
     total_sales = db.session.query(func.coalesce(func.sum(Sale.total_amount), 0)).scalar()
     total_credit = db.session.query(func.coalesce(func.sum(CreditGiven.amount), 0)).scalar()
     total_bank_sales = db.session.query(func.coalesce(func.sum(BankSale.amount), 0)).scalar()
@@ -239,10 +253,14 @@ def cash_account_balance(cash_account):
     )
     total_cash_purchases = (
         db.session.query(func.coalesce(func.sum(StockPurchase.cost), 0))
-        .filter(StockPurchase.payment_type == "cash")
+        .filter(StockPurchase.payment_type == "cash", StockPurchase.method == "cash")
         .scalar()
     )
-    total_supplier_payments = db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0)).scalar()
+    total_supplier_payments = (
+        db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0))
+        .filter(SupplierPayment.method == "cash")
+        .scalar()
+    )
     return round(
         cash_account.opening_balance
         + total_sales
@@ -256,6 +274,80 @@ def cash_account_balance(cash_account):
         - total_supplier_payments,
         2,
     )
+
+
+def cash_account_ledger_events(cash_account):
+    """Full transaction history for cash-in-hand, most recent first, same
+    always-recompute-fresh running balance as account_ledger_events() and
+    bank_account_ledger_events(). Unlike an account or a bank account,
+    cash-in-hand's biggest contributor - the cash portion of nozzle sales
+    - isn't a single discrete entry (it's total sales minus credit minus
+    bank sales, on a given date), so that shows as one read-only row per
+    date rather than per-Sale; everything else here is a real entry, some
+    editable directly (fuel purchases and expenses paid in cash have no
+    other home) and some read-only with a link to where they're actually
+    edited (receipts, loans, and supplier payments belong to an account;
+    deposits belong to a bank account)."""
+    events = []
+    if cash_account.opening_balance:
+        opening_date = cash_account.opening_balance_date or cash_account.created_at.date()
+        events.append(
+            {
+                "kind": "opening",
+                "entry_date": opening_date,
+                "sort_key": (opening_date, datetime.min),
+                "obj": None,
+                "delta": cash_account.opening_balance,
+            }
+        )
+
+    sale_dates = [row[0] for row in db.session.query(Sale.entry_date).distinct().all()]
+    for d in sale_dates:
+        breakdown = sales_breakdown_for_date(d)
+        if breakdown["cash"]:
+            events.append(
+                {
+                    "kind": "cash_sales",
+                    "entry_date": d,
+                    "sort_key": (d, datetime.min.replace(minute=1)),
+                    "obj": None,
+                    "delta": breakdown["cash"],
+                }
+            )
+
+    for r in Receipt.query.filter_by(method="cash").all():
+        events.append(
+            {"kind": "receipt", "entry_date": r.entry_date, "sort_key": (r.entry_date, r.recorded_at), "obj": r, "delta": r.amount}
+        )
+    for l in EmployeeLoan.query.filter_by(method="cash").all():
+        events.append(
+            {"kind": "employee_loan", "entry_date": l.entry_date, "sort_key": (l.entry_date, l.recorded_at), "obj": l, "delta": -l.amount}
+        )
+    for e in Expense.query.filter_by(method="cash").all():
+        events.append(
+            {"kind": "expense", "entry_date": e.entry_date, "sort_key": (e.entry_date, e.recorded_at), "obj": e, "delta": -e.amount}
+        )
+    for pu in StockPurchase.query.filter_by(payment_type="cash", method="cash").all():
+        events.append(
+            {"kind": "fuel_purchase", "entry_date": pu.entry_date, "sort_key": (pu.entry_date, pu.recorded_at), "obj": pu, "delta": -(pu.cost or 0)}
+        )
+    for sp in SupplierPayment.query.filter_by(method="cash").all():
+        events.append(
+            {"kind": "supplier_payment", "entry_date": sp.entry_date, "sort_key": (sp.entry_date, sp.recorded_at), "obj": sp, "delta": -sp.amount}
+        )
+    for cd in CashDeposit.query.all():
+        events.append(
+            {"kind": "deposit", "entry_date": cd.entry_date, "sort_key": (cd.entry_date, cd.recorded_at), "obj": cd, "delta": -cd.amount}
+        )
+
+    events.sort(key=lambda e: e["sort_key"])
+    running = 0.0
+    for e in events:
+        running += e["delta"]
+        e["running_balance"] = round(running, 2)
+
+    events.reverse()
+    return events
 
 
 def bank_account_ledger_events(bank_account):
@@ -294,6 +386,15 @@ def bank_account_ledger_events(bank_account):
     for e in bank_account.expenses:
         events.append(
             {"kind": "expense", "entry_date": e.entry_date, "sort_key": (e.entry_date, e.recorded_at), "obj": e, "delta": -e.amount}
+        )
+    for pu in bank_account.fuel_purchases:
+        if pu.payment_type == "cash":
+            events.append(
+                {"kind": "fuel_purchase", "entry_date": pu.entry_date, "sort_key": (pu.entry_date, pu.recorded_at), "obj": pu, "delta": -(pu.cost or 0)}
+            )
+    for sp in bank_account.supplier_payments_paid:
+        events.append(
+            {"kind": "supplier_payment", "entry_date": sp.entry_date, "sort_key": (sp.entry_date, sp.recorded_at), "obj": sp, "delta": -sp.amount}
         )
 
     events.sort(key=lambda e: e["sort_key"])

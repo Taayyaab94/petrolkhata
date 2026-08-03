@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}{{ bank_account.name }} - Petrol Khata{% endblock %}
+{% block title %}Cash in Hand - Petrol Khata{% endblock %}
 {% block content %}
 <p><a href="{{ url_for('accounts') }}">&larr; Back to Accounts</a></p>
 <div class="page-head">
   <div>
-    <h1>{{ bank_account.name }} <span class="owner-tag">Bank Account</span></h1>
+    <h1>Cash in Hand</h1>
   </div>
   <a href="{{ url_for('ledger') }}" class="btn">Record Entry on Ledger &rarr;</a>
 </div>
@@ -12,32 +12,21 @@
 <div class="stat-row">
   <div class="stat-card accent-green">
     <div class="label">Current Balance</div>
-    <div class="value">Rs {{ "%.2f"|format(bank_account.balance) }}</div>
+    <div class="value">Rs {{ "%.2f"|format(balance) }}</div>
   </div>
 </div>
 
 {% if current_user.is_owner %}
 <div class="panel">
-  <div class="panel-head"><h3>Account Details</h3></div>
-  <form method="post" action="{{ url_for('bank_account_edit', bank_account_id=bank_account.id) }}" class="form-grid">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <label>Name
-      <input type="text" name="name" value="{{ bank_account.name }}" required>
-    </label>
-    <button type="submit" class="btn btn-sm">Save Details</button>
-  </form>
-</div>
-
-<div class="panel">
   <div class="panel-head"><h3>Opening Balance</h3></div>
   <p class="hint">Can be added or changed at any time - saving it recalculates every later entry's running balance below.</p>
-  <form method="post" action="{{ url_for('bank_account_opening_balance', bank_account_id=bank_account.id) }}" class="form-grid">
+  <form method="post" action="{{ url_for('cash_account_opening_balance') }}" class="form-grid">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label>Opening Balance (Rs)
-      <input type="number" step="0.01" name="opening_balance" value="{{ bank_account.opening_balance }}">
+      <input type="number" step="0.01" name="opening_balance" value="{{ cash_account.opening_balance }}">
     </label>
     <label>As of Date
-      <input type="date" name="opening_balance_date" value="{{ bank_account.opening_balance_date.isoformat() if bank_account.opening_balance_date else '' }}" max="{{ today.isoformat() }}">
+      <input type="date" name="opening_balance_date" value="{{ cash_account.opening_balance_date.isoformat() if cash_account.opening_balance_date else '' }}" max="{{ today.isoformat() }}">
     </label>
     <button type="submit" class="btn btn-sm">Save Opening Balance</button>
   </form>
@@ -46,7 +35,7 @@
 
 <div class="panel">
   <div class="panel-head"><h3>Transaction History</h3></div>
-  <p class="hint">Receipts, loans, and supplier payments routed through this bank are editable from the account they belong to (linked below) - everything else here can be edited directly.</p>
+  <p class="hint">The cash portion of a date's nozzle sales isn't a single entry - it's that day's total sales minus credit given minus bank sales - so it shows as one summary row per date, linked to that day's Ledger. Receipts, loans, and supplier payments are editable from the account they belong to; deposits from the bank account they went into. Fuel purchases and expenses paid in cash are editable directly here.</p>
   <div class="table-wrap">
   <table class="table">
     <thead>
@@ -63,14 +52,10 @@
         <td><span class="badge">Opening Balance</span></td>
         <td>Balance as of {{ e.entry_date.strftime("%Y-%m-%d") }}</td>
         <td>{{ "+" if e.delta >= 0 }}{{ "%.2f"|format(e.delta) }}</td>
-        {% elif e.kind == "bank_sale" %}
-        <td><span class="badge badge-ok">Bank Sale</span></td>
-        <td>{{ e.obj.note or "-" }}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
-        {% elif e.kind == "deposit" %}
-        <td><span class="badge badge-ok">Cash Deposit</span></td>
-        <td>{{ e.obj.note or "-" }}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        {% elif e.kind == "cash_sales" %}
+        <td><span class="badge badge-ok">Cash Sales &middot; <a href="{{ url_for('ledger', date=e.entry_date.isoformat()) }}">View</a></span></td>
+        <td>Total sales minus credit minus bank sales</td>
+        <td>+{{ "%.2f"|format(e.delta) }}</td>
         {% elif e.kind == "receipt" %}
         <td><span class="badge badge-ok">Receipt &middot; <a href="{{ url_for('account_detail', account_id=e.obj.account_id) }}">{{ e.obj.account.name }}</a></span></td>
         <td>{{ e.obj.note or "-" }}</td>
@@ -81,6 +66,10 @@
         <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
         {% elif e.kind == "supplier_payment" %}
         <td><span class="badge badge-low">Payment &middot; <a href="{{ url_for('account_detail', account_id=e.obj.account_id) }}">{{ e.obj.account.name }}</a></span></td>
+        <td>{{ e.obj.note or "-" }}</td>
+        <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
+        {% elif e.kind == "deposit" %}
+        <td><span class="badge badge-low">Deposit &middot; <a href="{{ url_for('bank_account_detail', bank_account_id=e.obj.bank_account_id) }}">{{ e.obj.bank_account.name }}</a></span></td>
         <td>{{ e.obj.note or "-" }}</td>
         <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
         {% elif e.kind == "expense" %}
@@ -94,16 +83,16 @@
         {% endif %}
         <td>{{ "%.2f"|format(e.running_balance) }}</td>
         {% if current_user.is_owner %}
-        <td>{% if e.kind in ("bank_sale", "deposit", "expense", "fuel_purchase") %}<a href="#" class="edit-toggle">Edit</a>{% endif %}</td>
+        <td>{% if e.kind in ("expense", "fuel_purchase") %}<a href="#" class="edit-toggle">Edit</a>{% endif %}</td>
         {% endif %}
       </tr>
-      {% if current_user.is_owner and e.kind in ("bank_sale", "deposit", "expense", "fuel_purchase") %}
+      {% if current_user.is_owner and e.kind in ("expense", "fuel_purchase") %}
       <tr class="edit-row" style="display:none;">
         <td colspan="6">
           {% if e.kind == "expense" %}
           <form method="post" action="{{ url_for('account_entry_expense_edit', entry_id=e.obj.id) }}" class="form-grid">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="next" value="{{ url_for('bank_account_detail', bank_account_id=bank_account.id) }}">
+            <input type="hidden" name="next" value="{{ url_for('cash_account_detail') }}">
             <label>Date
               <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
             </label>
@@ -126,10 +115,10 @@
             </label>
             <button type="submit" class="btn btn-sm">Save</button>
           </form>
-          {% elif e.kind == "fuel_purchase" %}
+          {% else %}
           <form method="post" action="{{ url_for('account_entry_fuel_purchase_edit', entry_id=e.obj.id) }}" class="form-grid">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="next" value="{{ url_for('bank_account_detail', bank_account_id=bank_account.id) }}">
+            <input type="hidden" name="next" value="{{ url_for('cash_account_detail') }}">
             <label>Date
               <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
             </label>
@@ -153,21 +142,6 @@
                 <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
                 {% endfor %}
               </select>
-            </label>
-            <label>Note (optional)
-              <input type="text" name="note" value="{{ e.obj.note or '' }}">
-            </label>
-            <button type="submit" class="btn btn-sm">Save</button>
-          </form>
-          {% else %}
-          {% set edit_action = url_for('account_entry_bank_sale_edit', entry_id=e.obj.id) if e.kind == "bank_sale" else url_for('account_entry_cash_deposit_edit', entry_id=e.obj.id) %}
-          <form method="post" action="{{ edit_action }}" class="form-grid">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <label>Date
-              <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
-            </label>
-            <label>Amount (Rs)
-              <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" required>
             </label>
             <label>Note (optional)
               <input type="text" name="note" value="{{ e.obj.note or '' }}">
