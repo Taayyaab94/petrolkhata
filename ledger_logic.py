@@ -12,6 +12,7 @@ from sqlalchemy import func
 from extensions import db
 from models import (
     BankSale,
+    CashAccount,
     CashDeposit,
     CashHandover,
     CreditGiven,
@@ -612,6 +613,164 @@ def cash_account_balance(cash_account):
         - total_cash_salaries,
         2,
     )
+
+
+def _cash_daily_net_changes():
+    """Net cash-in-hand change contributed by each individual calendar
+    date, from exactly the same components cash_account_balance() sums
+    over all history - just grouped per entry_date (one SQL query per
+    component) instead of collapsed into a single total, so a date-aware
+    running balance can be walked day by day.
+
+    The opening balance is anchored on its own opening_balance_date (or
+    created_at.date() if unset), same as cash_account_balance() and
+    cash_account_ledger_events()."""
+    changes = {}
+
+    def add(rows, sign=1):
+        for entry_date, amount in rows:
+            if entry_date is None or not amount:
+                continue
+            changes[entry_date] = changes.get(entry_date, 0.0) + sign * amount
+
+    cash_account = CashAccount.query.first()
+    if cash_account and cash_account.opening_balance:
+        opening_date = cash_account.opening_balance_date or cash_account.created_at.date()
+        add([(opening_date, cash_account.opening_balance)])
+
+    # Cash portion of nozzle sales for a date is total sales minus credit
+    # minus bank sales on that same date - mirrors sales_breakdown_for_date,
+    # just summed per date across all of history in one grouped query each
+    # rather than one query per date.
+    sales_by_date = dict(
+        db.session.query(Sale.entry_date, func.sum(Sale.total_amount)).group_by(Sale.entry_date).all()
+    )
+    credit_by_date = dict(
+        db.session.query(CreditGiven.entry_date, func.sum(CreditGiven.amount))
+        .group_by(CreditGiven.entry_date)
+        .all()
+    )
+    bank_sales_by_date = dict(
+        db.session.query(BankSale.entry_date, func.sum(BankSale.amount)).group_by(BankSale.entry_date).all()
+    )
+    for entry_date in set(sales_by_date) | set(credit_by_date) | set(bank_sales_by_date):
+        cash_amount = (
+            sales_by_date.get(entry_date, 0)
+            - credit_by_date.get(entry_date, 0)
+            - bank_sales_by_date.get(entry_date, 0)
+        )
+        add([(entry_date, cash_amount)])
+
+    add(
+        db.session.query(Receipt.entry_date, func.sum(Receipt.amount))
+        .filter(Receipt.method == "cash")
+        .group_by(Receipt.entry_date)
+        .all()
+    )
+    add(
+        db.session.query(EmployeeLoan.entry_date, func.sum(EmployeeLoan.amount))
+        .filter(EmployeeLoan.method == "cash")
+        .group_by(EmployeeLoan.entry_date)
+        .all(),
+        sign=-1,
+    )
+    add(
+        db.session.query(Expense.entry_date, func.sum(Expense.amount))
+        .filter(Expense.method == "cash")
+        .group_by(Expense.entry_date)
+        .all(),
+        sign=-1,
+    )
+    add(
+        db.session.query(StockPurchase.entry_date, func.sum(StockPurchase.cost))
+        .filter(StockPurchase.payment_type == "cash", StockPurchase.method == "cash")
+        .group_by(StockPurchase.entry_date)
+        .all(),
+        sign=-1,
+    )
+    add(
+        db.session.query(SupplierPayment.entry_date, func.sum(SupplierPayment.amount))
+        .filter(SupplierPayment.method == "cash")
+        .group_by(SupplierPayment.entry_date)
+        .all(),
+        sign=-1,
+    )
+    add(
+        db.session.query(CashDeposit.entry_date, func.sum(CashDeposit.amount))
+        .group_by(CashDeposit.entry_date)
+        .all(),
+        sign=-1,
+    )
+    add(
+        db.session.query(
+            SalaryPayment.entry_date, func.sum(SalaryPayment.gross_amount - SalaryPayment.deduction_amount)
+        )
+        .filter(SalaryPayment.method == "cash")
+        .group_by(SalaryPayment.entry_date)
+        .all(),
+        sign=-1,
+    )
+
+    return changes
+
+
+def cash_would_go_negative(hypothetical_changes):
+    """True if layering hypothetical_changes on top of the real ledger
+    would ever leave cash-in-hand negative at the end of some day on or
+    after the earliest date touched.
+
+    hypothetical_changes is a list of (date, delta) tuples - delta
+    negative for a new outflow, positive for restoring an edited entry's
+    old value before applying its new one. This has to simulate the whole
+    timeline rather than just check today's total: someone backfilling
+    paper records out of order can enter a February expense after March
+    data already exists, and that entry might leave February's own
+    balance fine while still pushing a LATER day (e.g. one after a March
+    bank deposit already drew the register down further) below zero.
+
+    The check is deliberately end-of-day: it only looks at the running
+    balance after all of a day's changes are applied, never mid-day.
+    That's what stops a cash expense entered before that same day's sales
+    reading from false-alarming just because it was typed in first - the
+    order entries are keyed in within a day never matters, only the
+    day's net."""
+    if not hypothetical_changes:
+        return False
+
+    changes = _cash_daily_net_changes()
+    for entry_date, delta in hypothetical_changes:
+        changes[entry_date] = changes.get(entry_date, 0.0) + delta
+
+    earliest = min(entry_date for entry_date, _ in hypothetical_changes)
+    running = 0.0
+    for entry_date in sorted(changes):
+        running += changes[entry_date]
+        if entry_date >= earliest and running < -0.01:
+            return True
+    return False
+
+
+def max_cash_available_on(entry_date):
+    """The most that could be spent in cash on entry_date without any day
+    on or after it - given everything already on the books - ending up
+    negative. This is the minimum end-of-day running balance from
+    entry_date onward, which is exactly the ceiling would_overdraw_cash()
+    is checking against; routes use it to word their rejection message.
+    Floored at 0 for display - the guard itself is what blocks an entry
+    against an already-negative position, this is only ever shown as an
+    amount someone could still spend."""
+    changes = _cash_daily_net_changes()
+    running = 0.0
+    floor = None
+    for d in sorted(changes):
+        running += changes[d]
+        if d >= entry_date:
+            floor = running if floor is None else min(floor, running)
+    if floor is None:
+        # Nothing on or after entry_date - the balance just holds at
+        # wherever the last real change left it, forever.
+        floor = running
+    return max(round(floor, 2), 0.0)
 
 
 def cash_account_ledger_events(cash_account):

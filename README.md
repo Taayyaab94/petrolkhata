@@ -165,10 +165,14 @@ today. That means correcting an old reading weeks later re-prices it at
 the rate that was actually charged back then, never at today's rate.
 
 Cash in hand can never go negative - any action that would draw it down
-past zero (an expense, loan, cash-paid fuel purchase, supplier payment,
-deposit, or bank-sale reclassification, whether a new entry or an edit
-to an existing one) is rejected with the current available balance
-shown, rather than letting the register go negative.
+past zero on its own date or any later date (an expense, loan, cash-paid
+fuel purchase, supplier payment, deposit, or bank-sale reclassification,
+whether a new entry or an edit to an existing one) is rejected, showing
+how much could still be spent on that date without a later date's
+balance going negative. The check runs against the whole timeline rather
+than just today's total, which matters when backfilling old paper
+records out of order - an entry that's safe for its own day can still
+starve a day that comes later in time but was already recorded.
 
 Dashboard, Inventory, and Reports are **read-only** — they reflect
 what's been entered on the Ledger; there's no separate place to edit
@@ -388,7 +392,10 @@ always has to be at least one active owner.
 
 Everything is stored in `instance/petrolpump.db`. Back this file up
 periodically (just copy it) if you want a safety net — it's the only file
-that holds your business data.
+that holds your business data. Whether you're running locally or on a
+hosted Postgres deployment, **Settings → Backup** gives you the same
+safety net from inside the app: a ZIP of every table as CSV, downloadable
+with one click.
 
 ## Deploying online (Vercel)
 
@@ -416,6 +423,15 @@ variables, so local `python app.py` still works exactly as before.
    Postgres database and seeds the default `owner`/`staff` accounts —
    same as the very first local run. Change those passwords immediately
    since the deployment is reachable over the internet.
+
+Schema changes (adding a column, a table, a constraint) ship as Alembic
+migrations and apply automatically on startup — there's no need to reset
+or re-enter data into an existing database to pick up a new version.
+The very first deploy onto a database that already has data (a
+production database from before migrations were adopted, or any
+existing local `instance/petrolpump.db`) is stamped as already being at
+that baseline the first time it boots, since its schema already matches
+what the baseline migration creates from scratch.
 
 Note the multi-user implication of a real deployment: everyone hitting
 the same URL shares one Postgres database (this was already true of the

@@ -388,6 +388,12 @@
   </div>
 </div>
 
+<div class="panel">
+  <div class="panel-head"><h3>Backup</h3></div>
+  <p class="hint">Download a complete copy of every record as CSV files - keep a copy somewhere safe (a cloud drive, an email to yourself, a USB stick) in case this computer or database is ever lost.</p>
+  <a href="{{ url_for('settings_export_backup') }}" class="btn">Download Backup</a>
+</div>
+
 <script>
 const settingsTankOptionsHtml = '<option value="">Select tank...</option>' +
   {% for t in tanks %}'<option value="{{ t.id }}">{{ t.label|e }}</option>' + {% endfor %} '';

@@ -1,5 +1,8 @@
+import csv
+import io
 import os
 import secrets
+import zipfile
 from datetime import date, datetime, timedelta
 from functools import wraps
 
@@ -10,6 +13,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_file,
     session,
     url_for,
 )
@@ -19,12 +23,14 @@ from flask_login import (
     login_user,
     logout_user,
 )
+from flask_migrate import stamp as migrate_stamp
+from flask_migrate import upgrade as migrate_upgrade
 from flask_wtf import CSRFProtect
-from sqlalchemy import func
+from sqlalchemy import func, inspect
 from sqlalchemy.exc import IntegrityError
 
 import charts
-from extensions import db, login_manager
+from extensions import db, login_manager, migrate
 from ledger_logic import (
     account_ledger_events,
     active_shifts,
@@ -33,6 +39,7 @@ from ledger_logic import (
     book_stock,
     cash_account_balance,
     cash_account_ledger_events,
+    cash_would_go_negative,
     cogs_for_period,
     credit_aging,
     default_shift,
@@ -40,6 +47,7 @@ from ledger_logic import (
     handover_rows_for_date,
     latest_reset_for,
     liters_from_dip_cm,
+    max_cash_available_on,
     nearest_earlier_reading,
     next_sale_on_or_after,
     previous_reading_for,
@@ -118,6 +126,17 @@ else:
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db.init_app(app)
+# Batch mode rewrites the whole table for an ALTER on SQLite (which can't
+# ALTER a column/constraint in place) - only needed there; Postgres in
+# production applies migrations directly. directory is explicit (rather
+# than the default relative "migrations") because a serverless host's
+# cwd at cold start isn't guaranteed to be the project root.
+migrate.init_app(
+    app,
+    db,
+    directory=os.path.join(BASE_DIR, "migrations"),
+    render_as_batch=app.config["SQLALCHEMY_DATABASE_URI"].startswith("sqlite"),
+)
 login_manager.init_app(app)
 csrf = CSRFProtect(app)
 
@@ -161,14 +180,33 @@ def get_cash_account():
     return cash_account
 
 
-def would_overdraw_cash(reduction, restoration=0):
-    """True if applying a cash-in-hand reduction (an expense, loan, cash
-    purchase, supplier payment, deposit, or bank-sale reclassification)
-    would push the register below zero - a physical cash drawer can't go
-    negative. `restoration` is the amount an in-place edit is undoing from
-    an entry's old value, for edits rather than brand-new entries."""
-    projected = cash_account_balance(get_cash_account()) + restoration - reduction
-    return projected < -0.01
+def would_overdraw_cash(amount, entry_date, old_amount=0, old_date=None):
+    """True if spending `amount` in cash on entry_date would push the
+    cash-in-hand register below zero on that date or any later date - a
+    physical cash drawer can't go negative. For an in-place edit rather
+    than a brand-new entry, old_amount/old_date describe the value being
+    replaced (old_date defaults to entry_date), so the entry's old amount
+    is restored before the new one is applied rather than double-counted.
+
+    This delegates to cash_would_go_negative() for the actual simulation,
+    since whether this is safe can depend on dates other than entry_date -
+    see that function's docstring for why a whole-history, date-aware
+    check is necessary rather than comparing against today's total."""
+    changes = [(entry_date, -amount)]
+    if old_amount:
+        changes.append((old_date or entry_date, old_amount))
+    return cash_would_go_negative(changes)
+
+
+def cash_shortfall_message(entry_date):
+    """Standard wording for a would_overdraw_cash() rejection, shared by
+    every route that calls it - reports the date-aware ceiling rather
+    than today's whole-history balance, since that's what the guard
+    actually checked against."""
+    return (
+        f"Not enough cash in hand on {entry_date} for this (at most "
+        f"Rs {max_cash_available_on(entry_date):,.2f} is available then without going negative later)."
+    )
 
 
 @app.before_request
@@ -449,6 +487,75 @@ def settings():
         dip_charts=dip_charts,
         today=date.today(),
     )
+
+
+# Every ledger table, in no particular order - a full backup is one CSV
+# per model rather than a single dump, so each file opens cleanly in a
+# spreadsheet on its own.
+BACKUP_MODELS = [
+    User,
+    Shift,
+    FuelType,
+    FuelPriceHistory,
+    Tank,
+    Dispenser,
+    Nozzle,
+    NozzleReset,
+    Account,
+    Sale,
+    CreditGiven,
+    StockPurchase,
+    SupplierPayment,
+    Receipt,
+    EmployeeLoan,
+    Expense,
+    BankAccount,
+    BankSale,
+    CashDeposit,
+    CashAccount,
+    TankDip,
+    TankDipChart,
+    CashHandover,
+    SalaryPayment,
+]
+
+
+@app.route("/settings/export-backup")
+@login_required
+@owner_required
+def settings_export_backup():
+    """A complete copy of every record as one CSV per table, zipped in
+    memory - the only way to get data out of whatever database (a local
+    SQLite file or a hosted Postgres instance) is currently behind the
+    app, independent of this app's own UI ever being available again."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for model in BACKUP_MODELS:
+            # password_hash never leaves this database, backup or not -
+            # a stolen backup file must not be a stolen credential store.
+            columns = [
+                c.name
+                for c in model.__table__.columns
+                if not (model is User and c.name == "password_hash")
+            ]
+            text_buffer = io.StringIO()
+            writer = csv.writer(text_buffer)
+            writer.writerow(columns)
+            for row in model.query.order_by(model.id).all():
+                values = []
+                for col in columns:
+                    value = getattr(row, col)
+                    if isinstance(value, (datetime, date)):
+                        value = value.isoformat()
+                    elif value is None:
+                        value = ""
+                    values.append(value)
+                writer.writerow(values)
+            zf.writestr(f"{model.__tablename__}.csv", text_buffer.getvalue())
+
+    buffer.seek(0)
+    filename = f"petrol-khata-backup-{date.today().isoformat()}.zip"
+    return send_file(buffer, mimetype="application/zip", as_attachment=True, download_name=filename)
 
 
 @app.route("/settings/add-tank", methods=["POST"])
@@ -1574,12 +1681,8 @@ def ledger_handover_write_off(handover_id):
 
     if shortfall <= 0.01:
         flash("That shift isn't short, so there's nothing to write off.", "error")
-    elif would_overdraw_cash(shortfall):
-        flash(
-            f"Not enough cash in hand to write that off (available: "
-            f"Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+    elif would_overdraw_cash(shortfall, handover.entry_date):
+        flash(cash_shortfall_message(handover.entry_date), "error")
     else:
         who = f" ({handover.attendant.name})" if handover.attendant else ""
         db.session.add(
@@ -1637,12 +1740,9 @@ def ledger_salary():
     elif method_error:
         db.session.rollback()
         flash(method_error, "error")
-    elif method == "cash" and would_overdraw_cash(net):
+    elif method == "cash" and would_overdraw_cash(net, entry_date):
         db.session.rollback()
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         db.session.add(
             SalaryPayment(
@@ -1774,11 +1874,8 @@ def ledger_expense():
         flash("Amount must be a positive number.", "error")
     elif method_error:
         flash(method_error, "error")
-    elif method == "cash" and would_overdraw_cash(amount):
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+    elif method == "cash" and would_overdraw_cash(amount, entry_date):
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         db.session.add(
             Expense(
@@ -1838,12 +1935,9 @@ def ledger_purchase():
     elif payment_type == "cash" and method_error:
         db.session.rollback()
         flash(method_error, "error")
-    elif payment_type == "cash" and method == "cash" and would_overdraw_cash(cost):
+    elif payment_type == "cash" and method == "cash" and would_overdraw_cash(cost, entry_date):
         db.session.rollback()
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         db.session.add(
             StockPurchase(
@@ -1884,12 +1978,9 @@ def ledger_supplier_payment():
     elif method_error:
         db.session.rollback()
         flash(method_error, "error")
-    elif method == "cash" and would_overdraw_cash(amount):
+    elif method == "cash" and would_overdraw_cash(amount, entry_date):
         db.session.rollback()
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         db.session.add(
             SupplierPayment(
@@ -1923,13 +2014,9 @@ def ledger_bank_sale():
     elif not amount or amount <= 0:
         db.session.rollback()
         flash("Amount must be a positive number.", "error")
-    elif would_overdraw_cash(amount):
+    elif would_overdraw_cash(amount, entry_date):
         db.session.rollback()
-        flash(
-            f"That's more than today's cash sales can cover (cash in hand: "
-            f"Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         db.session.add(
             BankSale(
@@ -1962,13 +2049,9 @@ def ledger_cash_deposit():
     elif not amount or amount <= 0:
         db.session.rollback()
         flash("Amount must be a positive number.", "error")
-    elif would_overdraw_cash(amount):
+    elif would_overdraw_cash(amount, entry_date):
         db.session.rollback()
-        flash(
-            f"Not enough cash in hand to deposit that much (available: "
-            f"Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         db.session.add(
             CashDeposit(
@@ -2003,12 +2086,9 @@ def ledger_employee_loan():
     elif method_error:
         db.session.rollback()
         flash(method_error, "error")
-    elif method == "cash" and would_overdraw_cash(amount):
+    elif method == "cash" and would_overdraw_cash(amount, entry_date):
         db.session.rollback()
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         db.session.add(
             EmployeeLoan(
@@ -2451,11 +2531,8 @@ def account_entry_supplier_payment_edit(entry_id):
         flash("Amount must be a positive number.", "error")
     elif method_error:
         flash(method_error, "error")
-    elif would_overdraw_cash(new_cash_amount, restoration=old_cash_amount):
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+    elif would_overdraw_cash(new_cash_amount, entry_date, old_cash_amount, entry.entry_date):
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -2484,11 +2561,8 @@ def account_entry_employee_loan_edit(entry_id):
         flash("Amount must be a positive number.", "error")
     elif method_error:
         flash(method_error, "error")
-    elif would_overdraw_cash(new_cash_amount, restoration=old_cash_amount):
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+    elif would_overdraw_cash(new_cash_amount, entry_date, old_cash_amount, entry.entry_date):
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -2535,11 +2609,8 @@ def account_entry_salary_edit(entry_id):
         )
     elif method_error:
         flash(method_error, "error")
-    elif would_overdraw_cash(new_cash_net, restoration=old_cash_net):
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+    elif would_overdraw_cash(new_cash_net, entry_date, old_cash_net, entry.entry_date):
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         entry.entry_date = entry_date
         entry.gross_amount = gross
@@ -2681,11 +2752,8 @@ def account_entry_bank_sale_edit(entry_id):
 
     if not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
-    elif would_overdraw_cash(amount, restoration=entry.amount):
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+    elif would_overdraw_cash(amount, entry_date, entry.amount, entry.entry_date):
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -2707,11 +2775,8 @@ def account_entry_cash_deposit_edit(entry_id):
 
     if not amount or amount <= 0:
         flash("Amount must be a positive number.", "error")
-    elif would_overdraw_cash(amount, restoration=entry.amount):
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+    elif would_overdraw_cash(amount, entry_date, entry.amount, entry.entry_date):
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -2746,11 +2811,8 @@ def account_entry_expense_edit(entry_id):
         flash("Amount must be a positive number.", "error")
     elif method_error:
         flash(method_error, "error")
-    elif would_overdraw_cash(new_cash_amount, restoration=old_cash_amount):
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+    elif would_overdraw_cash(new_cash_amount, entry_date, old_cash_amount, entry.entry_date):
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         entry.entry_date = entry_date
         entry.category = category
@@ -2794,11 +2856,8 @@ def account_entry_fuel_purchase_edit(entry_id):
         flash("Cost must be a positive number.", "error")
     elif method_error:
         flash(method_error, "error")
-    elif would_overdraw_cash(new_cash_amount, restoration=old_cash_amount):
-        flash(
-            f"Not enough cash in hand for this (available: Rs {cash_account_balance(get_cash_account()):,.2f}).",
-            "error",
-        )
+    elif would_overdraw_cash(new_cash_amount, entry_date, old_cash_amount, entry.entry_date):
+        flash(cash_shortfall_message(entry_date), "error")
     else:
         entry.entry_date = entry_date
         entry.tank_id = tank.id
@@ -3195,7 +3254,28 @@ def reports_trends():
 # --------------------------------------------------------- first-time db --
 
 def ensure_seed_users():
-    db.create_all()
+    # The Alembic CLI (flask db migrate/upgrade/...) imports this module to
+    # get at `app`, which re-runs this whole function - without this guard
+    # a plain `flask db upgrade` would recurse into migrate_upgrade() from
+    # here too, and generating a fresh autogenerate diff against a
+    # partially-migrated DB would produce a broken migration.
+    if os.environ.get("SKIP_DB_BOOTSTRAP") == "1":
+        return
+
+    inspector = inspect(db.engine)
+    existing_tables = inspector.get_table_names()
+    if "user" in existing_tables and "alembic_version" not in existing_tables:
+        # A pre-migrations database (every production DB and most local
+        # ones as of adopting Alembic) - its schema already matches the
+        # baseline migration exactly, since that migration was generated
+        # from these same models. Stamping records it as already at head
+        # without re-running (and failing on) CREATE TABLE for tables that
+        # already exist.
+        migrate_stamp()
+
+    # No-op once at head; builds the full schema from migrations on a
+    # brand-new empty database (replaces the old db.create_all()).
+    migrate_upgrade()
 
     # Every reading/credit/bank-sale row needs a shift, so one always has
     # to exist. A pump that doesn't split its day just leaves this single
