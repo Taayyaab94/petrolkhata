@@ -42,10 +42,20 @@
   <div class="stat-card accent-red">
     <div class="label">Cost of Fuel Sold</div>
     <div class="value">Rs {{ "%.2f"|format(totals.total_cogs) }}</div>
+    <div class="sub">Net of sales returns</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Salaries</div>
     <div class="value">Rs {{ "%.2f"|format(totals.total_salaries) }}</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Sales Returns</div>
+    <div class="value">Rs {{ "%.2f"|format(totals.total_sales_returns) }}</div>
+  </div>
+  <div class="stat-card {{ 'accent-green' if totals.total_product_margin >= 0 else 'accent-red' }}">
+    <div class="label">Product Margin</div>
+    <div class="value">Rs {{ "%.2f"|format(totals.total_product_margin) }}</div>
+    <div class="sub">Non-fuel dealer commission - exact, not weighted-average</div>
   </div>
   <div class="stat-card {{ 'accent-green' if totals.total_profit >= 0 else 'accent-red' }}">
     <div class="label">Profit</div>
@@ -55,7 +65,7 @@
 
 <div class="panel">
   <div class="panel-head"><h3>Profit Over Time</h3></div>
-  <p class="hint">Revenue minus the cost of the fuel actually sold (liters sold &times; weighted average purchase cost) minus expenses and salaries. Costing the fuel sold rather than the fuel bought is what stops a tanker delivery from showing as a loss on the day it arrives. For a full month-end breakdown see the <a href="{{ url_for('reports_monthly') }}">Monthly Report</a>.</p>
+  <p class="hint">Fuel revenue net of sales returns, minus the cost of the fuel actually sold (net liters sold &times; weighted average purchase cost, also net of that fuel's returns), plus non-fuel product margin (revenue minus each line's own exact snapshotted cost - no weighted average needed there), minus expenses and salaries - the same definition the <a href="{{ url_for('reports_monthly') }}">Monthly Report</a> uses, so the two always reconcile for the same month. Costing the fuel sold rather than the fuel bought is what stops a tanker delivery from showing as a loss on the day it arrives.</p>
   <div class="chart-wrap">{{ profit_chart|safe }}</div>
 </div>
 

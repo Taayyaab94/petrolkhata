@@ -57,7 +57,13 @@ from ledger_logic import (
     previous_slot,
     price_on_date,
     price_resolver,
+    product_margin_for_period,
+    product_rate_resolver,
+    product_rates_on_date,
+    product_stock,
+    product_stock_summary,
     record_fuel_price,
+    record_product_rates,
     sales_breakdown_for_date,
     stock_series,
     weighted_avg_cost,
@@ -77,9 +83,14 @@ from models import (
     FuelType,
     Nozzle,
     NozzleReset,
+    Product,
+    ProductPurchase,
+    ProductRateHistory,
+    ProductSale,
     Receipt,
     SalaryPayment,
     Sale,
+    SalesReturn,
     Shift,
     StockPurchase,
     SupplierPayment,
@@ -563,6 +574,16 @@ def settings():
     dip_charts = {
         t.id: sorted(t.dip_chart_rows, key=lambda r: r.depth_cm) for t in tanks
     }
+    # Active first, then deactivated - within each group alphabetical
+    # (case-insensitive) so a 95-SKU catalogue is still scannable.
+    today = date.today()
+    products = Product.query.order_by(Product.is_active.desc(), func.lower(Product.name)).all()
+    # Includes inactive products (unlike product_stock_summary()'s own
+    # default) - this table has to show a deactivated product's last-known
+    # stock too, not just active ones.
+    product_stock_rows = {
+        row["product"].id: row for row in product_stock_summary(today, products=products)
+    }
     return render_template(
         "settings.html",
         tanks=tanks,
@@ -574,7 +595,9 @@ def settings():
         users=users,
         shifts=shifts,
         dip_charts=dip_charts,
-        today=date.today(),
+        products=products,
+        product_stock_rows=product_stock_rows,
+        today=today,
     )
 
 
@@ -593,6 +616,7 @@ BACKUP_MODELS = [
     Account,
     Sale,
     CreditGiven,
+    SalesReturn,
     StockPurchase,
     SupplierPayment,
     Receipt,
@@ -606,6 +630,13 @@ BACKUP_MODELS = [
     TankDipChart,
     CashHandover,
     SalaryPayment,
+    # Product catalogue (Phase 2A) - Ledger wiring for these lands in a
+    # later phase, but the tables exist now and a backup has to be
+    # complete regardless of whether anything has been entered yet.
+    Product,
+    ProductRateHistory,
+    ProductPurchase,
+    ProductSale,
 ]
 
 
@@ -906,6 +937,345 @@ def settings_delete_tank(tank_id):
     return redirect(url_for("settings"))
 
 
+# --------------------------------------------------- product catalogue ----
+
+PRODUCT_CATEGORIES = ("lubricant", "filter", "shop", "other")
+PRODUCT_UNITS = ("piece", "litre")
+
+
+@app.route("/settings/add-product", methods=["POST"])
+@login_required
+@owner_required
+def settings_add_product():
+    name = request.form.get("name", "").strip()
+    category = request.form.get("category", "lubricant").strip() or "lubricant"
+    if category not in PRODUCT_CATEGORIES:
+        category = "lubricant"
+    pack_size = request.form.get("pack_size", "").strip() or None
+    unit = request.form.get("unit", "piece").strip() or "piece"
+    if unit not in PRODUCT_UNITS:
+        unit = "piece"
+    purchase_rate = request.form.get("purchase_rate", type=float)
+    retail_rate = request.form.get("retail_rate", type=float)
+    opening_stock = request.form.get("opening_stock", type=float)
+    low_stock_threshold = request.form.get("low_stock_threshold", type=float)
+    stock_date, date_error = parse_stock_date(request.form.get("opening_stock_date", ""))
+
+    existing = (
+        Product.query.filter(func.lower(Product.name) == name.lower()).first() if name else None
+    )
+
+    if not name:
+        flash("Please enter a product name.", "error")
+    elif existing:
+        flash(f"A product named \"{existing.name}\" already exists.", "error")
+    elif purchase_rate is None or purchase_rate < 0:
+        flash("Please enter a valid purchase rate.", "error")
+    elif retail_rate is None or retail_rate < 0:
+        flash("Please enter a valid retail rate.", "error")
+    elif retail_rate < purchase_rate:
+        flash(
+            "Retail rate can't be less than the purchase rate - that's a guaranteed "
+            "loss and almost always a typo.",
+            "error",
+        )
+    elif opening_stock is None or opening_stock < 0:
+        flash("Please enter a valid opening stock.", "error")
+    elif date_error == "invalid":
+        flash("Please enter a valid opening stock date.", "error")
+    elif date_error == "future":
+        flash("Opening stock date can't be in the future.", "error")
+    elif low_stock_threshold is None or low_stock_threshold < 0:
+        flash("Please enter a valid low-stock alert level.", "error")
+    else:
+        # Same convention as settings_add_tank(): a blank date defaults to
+        # today for a brand-new product, rather than NULL - NULL is only
+        # ever an explicit "I don't know when this was measured" (see
+        # settings_edit_product()).
+        opening_date = stock_date or date.today()
+        product = Product(
+            name=name,
+            category=category,
+            pack_size=pack_size,
+            unit=unit,
+            opening_stock=opening_stock,
+            opening_stock_date=opening_date,
+            low_stock_threshold=low_stock_threshold,
+        )
+        db.session.add(product)
+        db.session.flush()
+        record_product_rates(product, purchase_rate, retail_rate, opening_date)
+        db.session.commit()
+        flash(f"Added {product.label}.", "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/edit-product/<int:product_id>", methods=["POST"])
+@login_required
+@owner_required
+def settings_edit_product(product_id):
+    product = db.session.get(Product, product_id) or abort(404)
+    name = request.form.get("name", "").strip()
+    category = request.form.get("category", product.category).strip() or product.category
+    pack_size = request.form.get("pack_size", "").strip() or None
+    unit = request.form.get("unit", product.unit).strip() or product.unit
+    purchase_rate = request.form.get("purchase_rate", type=float)
+    retail_rate = request.form.get("retail_rate", type=float)
+    opening_stock = request.form.get("opening_stock", type=float)
+    low_stock_threshold = request.form.get("low_stock_threshold", type=float)
+    stock_date, date_error = parse_stock_date(request.form.get("opening_stock_date", ""))
+    rate_effective, rate_date_error = parse_stock_date(request.form.get("rate_effective_date", ""))
+
+    existing = (
+        Product.query.filter(func.lower(Product.name) == name.lower(), Product.id != product.id).first()
+        if name
+        else None
+    )
+
+    if not name:
+        flash("Please enter a product name.", "error")
+    elif existing:
+        flash(f"A product named \"{existing.name}\" already exists.", "error")
+    elif purchase_rate is None or purchase_rate < 0:
+        flash("Please enter a valid purchase rate.", "error")
+    elif retail_rate is None or retail_rate < 0:
+        flash("Please enter a valid retail rate.", "error")
+    elif retail_rate < purchase_rate:
+        flash(
+            "Retail rate can't be less than the purchase rate - that's a guaranteed "
+            "loss and almost always a typo.",
+            "error",
+        )
+    elif opening_stock is None or opening_stock < 0:
+        flash("Please enter a valid opening stock.", "error")
+    elif date_error == "invalid":
+        flash("Please enter a valid opening stock date.", "error")
+    elif date_error == "future":
+        flash("Opening stock date can't be in the future.", "error")
+    elif low_stock_threshold is None or low_stock_threshold < 0:
+        flash("Please enter a valid low-stock alert level.", "error")
+    elif rate_date_error == "invalid":
+        flash("Please enter a valid effective date for the rate change.", "error")
+    elif rate_date_error == "future":
+        flash("Rate effective date can't be in the future.", "error")
+    else:
+        product.name = name
+        product.category = category if category in PRODUCT_CATEGORIES else product.category
+        product.pack_size = pack_size
+        product.unit = unit if unit in PRODUCT_UNITS else product.unit
+        product.opening_stock = opening_stock
+        # A blank date clears the baseline to NULL, i.e. "beginning of
+        # time" - same escape hatch settings_edit_tank() gives a tank.
+        product.opening_stock_date = stock_date
+        product.low_stock_threshold = low_stock_threshold
+        # Only a genuine rate CHANGE creates history - editing a typo'd
+        # name/pack/threshold alongside unchanged rates must not leave a
+        # spurious ProductRateHistory row behind.
+        if purchase_rate != product.purchase_rate or retail_rate != product.retail_rate:
+            record_product_rates(product, purchase_rate, retail_rate, rate_effective or date.today())
+        db.session.commit()
+        flash(f"Updated {product.label}.", "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/toggle-product/<int:product_id>", methods=["POST"])
+@login_required
+@owner_required
+def settings_toggle_product(product_id):
+    product = db.session.get(Product, product_id) or abort(404)
+    # Deactivating is always allowed - it never blocks or undoes anything
+    # on file, it only hides the product from future sale pickers
+    # (is_active is exactly the filter the next agent's entry forms rely
+    # on to keep a retired SKU out of new sales).
+    product.is_active = not product.is_active
+    db.session.commit()
+    flash(f"{'Reactivated' if product.is_active else 'Deactivated'} {product.label}.", "success")
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/delete-product/<int:product_id>", methods=["POST"])
+@login_required
+@owner_required
+def settings_delete_product(product_id):
+    product = db.session.get(Product, product_id) or abort(404)
+    has_sales = ProductSale.query.filter_by(product_id=product.id).count() > 0
+    has_purchases = ProductPurchase.query.filter_by(product_id=product.id).count() > 0
+
+    if has_sales or has_purchases:
+        flash(
+            f"Can't delete {product.label} - it already has sale or purchase history. "
+            "Deactivate it instead.",
+            "error",
+        )
+    else:
+        label = product.label
+        ProductRateHistory.query.filter_by(product_id=product.id).delete()
+        db.session.delete(product)
+        db.session.commit()
+        flash(f"Deleted {label}.", "success")
+
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/import-products", methods=["POST"])
+@login_required
+@owner_required
+def settings_import_products():
+    """Bulk upsert from a pasted price list - see settings_dip_chart() for
+    the same tab-or-comma paste convention. This is the feature that makes
+    the catalogue usable at all: ~95 SKUs (Shell Helix/Rimula/Ultra grades,
+    dozens of vehicle-specific filters, etc.) can't be typed in one at a
+    time, and re-pasting next month's price list has to UPDATE existing
+    products' rates (recording history) rather than create 95 duplicates -
+    matching is by name, case-insensitive, which is the whole point.
+    """
+    category = request.form.get("category", "lubricant").strip() or "lubricant"
+    if category not in PRODUCT_CATEGORIES:
+        category = "lubricant"
+    unit = request.form.get("unit", "piece").strip() or "piece"
+    if unit not in PRODUCT_UNITS:
+        unit = "piece"
+    effective_date, date_error = parse_stock_date(request.form.get("effective_date", ""))
+
+    if date_error == "invalid":
+        flash("Please enter a valid effective date.", "error")
+        return redirect(url_for("settings"))
+    if date_error == "future":
+        flash("Effective date can't be in the future.", "error")
+        return redirect(url_for("settings"))
+    effective_date = effective_date or date.today()
+
+    raw = request.form.get("catalogue", "")
+    parsed = []
+    errors = []
+    for lineno, line in enumerate(raw.splitlines(), start=1):
+        line = line.strip().replace("\t", ",")
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 4:
+            errors.append(
+                f"Line {lineno}: expected at least name, pack size, purchase rate, retail rate."
+            )
+            continue
+        name = parts[0]
+        pack_size = parts[1]
+        pack_size = None if pack_size in ("", "-") else pack_size
+        try:
+            purchase_rate = float(parts[2])
+            retail_rate = float(parts[3])
+        except ValueError:
+            errors.append(f"Line {lineno}: purchase/retail rate must be numbers.")
+            continue
+        # Whether column 6 (threshold) was actually present on this line,
+        # as opposed to defaulting to 0 because it was omitted - an
+        # UPDATE must tell those two apart (see below): a price-list
+        # re-paste that only has 4 columns must never destroy a threshold
+        # someone set separately via the single-row edit form.
+        threshold_given = len(parts) > 5 and parts[5] != ""
+        try:
+            opening_stock = float(parts[4]) if len(parts) > 4 and parts[4] != "" else 0.0
+            low_stock_threshold = float(parts[5]) if threshold_given else 0.0
+        except ValueError:
+            errors.append(f"Line {lineno}: opening stock/low-stock alert must be numbers.")
+            continue
+        if not name:
+            errors.append(f"Line {lineno}: name is required.")
+            continue
+        if purchase_rate < 0 or retail_rate < 0 or opening_stock < 0 or low_stock_threshold < 0:
+            errors.append(f"Line {lineno}: values can't be negative.")
+            continue
+        if retail_rate < purchase_rate:
+            errors.append(f"Line {lineno}: retail rate can't be less than the purchase rate.")
+            continue
+        parsed.append(
+            {
+                "name": name,
+                "pack_size": pack_size,
+                "purchase_rate": purchase_rate,
+                "retail_rate": retail_rate,
+                "opening_stock": opening_stock,
+                "low_stock_threshold": low_stock_threshold,
+                "threshold_given": threshold_given,
+            }
+        )
+
+    if errors:
+        # All-or-nothing: a half-imported catalogue is worse than none,
+        # since the next paste of the same list would then only be able to
+        # tell it was already partially there by checking every row.
+        for e in errors[:5]:
+            flash(e, "error")
+        if len(errors) > 5:
+            flash(f"...and {len(errors) - 5} more error(s). Nothing was imported.", "error")
+        else:
+            flash("Nothing was imported.", "error")
+        return redirect(url_for("settings"))
+
+    if not parsed:
+        flash("Nothing to import - paste at least one product line.", "error")
+        return redirect(url_for("settings"))
+
+    # A duplicate name within one paste has the LAST line win, the same
+    # "seen" dict settings_dip_chart() uses - within a single batch that's
+    # far more likely a paste mistake than two products meant to import as
+    # separate rows.
+    by_name = {}
+    order = []
+    for row in parsed:
+        key = row["name"].lower()
+        if key not in by_name:
+            order.append(key)
+        by_name[key] = row
+
+    existing_products = {
+        p.name.lower(): p for p in Product.query.filter(func.lower(Product.name).in_(order)).all()
+    }
+
+    created, updated, rate_changes = 0, 0, 0
+    for key in order:
+        row = by_name[key]
+        product = existing_products.get(key)
+        if product is None:
+            product = Product(
+                name=row["name"],
+                category=category,
+                pack_size=row["pack_size"],
+                unit=unit,
+                opening_stock=row["opening_stock"],
+                opening_stock_date=effective_date,
+                low_stock_threshold=row["low_stock_threshold"],
+            )
+            db.session.add(product)
+            db.session.flush()
+            record_product_rates(product, row["purchase_rate"], row["retail_rate"], effective_date)
+            created += 1
+            rate_changes += 1
+        else:
+            product.category = category
+            product.pack_size = row["pack_size"]
+            product.unit = unit
+            # A re-paste must never DESTROY a value configured separately
+            # from the catalogue (e.g. a threshold set via the single-row
+            # edit form) just because this batch's line omitted that
+            # optional column - only overwrite it when the line actually
+            # supplied one. opening_stock has no equivalent branch: it's
+            # simply never touched on an update (see the create branch
+            # above), so there's nothing to protect there.
+            if row["threshold_given"]:
+                product.low_stock_threshold = row["low_stock_threshold"]
+            if row["purchase_rate"] != product.purchase_rate or row["retail_rate"] != product.retail_rate:
+                record_product_rates(product, row["purchase_rate"], row["retail_rate"], effective_date)
+                rate_changes += 1
+            updated += 1
+
+    db.session.commit()
+    flash(f"{created} product(s) created, {updated} updated, {rate_changes} rate change(s) recorded.", "success")
+    return redirect(url_for("settings"))
+
+
 @app.route("/settings/reset-nozzle-meter", methods=["POST"])
 @login_required
 @owner_required
@@ -1183,6 +1553,8 @@ def get_feed_for_date(entry_date, full_visibility):
         events.append({"kind": "receipt", "sort": r.recorded_at, "obj": r})
     for c in CreditGiven.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "credit", "sort": c.recorded_at, "obj": c})
+    for sr in SalesReturn.query.filter_by(entry_date=entry_date).all():
+        events.append({"kind": "sales_return", "sort": sr.recorded_at, "obj": sr})
     for dip in TankDip.query.filter_by(entry_date=entry_date).all():
         variance = round(dip.dip_liters - book_stock(dip.tank, dip.entry_date), 2)
         events.append({"kind": "dip", "sort": dip.recorded_at, "obj": dip, "variance": variance})
@@ -1200,6 +1572,8 @@ def get_feed_for_date(entry_date, full_visibility):
                 "variance": round(h.declared_amount - expected, 2),
             }
         )
+    for ps in ProductSale.query.filter_by(entry_date=entry_date).all():
+        events.append({"kind": "product_sale", "sort": ps.recorded_at, "obj": ps})
 
     if full_visibility:
         for e in Expense.query.filter_by(entry_date=entry_date).all():
@@ -1212,6 +1586,8 @@ def get_feed_for_date(entry_date, full_visibility):
             events.append({"kind": "cash_deposit", "sort": cd.recorded_at, "obj": cd})
         for sal in SalaryPayment.query.filter_by(entry_date=entry_date).all():
             events.append({"kind": "salary", "sort": sal.recorded_at, "obj": sal})
+        for pp in ProductPurchase.query.filter_by(entry_date=entry_date).all():
+            events.append({"kind": "product_purchase", "sort": pp.recorded_at, "obj": pp})
 
     events.sort(key=lambda e: e["sort"], reverse=True)
     return events
@@ -1246,6 +1622,7 @@ def ledger():
                     "previous_reading": prev_value,
                     "previous_is_auto": prev_auto,
                     "existing_reading": existing.current_reading if existing else None,
+                    "existing_testing": existing.testing_liters if existing else None,
                     # The price in effect ON selected_date, not necessarily
                     # today's current price - so paging back to an earlier
                     # date shows what fuel cost then, and a price change
@@ -1265,6 +1642,7 @@ def ledger():
                 "book_stock": stock,
                 "existing_dip": existing_dip.dip_liters if existing_dip else None,
                 "existing_dip_cm": existing_dip.dip_cm if existing_dip else None,
+                "existing_water_cm": existing_dip.water_cm if existing_dip else None,
                 "is_low": stock <= t.low_stock_threshold,
                 # A tank with a calibration chart collects a depth reading
                 # (what a dip stick actually measures) and converts; one
@@ -1296,6 +1674,27 @@ def ledger():
     accounts_supplier_first = prioritize_accounts(accounts, "supplier")
     accounts_employee_first = prioritize_accounts(accounts, "employee")
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
+
+    # Sorted by category first so the Non-Fuel Sale/Product Purchase
+    # pickers group lubricants/filters/shop items into visible blocks, same
+    # ordering as the Inventory page's product table.
+    products = (
+        Product.query.filter_by(is_active=True)
+        .order_by(Product.category, func.lower(Product.name))
+        .all()
+    )
+    # One bulk-loaded rate lookup and one grouped stock summary for the
+    # WHOLE catalogue - not one query per product - see
+    # product_rate_resolver()'s and product_stock_summary()'s docstrings
+    # for why an N+1 here would matter on a ~95-SKU catalogue.
+    resolve_product_rate = product_rate_resolver(products)
+    stock_by_product_id = {
+        row["product"].id: row["on_hand"] for row in product_stock_summary(selected_date, products=products)
+    }
+    product_info = {
+        p.id: (*resolve_product_rate(p, selected_date), stock_by_product_id.get(p.id, 0.0))
+        for p in products
+    }
 
     breakdown = sales_breakdown_for_date(selected_date)
     total_sales = breakdown["total"]
@@ -1359,6 +1758,8 @@ def ledger():
         accounts_supplier_first=accounts_supplier_first,
         accounts_employee_first=accounts_employee_first,
         bank_accounts=bank_accounts,
+        products=products,
+        product_info=product_info,
         feed=feed,
         total_sales=total_sales,
         fuel_sales=fuel_sales,
@@ -1479,6 +1880,35 @@ def resolve_payment_method(form, field="paid_via", new_field="new_bank_account_n
     return "bank", bank_account, None
 
 
+def resolve_return_method(form, field="method"):
+    """Refund method for a Sales Return: cash, a specific bank account
+    (existing or quick-added inline, same __new__ convention as "Paid
+    via"), or "credit" - refunded by reducing what a credit customer
+    owes, resolved the same way any other customer picker on the Ledger
+    is. Returns (method, bank_account_or_None, account_or_None, error)."""
+    value = form.get(field, "cash")
+    if value in ("", "cash"):
+        return "cash", None, None, None
+
+    if value == "credit":
+        account, error = resolve_customer(form)
+        return "credit", None, account, error
+
+    if value == "__new__":
+        name = form.get("new_bank_account_name", "").strip()
+        if not name:
+            return None, None, None, "Please enter a name for the new bank account."
+        bank_account = BankAccount(name=name)
+        db.session.add(bank_account)
+        db.session.flush()
+        return "bank", bank_account, None, None
+
+    bank_account = db.session.get(BankAccount, int(value))
+    if not bank_account:
+        return None, None, None, "Please choose a valid refund method."
+    return "bank", bank_account, None, None
+
+
 @app.route("/ledger/readings", methods=["POST"])
 @login_required
 def ledger_readings():
@@ -1560,11 +1990,40 @@ def ledger_readings():
             )
             continue
 
-        liters = round(current_reading - previous, 2)
+        gross = round(current_reading - previous, 2)
+
+        raw_testing = request.form.get(f"testing_{nozzle.id}", "").strip()
+        if not raw_testing:
+            testing = 0.0
+        else:
+            try:
+                testing = float(raw_testing)
+            except ValueError:
+                errors.append(f"{nozzle.label}: testing is not a valid number.")
+                continue
+        if testing < 0:
+            errors.append(f"{nozzle.label}: testing can't be negative.")
+            continue
+        if testing > gross:
+            errors.append(
+                f"{nozzle.label}: testing ({testing:g} L) can't exceed the meter "
+                f"difference ({gross:g} L)."
+            )
+            continue
+
+        # liters stays NET - the fuel that actually left the tank for
+        # good. Fuel run through the nozzle to test it drains back into
+        # the same tank and is never billed, so it's carved out here
+        # rather than folded into the sale (see Sale.testing_liters in
+        # models.py for the invariant this maintains).
+        liters = round(gross - testing, 2)
         existing = Sale.query.filter_by(
             nozzle_id=nozzle.id, entry_date=entry_date, shift_id=shift.id
         ).first()
-        if liters == 0 and not existing and not backfill_prior:
+        # A day that was pure testing (gross > 0 but net liters == 0) is
+        # still a real record - only the true no-op (nothing typed, no
+        # existing row, no gap to backfill) gets skipped.
+        if liters == 0 and testing == 0 and not existing and not backfill_prior:
             continue
 
         # Price as of entry_date, not today's current price - so backfilling
@@ -1586,6 +2045,10 @@ def ledger_readings():
                     previous_reading=backfill_prior["previous_reading"],
                     current_reading=backfill_prior["current_reading"],
                     liters=bf_liters,
+                    # No testing figure exists for a day being inferred
+                    # from a later entry's typed "previous" reading - the
+                    # user never saw this slot to report one for it.
+                    testing_liters=0,
                     price_per_liter=bf_price,
                     total_amount=round(bf_liters * bf_price, 2),
                     user_id=current_user.id,
@@ -1596,6 +2059,7 @@ def ledger_readings():
             existing.previous_reading = previous
             existing.current_reading = current_reading
             existing.liters = liters
+            existing.testing_liters = testing
             existing.price_per_liter = price
             existing.total_amount = total_amount
             existing.user_id = current_user.id
@@ -1608,6 +2072,7 @@ def ledger_readings():
                     previous_reading=previous,
                     current_reading=current_reading,
                     liters=liters,
+                    testing_liters=testing,
                     price_per_liter=price,
                     total_amount=total_amount,
                     user_id=current_user.id,
@@ -1683,10 +2148,27 @@ def ledger_dip():
             dip_cm = None
             dip_value = entered
 
+        # Purely diagnostic - a stick measurement in cm regardless of
+        # whether the tank's own dip above is in cm or liters (see
+        # TankDip.water_cm in models.py). Blank stays None rather than 0,
+        # so "not measured" is distinct from "measured, none found".
+        raw_water = request.form.get(f"water_{tank.id}", "").strip()
+        water_cm = None
+        if raw_water:
+            try:
+                water_cm = float(raw_water)
+            except ValueError:
+                flash(f"Tank {tank.number}: water level is not a valid number.", "error")
+                continue
+            if water_cm < 0:
+                flash(f"Tank {tank.number}: water level must be zero or more.", "error")
+                continue
+
         existing = TankDip.query.filter_by(tank_id=tank.id, entry_date=entry_date).first()
         if existing:
             existing.dip_cm = dip_cm
             existing.dip_liters = dip_value
+            existing.water_cm = water_cm
             existing.user_id = current_user.id
         else:
             db.session.add(
@@ -1695,6 +2177,7 @@ def ledger_dip():
                     entry_date=entry_date,
                     dip_cm=dip_cm,
                     dip_liters=dip_value,
+                    water_cm=water_cm,
                     user_id=current_user.id,
                 )
             )
@@ -1967,6 +2450,70 @@ def ledger_credit():
     return redirect(url_for("ledger", date=entry_date))
 
 
+@app.route("/ledger/sales-return", methods=["POST"])
+@login_required
+def ledger_sales_return():
+    """Fuel a customer physically brings back into a tank, refunded to
+    them - distinct from Testing (Sale.testing_liters in models.py),
+    which never involved a customer at all. Not owner-only: staff take
+    these at the forecourt the same as any other sale-side entry."""
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    shift = resolve_shift(request.form)
+    fuel_type_id = request.form.get("fuel_type_id", type=int)
+    tank_id = request.form.get("tank_id", type=int)
+    liters = request.form.get("liters", type=float)
+    note = request.form.get("note", "").strip()
+    fuel = db.session.get(FuelType, fuel_type_id) if fuel_type_id else None
+    tank = db.session.get(Tank, tank_id) if tank_id else None
+    method, bank_account, account, method_error = resolve_return_method(request.form)
+
+    if not fuel:
+        db.session.rollback()
+        flash("Please choose a valid fuel type.", "error")
+    elif not tank:
+        db.session.rollback()
+        flash("Please choose which tank the fuel goes back into.", "error")
+    elif not liters or liters <= 0:
+        db.session.rollback()
+        flash("Liters must be a positive number.", "error")
+    elif method_error:
+        db.session.rollback()
+        flash(method_error, "error")
+    else:
+        # Priced from the date's own history, same as any other sale, so
+        # a return of fuel sold weeks ago refunds the rate actually
+        # charged then - not today's rate.
+        price = price_on_date(fuel, entry_date)
+        amount = round(liters * price, 2)
+        if method == "cash" and would_overdraw_cash(amount, entry_date):
+            db.session.rollback()
+            flash(cash_shortfall_message(entry_date), "error")
+        else:
+            db.session.add(
+                SalesReturn(
+                    entry_date=entry_date,
+                    shift_id=shift.id,
+                    fuel_type_id=fuel.id,
+                    tank_id=tank.id,
+                    liters=liters,
+                    price_per_liter=price,
+                    amount=amount,
+                    method=method,
+                    bank_account_id=bank_account.id if bank_account else None,
+                    account_id=account.id if account else None,
+                    note=note or None,
+                    user_id=current_user.id,
+                )
+            )
+            db.session.commit()
+            flash(
+                f"Recorded return of {liters:g} L {fuel.name} into {tank.label} (Rs {amount:,.2f}).",
+                "success",
+            )
+
+    return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+
+
 @app.route("/ledger/expense", methods=["POST"])
 @login_required
 @owner_required
@@ -2064,6 +2611,167 @@ def ledger_purchase():
         )
         db.session.commit()
         flash(f"Added {liters:g} L to {tank.label} ({entry_date}).", "success")
+
+    return redirect(url_for("ledger", date=entry_date))
+
+
+@app.route("/ledger/product-sale", methods=["POST"])
+@login_required
+def ledger_product_sale():
+    """A non-fuel sale (lubricant/filter/shop item) at the forecourt - not
+    owner-only, staff sell these the same as fuel. This only ever
+    INCREASES cash/bank/what a customer owes, so unlike a purchase there's
+    nothing here that could draw the register down - deliberately no
+    would_overdraw_cash() call on this route."""
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    shift = resolve_shift(request.form)
+    product_id = request.form.get("product_id", type=int)
+    quantity = request.form.get("quantity", type=float)
+    note = request.form.get("note", "").strip()
+    # Same cash/bank/credit shape a Sales Return refund uses - "on
+    # account" here means the customer's balance grows instead of shrinks,
+    # but the resolution (cash, a specific bank, or a customer picker) is
+    # identical, so this reuses that resolver rather than duplicating it.
+    method, bank_account, account, method_error = resolve_return_method(request.form)
+
+    product = db.session.get(Product, product_id) if product_id else None
+    if product and not product.is_active:
+        # A deactivated product can't be sold going forward - treated the
+        # same as if none had been chosen at all.
+        product = None
+
+    if not product:
+        db.session.rollback()
+        flash("Please choose a valid product.", "error")
+    elif not quantity or quantity <= 0:
+        db.session.rollback()
+        flash("Quantity must be a positive number.", "error")
+    elif method_error:
+        db.session.rollback()
+        flash(method_error, "error")
+    else:
+        # Resolved for entry_date, never read from the product's cached
+        # rate directly - a backdated sale has to snapshot the rates that
+        # were actually in effect on ITS date (see product_rates_on_date()).
+        purchase_rate, retail_rate = product_rates_on_date(product, entry_date)
+        amount = round(quantity * retail_rate, 2)
+        # Computed BEFORE the new row is added, so it reflects stock as it
+        # stood going into this sale.
+        stock_before = product_stock(product, entry_date)
+        db.session.add(
+            ProductSale(
+                product_id=product.id,
+                shift_id=shift.id,
+                entry_date=entry_date,
+                quantity=quantity,
+                retail_rate=retail_rate,
+                purchase_rate=purchase_rate,
+                amount=amount,
+                method=method,
+                bank_account_id=bank_account.id if bank_account else None,
+                account_id=account.id if account else None,
+                note=note or None,
+                user_id=current_user.id,
+            )
+        )
+        db.session.commit()
+        flash(f"Recorded sale of {quantity:g} {product.label} (Rs {amount:,.2f}).", "success")
+        if quantity > stock_before:
+            # Overselling means the STOCK COUNT is wrong, not that this
+            # sale didn't happen - refusing to save would stop the
+            # attendant from recording a sale that physically occurred, so
+            # this warns and still saves.
+            flash(
+                f"{product.label}: sold {quantity:g} but only {stock_before:g} were in stock as "
+                f"of {entry_date} - the stock count may need correcting; the sale was still saved.",
+                "error",
+            )
+
+    return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+
+
+@app.route("/ledger/product-purchase", methods=["POST"])
+@login_required
+@owner_required
+def ledger_product_purchase():
+    """Stock received for a non-fuel product - mirrors ledger_purchase()
+    (fuel) exactly, including the cash/credit payment_type split. quantity
+    may be negative for a return to the supplier or a stock-count
+    correction (see ProductPurchase's docstring in models.py); the sign
+    of total_cost always comes from quantity, never from unit_cost, which
+    is why unit_cost itself must always be a positive per-unit price."""
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    product_id = request.form.get("product_id", type=int)
+    quantity = request.form.get("quantity", type=float)
+    unit_cost = request.form.get("unit_cost", type=float)
+    payment_type = request.form.get("payment_type", "cash")
+    payment_type = payment_type if payment_type in ("cash", "credit") else "cash"
+    note = request.form.get("note", "").strip()
+
+    product = db.session.get(Product, product_id) if product_id else None
+    if product and not product.is_active:
+        product = None
+
+    supplier = None
+    supplier_error = None
+    method, bank_account, method_error = "cash", None, None
+    if payment_type == "credit":
+        supplier, supplier_error = resolve_supplier(request.form)
+    else:
+        method, bank_account, method_error = resolve_payment_method(request.form)
+
+    if not product:
+        db.session.rollback()
+        flash("Please choose a valid product.", "error")
+    elif quantity is None or quantity == 0:
+        db.session.rollback()
+        flash("Quantity can't be zero - use a negative quantity for a return or correction.", "error")
+    elif not unit_cost or unit_cost <= 0:
+        db.session.rollback()
+        flash(
+            "Unit cost must be a positive number - the sign of a return comes from a negative "
+            "quantity, never from the cost.",
+            "error",
+        )
+    elif payment_type == "credit" and supplier_error:
+        db.session.rollback()
+        flash(supplier_error, "error")
+    elif payment_type == "cash" and method_error:
+        db.session.rollback()
+        flash(method_error, "error")
+    else:
+        total_cost = round(quantity * unit_cost, 2)
+        # Only a POSITIVE total_cost paid in cash can draw the register
+        # down - a negative-quantity return/correction puts money back
+        # (or, on credit, reduces what's owed to the supplier), so it can
+        # never overdraw and must skip the guard entirely.
+        if (
+            payment_type == "cash"
+            and method == "cash"
+            and total_cost > 0
+            and would_overdraw_cash(total_cost, entry_date)
+        ):
+            db.session.rollback()
+            flash(cash_shortfall_message(entry_date), "error")
+        else:
+            db.session.add(
+                ProductPurchase(
+                    product_id=product.id,
+                    entry_date=entry_date,
+                    quantity=quantity,
+                    unit_cost=unit_cost,
+                    total_cost=total_cost,
+                    payment_type=payment_type,
+                    method=method,
+                    bank_account_id=bank_account.id if bank_account else None,
+                    account_id=supplier.id if supplier else None,
+                    note=note or None,
+                    user_id=current_user.id,
+                )
+            )
+            db.session.commit()
+            verb = "Received" if quantity > 0 else "Returned/corrected"
+            flash(f"{verb} {abs(quantity):g} {product.label} (Rs {abs(total_cost):,.2f}).", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -2224,6 +2932,7 @@ DELETABLE_ENTRIES = {
     "dip": (TankDip, "dip reading"),
     "handover": (CashHandover, "cash handover"),
     "credit": (CreditGiven, "credit entry"),
+    "sales-return": (SalesReturn, "sales return"),
     "receipt": (Receipt, "receipt"),
     "purchase": (StockPurchase, "fuel purchase"),
     "supplier-payment": (SupplierPayment, "supplier payment"),
@@ -2232,6 +2941,8 @@ DELETABLE_ENTRIES = {
     "bank-sale": (BankSale, "bank sale"),
     "cash-deposit": (CashDeposit, "cash deposit"),
     "expense": (Expense, "expense"),
+    "product-sale": (ProductSale, "product sale"),
+    "product-purchase": (ProductPurchase, "product purchase"),
 }
 
 
@@ -2381,6 +3092,18 @@ def inventory():
         (a for a in Account.query.all() if any(p.payment_type == "credit" for p in a.stock_purchases)),
         key=lambda a: a.name.lower(),
     )
+
+    # Sorted by category first so lubricants/filters/shop items each form
+    # a visible block rather than being interleaved alphabetically - shop
+    # profit is reported separately precisely because it's a different
+    # kind of line, and the table should read that way too.
+    products = (
+        Product.query.filter_by(is_active=True)
+        .order_by(Product.category, func.lower(Product.name))
+        .all()
+    )
+    product_rows = product_stock_summary(today, products=products)
+
     return render_template(
         "inventory.html",
         tank_rows=tank_rows,
@@ -2388,6 +3111,7 @@ def inventory():
         dispensers=dispensers,
         recent_purchases=recent_purchases,
         suppliers=suppliers,
+        product_rows=product_rows,
     )
 
 
@@ -2943,6 +3667,9 @@ _STATEMENT_KIND_LABELS = {
     "supplier_payment": "Payment Made",
     "employee_loan": "Loan / Advance",
     "salary": "Salary",
+    "sales_return": "Sales Return",
+    "product_sale": "Non-Fuel Sale",
+    "product_purchase": "Product Purchase (Credit)",
 }
 
 
@@ -2959,6 +3686,16 @@ def _statement_event_details(e):
         return " - ".join(bits)
     if e["kind"] == "purchase":
         bits = [f"{obj.liters:.2f} L {obj.tank.label}"]
+        if obj.note:
+            bits.append(obj.note)
+        return " - ".join(bits)
+    if e["kind"] == "sales_return":
+        bits = [f"{obj.liters:.2f} L {obj.fuel_type.name} returned to {obj.tank.label}"]
+        if obj.note:
+            bits.append(obj.note)
+        return " - ".join(bits)
+    if e["kind"] in ("product_sale", "product_purchase"):
+        bits = [f"{obj.quantity:.2f} {obj.product.unit} {obj.product.label}"]
         if obj.note:
             bits.append(obj.note)
         return " - ".join(bits)
@@ -3326,7 +4063,16 @@ def _reports_context(selected_date):
     # "0.00", inconsistent with every other row.
     total_sales = sum((s.total_amount for s in sales), 0.0)
     total_liters = sum((s.liters for s in sales), 0.0)
+    total_testing_liters = sum((s.testing_liters for s in sales), 0.0)
     by_fuel = fuel_sales_for_date(selected_date)
+    # Testing isn't part of by_fuel (fuel_sales_for_date() means net sold,
+    # same as everywhere else) - broken out per fuel here purely for this
+    # table, since it's the only place that wants it split that way.
+    testing_by_fuel = {}
+    for s in sales:
+        if s.testing_liters:
+            name = s.nozzle.tank.fuel_type.name
+            testing_by_fuel[name] = testing_by_fuel.get(name, 0.0) + s.testing_liters
 
     credit_given = CreditGiven.query.filter_by(entry_date=selected_date).all()
     total_credit_given = sum((c.amount for c in credit_given), 0.0)
@@ -3353,6 +4099,35 @@ def _reports_context(selected_date):
     salaries = SalaryPayment.query.filter_by(entry_date=selected_date).all()
     total_salaries_net = sum((s.net_paid for s in salaries), 0.0)
 
+    sales_returns = SalesReturn.query.filter_by(entry_date=selected_date).all()
+    total_sales_returns_liters = sum((sr.liters for sr in sales_returns), 0.0)
+    total_sales_returns_amount = sum((sr.amount for sr in sales_returns), 0.0)
+    # Only a cash-method return actually draws down the register the same
+    # day - a bank-method one hits that bank instead, and a credit-method
+    # one just reduces what the customer owes, matching how only cash-paid
+    # purchases (not credit ones) subtract from net_cash_flow below.
+    cash_sales_returns_total = sum((sr.amount for sr in sales_returns if sr.method == "cash"), 0.0)
+
+    # Non-fuel (lubricant/filter/shop) sales and purchases - counted in
+    # UNITS, not liters, since a product isn't measured through a nozzle
+    # (see Product.unit's docstring in models.py). Only a cash-method sale
+    # or a cash-paid-cash-method purchase actually moves cash-in-hand the
+    # same day, exactly the same distinction cash_sales_returns_total and
+    # cash_purchases_total above already make for fuel.
+    product_sales = ProductSale.query.filter_by(entry_date=selected_date).order_by(ProductSale.recorded_at).all()
+    total_product_sales_units = sum((ps.quantity for ps in product_sales), 0.0)
+    total_product_sales_amount = sum((ps.amount for ps in product_sales), 0.0)
+    cash_product_sales_total = sum((ps.amount for ps in product_sales if ps.method == "cash"), 0.0)
+
+    product_purchases = (
+        ProductPurchase.query.filter_by(entry_date=selected_date).order_by(ProductPurchase.recorded_at).all()
+    )
+    total_product_purchases_units = sum((pp.quantity for pp in product_purchases), 0.0)
+    total_product_purchases_cost = sum((pp.total_cost for pp in product_purchases), 0.0)
+    cash_product_purchases_total = sum(
+        (pp.total_cost for pp in product_purchases if pp.payment_type == "cash" and pp.method == "cash"), 0.0
+    )
+
     tanks = Tank.query.order_by(Tank.number).all()
     tank_rows = []
     for t in tanks:
@@ -3364,6 +4139,7 @@ def _reports_context(selected_date):
                 "book_stock": stock,
                 "dip": dip.dip_liters if dip else None,
                 "variance": round(dip.dip_liters - stock, 2) if dip else None,
+                "water_cm": dip.water_cm if dip else None,
             }
         )
 
@@ -3375,6 +4151,9 @@ def _reports_context(selected_date):
         - cash_purchases_total
         - total_supplier_payments
         - total_salaries_net
+        - cash_sales_returns_total
+        + cash_product_sales_total
+        - cash_product_purchases_total
     )
     outstanding_credit = sum((b for a in Account.query.all() if (b := a.balance) > 0), 0.0)
     cash_balance = cash_account_balance(get_cash_account())
@@ -3383,7 +4162,9 @@ def _reports_context(selected_date):
     return {
         "total_sales": total_sales,
         "total_liters": total_liters,
+        "total_testing_liters": total_testing_liters,
         "by_fuel": by_fuel,
+        "testing_by_fuel": testing_by_fuel,
         "cash_sales": cash_sales,
         "total_credit_given": total_credit_given,
         "bank_sales": bank_sales,
@@ -3401,7 +4182,16 @@ def _reports_context(selected_date):
         "bank_accounts": bank_accounts,
         "salaries": salaries,
         "total_salaries_net": total_salaries_net,
+        "sales_returns": sales_returns,
+        "total_sales_returns_liters": total_sales_returns_liters,
+        "total_sales_returns_amount": total_sales_returns_amount,
         "handover_rows": handover_rows_for_date(selected_date),
+        "product_sales": product_sales,
+        "total_product_sales_units": total_product_sales_units,
+        "total_product_sales_amount": total_product_sales_amount,
+        "product_purchases": product_purchases,
+        "total_product_purchases_units": total_product_purchases_units,
+        "total_product_purchases_cost": total_product_purchases_cost,
     }
 
 
@@ -3427,10 +4217,17 @@ def reports_export():
     summary_rows = [
         ("Total Sales (Rs)", ctx["total_sales"]),
         ("Liters Sold", ctx["total_liters"]),
+        ("Testing (L)", ctx["total_testing_liters"]),
         ("Cash Sales (Rs)", ctx["cash_sales"]),
         ("Bank Sales (Rs)", ctx["total_bank_sales"]),
         ("Credit Given (Rs)", ctx["total_credit_given"]),
         ("Receipts from Customers (Rs)", ctx["total_payments"]),
+        ("Sales Returns (L)", ctx["total_sales_returns_liters"]),
+        ("Sales Returns (Rs)", ctx["total_sales_returns_amount"]),
+        ("Non-Fuel Sales (units)", ctx["total_product_sales_units"]),
+        ("Non-Fuel Sales (Rs)", ctx["total_product_sales_amount"]),
+        ("Product Purchases (units)", ctx["total_product_purchases_units"]),
+        ("Product Purchases (Rs)", ctx["total_product_purchases_cost"]),
         ("Expenses (Rs)", ctx["total_expenses"]),
         ("Payments to Suppliers (Rs)", ctx["total_supplier_payments"]),
         ("Salaries Paid Out, Net (Rs)", ctx["total_salaries_net"]),
@@ -3446,14 +4243,17 @@ def reports_export():
         {
             "type": "table",
             "heading": "Sales by Fuel Type",
-            "columns": ["Fuel", "Liters Sold", "Revenue (Rs)"],
-            "rows": [[name, d["liters"], d["revenue"]] for name, d in ctx["by_fuel"].items()],
-            "align": ["left", "right", "right"],
+            "columns": ["Fuel", "Liters Sold", "Testing (L)", "Revenue (Rs)"],
+            "rows": [
+                [name, d["liters"], ctx["testing_by_fuel"].get(name, 0.0), d["revenue"]]
+                for name, d in ctx["by_fuel"].items()
+            ],
+            "align": ["left", "right", "right", "right"],
         },
         {
             "type": "table",
             "heading": "Stock / Dip per Tank",
-            "columns": ["Tank", "Fuel", "Book Stock (L)", "Dip Reading (L)", "Variance (L)"],
+            "columns": ["Tank", "Fuel", "Book Stock (L)", "Dip Reading (L)", "Variance (L)", "Water (cm)"],
             "rows": [
                 [
                     r["tank"].label,
@@ -3461,10 +4261,54 @@ def reports_export():
                     r["book_stock"],
                     r["dip"] if r["dip"] is not None else "-",
                     r["variance"] if r["variance"] is not None else "-",
+                    r["water_cm"] if r["water_cm"] is not None else "-",
                 ]
                 for r in ctx["tank_rows"]
             ],
-            "align": ["left", "left", "right", "right", "right"],
+            "align": ["left", "left", "right", "right", "right", "right"],
+        },
+        {
+            "type": "table",
+            "heading": "Sales Returns",
+            "columns": ["Fuel", "Tank", "Liters", "Refund (Rs)", "Method", "Note"],
+            "rows": [
+                [
+                    sr.fuel_type.name,
+                    sr.tank.label,
+                    sr.liters,
+                    sr.amount,
+                    {"cash": "Cash", "bank": f"Via {sr.bank_account.name}" if sr.bank_account else "Bank", "credit": f"On account ({sr.account.name})" if sr.account else "On account"}.get(sr.method, sr.method),
+                    sr.note or "-",
+                ]
+                for sr in ctx["sales_returns"]
+            ],
+            "align": ["left", "left", "right", "right", "left", "left"],
+        },
+        {
+            "type": "table",
+            "heading": "Non-Fuel Sales",
+            "columns": ["Product", "Units", "Rate (Rs)", "Amount (Rs)", "Method"],
+            "rows": [
+                [
+                    ps.product.label,
+                    ps.quantity,
+                    ps.retail_rate,
+                    ps.amount,
+                    {"cash": "Cash", "bank": f"Via {ps.bank_account.name}" if ps.bank_account else "Bank", "credit": f"On account ({ps.account.name})" if ps.account else "On account"}.get(ps.method, ps.method),
+                ]
+                for ps in ctx["product_sales"]
+            ],
+            "align": ["left", "right", "right", "right", "left"],
+        },
+        {
+            "type": "table",
+            "heading": "Product Purchases",
+            "columns": ["Product", "Units", "Unit Cost (Rs)", "Total (Rs)", "Payment"],
+            "rows": [
+                [pp.product.label, pp.quantity, pp.unit_cost, pp.total_cost, "Credit" if pp.payment_type == "credit" else "Cash"]
+                for pp in ctx["product_purchases"]
+            ],
+            "align": ["left", "right", "right", "right", "left"],
         },
         {
             "type": "table",
@@ -3560,7 +4404,23 @@ def _month_range_from_param(raw_month):
 
 def _reports_monthly_context(start, end):
     """Every figure the Monthly Report shows, for one date range - shared
-    by the HTML page and its PDF/Excel export."""
+    by the HTML page and its PDF/Excel export.
+
+    Presented as a traditional income statement: Fuel Revenue (gross) -
+    Sales Returns = Net Fuel Revenue - Cost of Fuel Sold = Fuel Gross
+    Margin; then Product Revenue - Cost of Products Sold = Product Gross
+    Margin; Fuel Gross Margin + Product Gross Margin = Total Gross Margin
+    - Expenses - Salaries = Net Profit. cogs_for_period() nets sales
+    returns into COGS/margin already (see its docstring) - net_revenue
+    below is the ONLY other place a return is subtracted, so net_profit
+    must never subtract sales_returns_amount again on top of gross_margin,
+    or the same refund gets double-counted (that was a real bug here - see
+    Phase 1's follow-up fix). "gross_margin" stays FUEL-ONLY (unchanged by
+    Phase 2B) precisely so that invariant, and the Trends reconciliation
+    that depends on it, can't quietly break just because products now
+    exist - product profit is added in separately via product_commission
+    on the way to total_gross_margin/net_profit, never folded into
+    gross_margin itself."""
     # Each of these is wrapped in float() because coalesce(sum(x), 0) comes
     # back as a Python int when nothing matches (SQLite has no rows to sum,
     # so it falls back to the literal 0) - the HTML template's "%.2f"
@@ -3574,6 +4434,11 @@ def _reports_monthly_context(start, end):
     )
     liters_sold = float(
         db.session.query(func.coalesce(func.sum(Sale.liters), 0))
+        .filter(Sale.entry_date >= start, Sale.entry_date <= end)
+        .scalar()
+    )
+    testing_liters = float(
+        db.session.query(func.coalesce(func.sum(Sale.testing_liters), 0))
         .filter(Sale.entry_date >= start, Sale.entry_date <= end)
         .scalar()
     )
@@ -3616,16 +4481,53 @@ def _reports_monthly_context(start, end):
         .filter(StockPurchase.entry_date >= start, StockPurchase.entry_date <= end)
         .scalar()
     )
+    sales_returns_liters = float(
+        db.session.query(func.coalesce(func.sum(SalesReturn.liters), 0))
+        .filter(SalesReturn.entry_date >= start, SalesReturn.entry_date <= end)
+        .scalar()
+    )
+    sales_returns_amount = float(
+        db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0))
+        .filter(SalesReturn.entry_date >= start, SalesReturn.entry_date <= end)
+        .scalar()
+    )
 
-    gross_margin = round(revenue - cogs, 2)
-    net_profit = round(gross_margin - expenses_total - salaries_total, 2)
+    # Revenue stays available as the gross figure (what was actually rung
+    # up on the nozzles) for its own line on the statement; net_revenue -
+    # gross minus the same sales returns cogs_for_period() already netted
+    # into COGS/margin - is what Gross Margin is actually built from, so
+    # a return is subtracted exactly once on the way to Net Profit.
+    net_revenue = round(revenue - sales_returns_amount, 2)
+    gross_margin = round(net_revenue - cogs, 2)
+
+    # Products have no weighted-average cost lookup at all (see
+    # product_margin_for_period()'s docstring) - every line already
+    # carries its own exact cost, so there's nothing here that mirrors
+    # cogs_for_period()'s "as of end date" argument.
+    product_revenue, product_cost, product_commission, product_category_detail = product_margin_for_period(
+        start, end
+    )
+    total_gross_margin = round(gross_margin + product_commission, 2)
+    # No further "- sales_returns_amount" here: net_revenue (and therefore
+    # gross_margin) is already net of returns. Subtracting it again would
+    # double-count the same refund - that was the bug this comment is
+    # guarding against. Net Profit is Total Gross Margin (fuel + product)
+    # minus operating costs only.
+    net_profit = round(total_gross_margin - expenses_total - salaries_total, 2)
 
     return {
         "revenue": revenue,
+        "net_revenue": net_revenue,
         "liters_sold": liters_sold,
+        "testing_liters": testing_liters,
         "cogs": cogs,
         "cogs_detail": cogs_detail,
         "gross_margin": gross_margin,
+        "product_revenue": product_revenue,
+        "product_cost": product_cost,
+        "product_commission": product_commission,
+        "product_category_detail": product_category_detail,
+        "total_gross_margin": total_gross_margin,
         "expenses_total": expenses_total,
         "expenses_by_category": expenses_by_category,
         "salaries_total": salaries_total,
@@ -3634,6 +4536,8 @@ def _reports_monthly_context(start, end):
         "receipts_total": receipts_total,
         "purchases_liters": purchases_liters,
         "purchases_cost": purchases_cost,
+        "sales_returns_liters": sales_returns_liters,
+        "sales_returns_amount": sales_returns_amount,
         "attendant_variances": attendant_variance_summary(start, end),
     }
 
@@ -3677,24 +4581,53 @@ def reports_monthly_export():
 
     blocks = [
         {
+            # Traditional income-statement order - each "less:" line
+            # subtracts from the one above it, ending at Net Profit.
             "type": "summary",
             "rows": [
-                ("Revenue (Rs)", ctx["revenue"]),
-                ("Liters Sold", ctx["liters_sold"]),
-                ("Cost of Fuel Sold (Rs)", ctx["cogs"]),
-                ("Gross Margin (Rs)", ctx["gross_margin"]),
-                ("Expenses (Rs)", ctx["expenses_total"]),
-                ("Salaries (Rs)", ctx["salaries_total"]),
+                ("Fuel Revenue, Gross (Rs)", ctx["revenue"]),
+                ("Liters Sold, Gross", ctx["liters_sold"]),
+                ("Testing (L)", ctx["testing_liters"]),
+                ("Less: Sales Returns (Rs)", ctx["sales_returns_amount"]),
+                ("Sales Returns (L)", ctx["sales_returns_liters"]),
+                ("Net Fuel Revenue (Rs)", ctx["net_revenue"]),
+                ("Less: Cost of Fuel Sold (Rs)", ctx["cogs"]),
+                ("Fuel Gross Margin (Rs)", ctx["gross_margin"]),
+                ("Product Revenue (Rs)", ctx["product_revenue"]),
+                ("Less: Cost of Products Sold (Rs)", ctx["product_cost"]),
+                ("Product Gross Margin (Rs)", ctx["product_commission"]),
+                ("Total Gross Margin (Rs)", ctx["total_gross_margin"]),
+                ("Less: Expenses (Rs)", ctx["expenses_total"]),
+                ("Less: Salaries (Rs)", ctx["salaries_total"]),
                 ("Net Profit (Rs)", ctx["net_profit"]),
             ],
         },
         {
             "type": "table",
             "heading": "Margin by Fuel Type",
-            "columns": ["Fuel", "Liters Sold", "Revenue (Rs)", "Avg Cost / L", "Cost (Rs)", "Margin (Rs)"],
+            "columns": [
+                "Fuel", "Gross Revenue (Rs)", "Returns (L)", "Returns (Rs)",
+                "Net Liters Sold", "Net Revenue (Rs)", "Avg Cost / L", "Cost (Rs)", "Margin (Rs)",
+            ],
             "rows": [
-                [r["fuel"], r["liters"], r["revenue"], r["unit_cost"], r["cost"], r["margin"]]
+                [
+                    r["fuel"], r["gross_revenue"], r["returns_liters"], r["returns_amount"],
+                    r["liters"], r["revenue"], r["unit_cost"], r["cost"], r["margin"],
+                ]
                 for r in ctx["cogs_detail"]
+            ],
+            "align": ["left", "right", "right", "right", "right", "right", "right", "right", "right"],
+        },
+        {
+            "type": "table",
+            "heading": "Margin by Product Category",
+            "columns": ["Category", "Units", "Revenue (Rs)", "Cost (Rs)", "Margin (Rs)", "Margin %"],
+            "rows": [
+                [
+                    r["category"].capitalize(), r["quantity"], r["revenue"], r["cost"], r["margin"],
+                    round(r["margin"] / r["revenue"] * 100, 1) if r["revenue"] else 0.0,
+                ]
+                for r in ctx["product_category_detail"]
             ],
             "align": ["left", "right", "right", "right", "right", "right"],
         },
@@ -3770,24 +4703,74 @@ def reports_trends():
     expenses_by_day = group_sum(Expense, Expense.amount)
     purchase_liters_by_day = group_sum(StockPurchase, StockPurchase.liters)
     salaries_by_day = group_sum(SalaryPayment, SalaryPayment.gross_amount)
+    returns_amount_by_day = group_sum(SalesReturn, SalesReturn.amount)
+    product_revenue_by_day = group_sum(ProductSale, ProductSale.amount)
+    # Unlike cogs_by_day below, this needs no weighted-average/unit-cost
+    # lookup at all - every ProductSale row already carries its own
+    # purchase_rate, snapshotted at the moment of sale (see
+    # product_margin_for_period()'s docstring), so quantity x that row's
+    # own rate, summed per day, is already exact.
+    product_cost_by_day = {
+        r[0]: r[1] or 0
+        for r in (
+            db.session.query(ProductSale.entry_date, func.sum(ProductSale.quantity * ProductSale.purchase_rate))
+            .filter(ProductSale.entry_date >= start, ProductSale.entry_date <= end)
+            .group_by(ProductSale.entry_date)
+            .all()
+        )
+    }
 
     # Daily profit values fuel at its weighted-average purchase cost (COGS)
     # rather than subtracting whatever was bought that day - otherwise a
     # tanker delivery shows as a huge "loss" on the day it arrives even
-    # though the stock is still in the tank waiting to be sold.
+    # though the stock is still in the tank waiting to be sold. It also
+    # nets sales returns into both revenue and COGS the same way
+    # cogs_for_period()/_reports_monthly_context() do (net revenue minus
+    # net COGS minus expenses minus salaries) - the Monthly Report and
+    # this page used to disagree on the same month's profit because this
+    # series ignored returns entirely; see the Phase 1 follow-up fix and
+    # its regression test asserting the two pages reconcile. Product
+    # margin (product revenue minus product cost, both exact per line -
+    # see product_cost_by_day above) is added in on top, the same total
+    # _reports_monthly_context() folds into total_gross_margin/net_profit,
+    # so the two keep reconciling now that products exist too.
     unit_costs = {ft.id: weighted_avg_cost(ft, end) for ft in FuelType.query.all()}
-    cogs_rows = (
+    sold_liters_by_day_fuel = {}
+    for entry_date_val, fuel_type_id, liters in (
         db.session.query(Sale.entry_date, Tank.fuel_type_id, func.sum(Sale.liters))
         .join(Nozzle, Sale.nozzle_id == Nozzle.id)
         .join(Tank, Nozzle.tank_id == Tank.id)
         .filter(Sale.entry_date >= start, Sale.entry_date <= end)
         .group_by(Sale.entry_date, Tank.fuel_type_id)
         .all()
-    )
+    ):
+        sold_liters_by_day_fuel[(entry_date_val, fuel_type_id)] = liters or 0
+    returned_liters_by_day_fuel = {}
+    for entry_date_val, fuel_type_id, liters in (
+        db.session.query(SalesReturn.entry_date, SalesReturn.fuel_type_id, func.sum(SalesReturn.liters))
+        .filter(SalesReturn.entry_date >= start, SalesReturn.entry_date <= end)
+        .group_by(SalesReturn.entry_date, SalesReturn.fuel_type_id)
+        .all()
+    ):
+        returned_liters_by_day_fuel[(entry_date_val, fuel_type_id)] = liters or 0
+
+    # Net per (day, fuel) - a return reverses cost on the day it actually
+    # happened (its own dated ledger entry), not retroactively on the
+    # original sale's day. Summed across the whole window this always
+    # equals cogs_for_period()'s per-fuel (gross sold - gross returned) x
+    # unit cost, since that arithmetic distributes the same way regardless
+    # of which day either side falls on - except in the edge case where
+    # returns exceed sales for one fuel across the ENTIRE window, where
+    # cogs_for_period() floors that fuel's cost at 0 for the period; a
+    # day-by-day series has no single "period" to floor against, so it
+    # isn't reproduced here. Not reachable in normal use (a fuel can't be
+    # returned more than was ever sold of it).
     cogs_by_day = {}
-    for entry_date_val, fuel_type_id, liters in cogs_rows:
+    for key in set(sold_liters_by_day_fuel) | set(returned_liters_by_day_fuel):
+        entry_date_val, fuel_type_id = key
+        net_liters = sold_liters_by_day_fuel.get(key, 0) - returned_liters_by_day_fuel.get(key, 0)
         cogs_by_day[entry_date_val] = round(
-            cogs_by_day.get(entry_date_val, 0) + (liters or 0) * unit_costs.get(fuel_type_id, 0), 2
+            cogs_by_day.get(entry_date_val, 0) + net_liters * unit_costs.get(fuel_type_id, 0), 2
         )
 
     labels = [d.strftime(label_fmt) for d in all_dates]
@@ -3796,15 +4779,19 @@ def reports_trends():
     receipts_series = [round(payments_by_day.get(d, 0), 2) for d in all_dates]
     expenses_series = [round(expenses_by_day.get(d, 0), 2) for d in all_dates]
     purchases_series = [round(purchase_liters_by_day.get(d, 0), 2) for d in all_dates]
+    product_margin_series = [
+        round(product_revenue_by_day.get(d, 0) - product_cost_by_day.get(d, 0), 2) for d in all_dates
+    ]
     profit_series = [
         round(
-            sales_by_day.get(d, 0)
-            - cogs_by_day.get(d, 0)
+            (sales_by_day.get(d, 0) - returns_amount_by_day.get(d, 0))  # net fuel revenue
+            - cogs_by_day.get(d, 0)  # net fuel COGS
             - expenses_by_day.get(d, 0)
-            - salaries_by_day.get(d, 0),
+            - salaries_by_day.get(d, 0)
+            + product_margin_series[i],
             2,
         )
-        for d in all_dates
+        for i, d in enumerate(all_dates)
     ]
 
     sales_chart = charts.stacked_bar_chart(
@@ -3865,6 +4852,10 @@ def reports_trends():
         total_purchased_liters=sum(purchase_liters_by_day.values()),
         total_cogs=round(sum(cogs_by_day.values()), 2),
         total_salaries=round(sum(salaries_by_day.values()), 2),
+        total_sales_returns=round(sum(returns_amount_by_day.values()), 2),
+        total_product_revenue=round(sum(product_revenue_by_day.values()), 2),
+        total_product_cost=round(sum(product_cost_by_day.values()), 2),
+        total_product_margin=round(sum(product_margin_series), 2),
         total_profit=round(sum(profit_series), 2),
     )
 

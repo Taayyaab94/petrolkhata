@@ -172,6 +172,155 @@
 </div>
 
 <div class="panel">
+  <div class="panel-head"><h3>Products</h3></div>
+  <p class="hint">Lubricants, filters and shop items - counted in whole units or by the litre, never through a nozzle. Editing a rate here records dated history (see product_rates_on_date), so past sales keep costing at the rate that actually applied then. Deactivate rather than delete once a product has sale or purchase history.</p>
+  <div class="table-wrap">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Product</th><th>Category</th><th>Unit</th><th>Purchase Rate</th><th>Retail Rate</th>
+        <th>Commission</th><th>Opening Stock</th><th>On hand today</th><th>Status</th>
+        <th>Edit</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in products %}
+      {% set stock = product_stock_rows[p.id] %}
+      <tr class="{{ '' if p.is_active else 'row-low' }}">
+        <td>{{ p.label }}</td>
+        <td><span class="badge">{{ p.category|capitalize }}</span></td>
+        <td>{{ p.unit }}</td>
+        <td>{{ "%.2f"|format(p.purchase_rate) }}</td>
+        <td>{{ "%.2f"|format(p.retail_rate) }}</td>
+        <td>{{ "%.2f"|format(p.commission) }}</td>
+        <td>{{ "%.2f"|format(p.opening_stock) }} as of {{ p.opening_stock_date.isoformat() if p.opening_stock_date else "the beginning" }}</td>
+        <td>{{ "%.2f"|format(stock.on_hand) }} {% if stock.is_low %}<span class="badge badge-low">LOW</span>{% else %}<span class="badge badge-ok">OK</span>{% endif %}</td>
+        <td>{% if p.is_active %}<span class="badge badge-ok">Active</span>{% else %}<span class="badge badge-low">Deactivated</span>{% endif %}</td>
+        <td>
+          <form method="post" action="{{ url_for('settings_edit_product', product_id=p.id) }}" class="inline-edit-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="text" name="name" value="{{ p.name }}" required title="Name" style="max-width:150px;">
+            <select name="category" title="Category">
+              {% for c in ["lubricant", "filter", "shop", "other"] %}
+              <option value="{{ c }}" {{ "selected" if c == p.category }}>{{ c|capitalize }}</option>
+              {% endfor %}
+            </select>
+            <select name="unit" title="Unit">
+              <option value="piece" {{ "selected" if p.unit == "piece" }}>Piece</option>
+              <option value="litre" {{ "selected" if p.unit == "litre" }}>Litre</option>
+            </select>
+            <input type="text" name="pack_size" value="{{ p.pack_size or '' }}" placeholder="pack size" title="Pack size" style="max-width:80px;">
+            <input type="number" step="0.01" min="0" name="purchase_rate" value="{{ p.purchase_rate }}" required title="Purchase (indent) rate" style="max-width:90px;">
+            <input type="number" step="0.01" min="0" name="retail_rate" value="{{ p.retail_rate }}" required title="Retail rate" style="max-width:90px;">
+            <input type="date" name="rate_effective_date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" title="Rate change effective from (only used if a rate above changed)">
+            <input type="number" step="0.01" min="0" name="opening_stock" value="{{ p.opening_stock }}" required title="Opening stock" style="max-width:90px;">
+            <input type="date" name="opening_stock_date" value="{{ p.opening_stock_date.isoformat() if p.opening_stock_date else '' }}" max="{{ today.isoformat() }}" title="Opening stock as of (blank = from the beginning)">
+            <input type="number" step="0.01" min="0" name="low_stock_threshold" value="{{ p.low_stock_threshold }}" required title="Low-stock alert level">
+            <button type="submit" class="btn btn-sm">Save</button>
+          </form>
+        </td>
+        <td>
+          <form method="post" action="{{ url_for('settings_toggle_product', product_id=p.id) }}" class="inline-edit-form" style="display:inline;"
+                onsubmit="return confirm('{{ 'Deactivate' if p.is_active else 'Reactivate' }} {{ p.name }}?');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-ghost">{{ "Deactivate" if p.is_active else "Reactivate" }}</button>
+          </form>
+          <form method="post" action="{{ url_for('settings_delete_product', product_id=p.id) }}" class="inline-edit-form" style="display:inline;"
+                onsubmit="return confirm('Delete {{ p.name }}? Only possible if it has no sale or purchase history yet.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="11">No products yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="hint">Delete only works for a product with no sale or purchase history yet - deactivate it instead once it has some; a deactivated product disappears from future sale pickers but its history and past figures stay intact.</p>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Add a Product</h3></div>
+  <form method="post" action="{{ url_for('settings_add_product') }}" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Name
+      <input type="text" name="name" placeholder="e.g. HELIX H3" required>
+    </label>
+    <label>Category
+      <select name="category">
+        <option value="lubricant">Lubricant</option>
+        <option value="filter">Filter</option>
+        <option value="shop">Shop</option>
+        <option value="other">Other</option>
+      </select>
+    </label>
+    <label>Pack size <span class="hint-sm">optional, e.g. "3 L"</span>
+      <input type="text" name="pack_size" placeholder="e.g. 3 L">
+    </label>
+    <label>Unit
+      <select name="unit">
+        <option value="piece">Piece</option>
+        <option value="litre">Litre</option>
+      </select>
+    </label>
+    <label>Purchase (indent) rate (Rs)
+      <input type="number" step="0.01" min="0" name="purchase_rate" required>
+    </label>
+    <label>Retail rate (Rs)
+      <input type="number" step="0.01" min="0" name="retail_rate" required>
+    </label>
+    <label>Opening stock
+      <input type="number" step="0.01" min="0" name="opening_stock" value="0" required>
+    </label>
+    <label>Opening stock as of
+      <input type="date" name="opening_stock_date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}">
+    </label>
+    <label>Low-stock alert level
+      <input type="number" step="0.01" min="0" name="low_stock_threshold" value="0" required>
+    </label>
+    <button type="submit" class="btn">Add Product</button>
+  </form>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Import Products</h3></div>
+  <p class="hint">Paste a price list here - one product per line, fields separated by commas or tabs (so pasting straight out of a spreadsheet works, same as the dip chart paste below). Column order: <code>name, pack size, purchase rate, retail rate, opening stock, low-stock alert</code> - the last two are optional; when a line omits them, a NEW product gets 0. Use <code>-</code> or leave pack size blank when there isn't one. Category and unit below apply to the WHOLE pasted batch, so paste lubricants together, then filters, separately. Re-pasting the same names later with new rates UPDATES them (keeping full rate history) instead of creating duplicates - matching is by name, case-insensitive. Nothing is imported if any line has an error.</p>
+  <p class="hint">For a product that ALREADY EXISTS, an import updates only its rates, pack size, category and unit - plus the low-stock alert, but only on a line that actually supplies one; leaving that 6th column blank keeps whatever threshold is already set (e.g. from the single-row form above) instead of resetting it to 0. <strong>Opening stock for an existing product is never touched by an import</strong> - to adjust stock, record a purchase or edit the product directly.</p>
+  <p class="hint-sm">Example - two lines, tab or comma separated:<br><code>HELIX H3, 3 L, 3246, 3590, 40, 10</code><br><code>OIL FILTER - COROLLA, -, 350, 500</code></p>
+  <form method="post" action="{{ url_for('settings_import_products') }}"
+        onsubmit="return confirm('Import this batch? Nothing is imported if any line has an error.');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="form-grid">
+      <label>Category for this batch
+        <select name="category">
+          <option value="lubricant">Lubricant</option>
+          <option value="filter">Filter</option>
+          <option value="shop">Shop</option>
+          <option value="other">Other</option>
+        </select>
+      </label>
+      <label>Unit for this batch
+        <select name="unit">
+          <option value="piece">Piece</option>
+          <option value="litre">Litre</option>
+        </select>
+      </label>
+      <label>Rates effective from
+        <input type="date" name="effective_date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}">
+      </label>
+    </div>
+    <label style="margin-top:14px;">Price list
+      <textarea name="catalogue" rows="8" placeholder="HELIX H3, 3 L, 3246, 3590, 40, 10&#10;OIL FILTER - COROLLA, -, 350, 500"></textarea>
+    </label>
+    <div style="margin-top:10px;">
+      <button type="submit" class="btn">Import</button>
+    </div>
+  </form>
+</div>
+
+<div class="panel">
   <div class="panel-head"><h3>Fuel Prices</h3></div>
   <div class="table-wrap">
   <table class="table">

@@ -25,35 +25,65 @@
   </form>
 </div>
 
+<div class="subtitle" style="margin:-4px 0 10px;">Presented as an income statement - each figure below feeds the next: Fuel Revenue, gross &rarr; less Sales Returns &rarr; Net Fuel Revenue &rarr; less Cost of Fuel Sold &rarr; Fuel Gross Margin &rarr; plus Product Gross Margin &rarr; Total Gross Margin &rarr; less Expenses &amp; Salaries &rarr; Net Profit.</div>
 <div class="stat-row">
   <div class="stat-card accent-brand">
-    <div class="label">Revenue</div>
+    <div class="label">Fuel Revenue, Gross</div>
     <div class="value">Rs {{ "%.2f"|format(revenue) }}</div>
-    <div class="sub">{{ "%.2f"|format(liters_sold) }} L sold</div>
+    <div class="sub">{{ "%.2f"|format(liters_sold) }} L sold &middot; {{ "%.2f"|format(testing_liters) }} L testing</div>
   </div>
   <div class="stat-card accent-red">
-    <div class="label">Cost of Fuel Sold</div>
+    <div class="label">Less: Sales Returns</div>
+    <div class="value">Rs {{ "%.2f"|format(sales_returns_amount) }}</div>
+    <div class="sub">{{ "%.2f"|format(sales_returns_liters) }} L returned, any refund method</div>
+  </div>
+  <div class="stat-card accent-brand">
+    <div class="label">Net Fuel Revenue</div>
+    <div class="value">Rs {{ "%.2f"|format(net_revenue) }}</div>
+    <div class="sub">Gross revenue less sales returns</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Less: Cost of Fuel Sold</div>
     <div class="value">Rs {{ "%.2f"|format(cogs) }}</div>
-    <div class="sub">Liters sold &times; avg purchase cost</div>
+    <div class="sub">Net liters sold &times; avg purchase cost</div>
   </div>
   <div class="stat-card accent-green">
-    <div class="label">Gross Margin</div>
+    <div class="label">Fuel Gross Margin</div>
     <div class="value">Rs {{ "%.2f"|format(gross_margin) }}</div>
-    <div class="sub">{{ "%.1f"|format(gross_margin / revenue * 100 if revenue else 0) }}% of revenue</div>
+    <div class="sub">{{ "%.1f"|format(gross_margin / net_revenue * 100 if net_revenue else 0) }}% of net fuel revenue</div>
+  </div>
+  <div class="stat-card accent-brand">
+    <div class="label">Product Revenue</div>
+    <div class="value">Rs {{ "%.2f"|format(product_revenue) }}</div>
   </div>
   <div class="stat-card accent-red">
-    <div class="label">Expenses</div>
+    <div class="label">Less: Cost of Products Sold</div>
+    <div class="value">Rs {{ "%.2f"|format(product_cost) }}</div>
+    <div class="sub">Exact per line - snapshotted rate, not a weighted average</div>
+  </div>
+  <div class="stat-card accent-green">
+    <div class="label">Product Gross Margin</div>
+    <div class="value">Rs {{ "%.2f"|format(product_commission) }}</div>
+    <div class="sub">{{ "%.1f"|format(product_commission / product_revenue * 100 if product_revenue else 0) }}% of product revenue</div>
+  </div>
+  <div class="stat-card accent-green">
+    <div class="label">Total Gross Margin</div>
+    <div class="value">Rs {{ "%.2f"|format(total_gross_margin) }}</div>
+    <div class="sub">Fuel + product gross margin</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Less: Expenses</div>
     <div class="value">Rs {{ "%.2f"|format(expenses_total) }}</div>
   </div>
   <div class="stat-card accent-red">
-    <div class="label">Salaries</div>
+    <div class="label">Less: Salaries</div>
     <div class="value">Rs {{ "%.2f"|format(salaries_total) }}</div>
     <div class="sub">Full salary earned, before deductions</div>
   </div>
   <div class="stat-card {{ 'accent-green' if net_profit >= 0 else 'accent-red' }}">
     <div class="label">Net Profit</div>
     <div class="value">Rs {{ "%.2f"|format(net_profit) }}</div>
-    <div class="sub">Gross margin &minus; expenses &minus; salaries</div>
+    <div class="sub">Total gross margin &minus; expenses &minus; salaries</div>
   </div>
 </div>
 
@@ -61,11 +91,19 @@
   <div class="panel-head"><h3>Margin by Fuel Type</h3></div>
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Fuel</th><th>Liters Sold</th><th>Revenue (Rs)</th><th>Avg Cost / L</th><th>Cost (Rs)</th><th>Margin (Rs)</th><th>Margin / L</th></tr></thead>
+    <thead>
+      <tr>
+        <th>Fuel</th><th>Gross Revenue (Rs)</th><th>Returns (L)</th><th>Returns (Rs)</th>
+        <th>Net Liters Sold</th><th>Net Revenue (Rs)</th><th>Avg Cost / L</th><th>Cost (Rs)</th><th>Margin (Rs)</th><th>Margin / L</th>
+      </tr>
+    </thead>
     <tbody>
       {% for r in cogs_detail %}
       <tr>
         <td>{{ r.fuel }}</td>
+        <td>{{ "%.2f"|format(r.gross_revenue) }}</td>
+        <td>{{ "%.2f"|format(r.returns_liters) }}</td>
+        <td>{{ "%.2f"|format(r.returns_amount) }}</td>
         <td>{{ "%.2f"|format(r.liters) }}</td>
         <td>{{ "%.2f"|format(r.revenue) }}</td>
         <td>{{ "%.4f"|format(r.unit_cost) }}</td>
@@ -74,12 +112,38 @@
         <td>{{ "%.2f"|format(r.margin / r.liters if r.liters else 0) }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="7">No sales in this month.</td></tr>
+      <tr><td colspan="10">No sales in this month.</td></tr>
       {% endfor %}
     </tbody>
   </table>
   </div>
-  <p class="hint">Cost per liter is the weighted average of every purchase of that fuel up to the end of this month - a stable, explainable approximation rather than strict per-delivery (FIFO) lot tracking.</p>
+  <p class="hint">"Net Liters Sold" and "Net Revenue" (gross minus that fuel's own returns) are what Cost and Margin are actually computed from - a returned liter didn't stay sold, so it isn't costed or credited as revenue here, only shown separately so the deduction stays visible. Cost per liter is the weighted average of every purchase of that fuel up to the end of this month - a stable, explainable approximation rather than strict per-delivery (FIFO) lot tracking.</p>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Margin by Product Category</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead>
+      <tr><th>Category</th><th>Units</th><th>Revenue (Rs)</th><th>Cost (Rs)</th><th>Margin (Rs)</th><th>Margin %</th></tr>
+    </thead>
+    <tbody>
+      {% for r in product_category_detail %}
+      <tr>
+        <td>{{ r.category|capitalize }}</td>
+        <td>{{ "%.2f"|format(r.quantity) }}</td>
+        <td>{{ "%.2f"|format(r.revenue) }}</td>
+        <td>{{ "%.2f"|format(r.cost) }}</td>
+        <td>{{ "%.2f"|format(r.margin) }}</td>
+        <td>{{ "%.1f"|format(r.margin / r.revenue * 100 if r.revenue else 0) }}%</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6">No non-fuel sales in this month.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="hint">Shop items are kept as their own line here, separate from lubricants and filters, the same way fuel is broken out by type above - each line's cost is exact (the rate snapshotted at the moment of that sale), never a weighted average.</p>
 </div>
 
 <div class="two-col">

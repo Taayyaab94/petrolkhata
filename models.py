@@ -188,6 +188,23 @@ class Account(db.Model):
         # Only the deducted portion of a salary touches this balance - the
         # part actually handed over is pay, not a change in what's owed.
         salary_deductions_total = sum(s.deduction_amount for s in self.salary_payments)
+        # A sales return refunded "on the customer's account" (method ==
+        # "credit") reduces what they owe, the same direction as a receipt -
+        # account_id is only ever set on a SalesReturn for that method, so
+        # every row in this backref already qualifies.
+        sales_returns_total = sum(sr.amount for sr in self.sales_returns)
+        # A non-fuel sale "on the customer's account" (method == "credit")
+        # increases what they owe, the same direction as credit_given_total
+        # above - account_id is only ever set on a ProductSale for that
+        # method. A product purchase "on credit" (payment_type == "credit")
+        # increases what the pump owes a supplier, the same direction as
+        # purchases_credit_total; total_cost already carries the sign for a
+        # return-to-supplier (see ProductPurchase's docstring in models.py),
+        # so no special case is needed for that here either.
+        product_sales_credit_total = sum(ps.amount for ps in self.product_sales if ps.method == "credit")
+        product_purchases_credit_total = sum(
+            (pp.total_cost or 0) for pp in self.product_purchases if pp.payment_type == "credit"
+        )
         return round(
             self.opening_balance
             + credit_given_total
@@ -195,7 +212,10 @@ class Account(db.Model):
             - purchases_credit_total
             + supplier_payments_total
             + loans_total
-            - salary_deductions_total,
+            - salary_deductions_total
+            - sales_returns_total
+            + product_sales_credit_total
+            - product_purchases_credit_total,
             2,
         )
 
@@ -210,6 +230,21 @@ class Sale(db.Model):
     backfilling/editing a past date safe. A pump that doesn't split its
     day just has every row land in the single seeded "Full Day" shift, so
     the constraint behaves exactly like one-per-nozzle-per-day.
+
+    testing_liters is fuel run through the nozzle to test it (e.g. after
+    maintenance) rather than sold - it must not be billed, and because it
+    physically stays at the pump and drains back into the same tank, it
+    must not be treated as gone from stock either. The invariant that
+    ties it to the meter is:
+
+        liters + testing_liters == current_reading - previous_reading
+
+    liters itself stays the NET figure - what actually left the tank for
+    good - not the raw meter difference. That's deliberate: every other
+    consumer of Sale.liters (book_stock(), sales_breakdown_for_date(),
+    fuel_sales_for_date(), COGS, trends, exports) already means "the sale"
+    by it, and net-sold really is the quantity that permanently left the
+    tank, so none of them need to change to account for testing.
     """
 
     __table_args__ = (
@@ -223,6 +258,7 @@ class Sale(db.Model):
     previous_reading = db.Column(db.Float, nullable=False)
     current_reading = db.Column(db.Float, nullable=False)
     liters = db.Column(db.Float, nullable=False)
+    testing_liters = db.Column(db.Float, nullable=False, default=0)
     price_per_liter = db.Column(db.Float, nullable=False)
     total_amount = db.Column(db.Float, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
@@ -258,6 +294,47 @@ class CreditGiven(db.Model):
     account = db.relationship("Account", backref="credit_entries")
     fuel_type = db.relationship("FuelType")
     shift = db.relationship("Shift")
+    user = db.relationship("User")
+
+
+class SalesReturn(db.Model):
+    """A debit-side reversal: fuel a customer physically brings back into
+    a tank, refunded to them - distinct from Sale.testing_liters, which
+    never involved a customer at all. Stock comes back IN, the same
+    direction as a StockPurchase (see book_stock() in ledger_logic.py),
+    and the refund goes out as cash, out of a bank, or as a reduction of
+    what a credit customer owes (method == "credit", the same "on
+    account" idea CreditGiven uses in reverse).
+
+    Priced with price_on_date() for its own entry_date, same as any other
+    sale, so a return of fuel bought weeks ago refunds the rate that was
+    actually charged then, not today's rate.
+
+    Fuel-only for now - non-fuel products (lubricants, etc.) arrive in a
+    later phase and aren't sold through a nozzle/tank at all, so this
+    model should grow to cover them then rather than being reused as-is.
+    """
+
+    id = db.Column(db.Integer, primary_key=True)
+    entry_date = db.Column(db.Date, nullable=False)
+    shift_id = db.Column(db.Integer, db.ForeignKey("shift.id"), nullable=False)
+    fuel_type_id = db.Column(db.Integer, db.ForeignKey("fuel_type.id"), nullable=False)
+    tank_id = db.Column(db.Integer, db.ForeignKey("tank.id"), nullable=False)
+    liters = db.Column(db.Float, nullable=False)
+    price_per_liter = db.Column(db.Float, nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank | credit
+    bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
+    account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=True)
+    note = db.Column(db.String(200))
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    shift = db.relationship("Shift")
+    fuel_type = db.relationship("FuelType")
+    tank = db.relationship("Tank", backref="sales_returns")
+    bank_account = db.relationship("BankAccount", backref="sales_returns")
+    account = db.relationship("Account", backref="sales_returns")
     user = db.relationship("User")
 
 
@@ -392,6 +469,21 @@ class BankAccount(db.Model):
         # Only the net handed over leaves the bank - the deducted portion
         # of a salary never moves as money, it just settles an advance.
         salaries_total = sum(s.net_paid for s in self.salary_payments_paid)
+        # A sales return refunded out of this bank (method == "bank")
+        # leaves the same way a loan/expense/purchase paid via this bank
+        # does - bank_account_id is only ever set on a SalesReturn for
+        # that method, so every row in this backref already qualifies.
+        sales_returns_total = sum(sr.amount for sr in self.sales_returns)
+        # bank_account_id is only ever set on a ProductSale for method ==
+        # "bank" (a non-fuel sale received into this bank), and on a
+        # ProductPurchase for a cash-paid (payment_type == "cash") delivery
+        # settled via this bank - the payment_type check below mirrors
+        # fuel_purchases_total's above, and total_cost's sign already
+        # handles a return-to-supplier with no special case needed.
+        product_sales_total = sum(ps.amount for ps in self.product_sales if ps.method == "bank")
+        product_purchases_total = sum(
+            (pp.total_cost or 0) for pp in self.product_purchases if pp.payment_type == "cash"
+        )
         return round(
             self.opening_balance
             + sales_total
@@ -401,7 +493,10 @@ class BankAccount(db.Model):
             - expenses_total
             - fuel_purchases_total
             - supplier_payments_total
-            - salaries_total,
+            - salaries_total
+            - sales_returns_total
+            + product_sales_total
+            - product_purchases_total,
             2,
         )
 
@@ -474,6 +569,13 @@ class TankDip(db.Model):
     entry_date = db.Column(db.Date, nullable=False)
     dip_cm = db.Column(db.Float, nullable=True)
     dip_liters = db.Column(db.Float, nullable=False)
+    # A stick measurement in cm of any water sitting at the bottom of the
+    # tank - always cm, regardless of whether the tank's own dip above is
+    # taken in cm or liters, since a dip chart doesn't have a water curve.
+    # Water displaces fuel (distorting the dip) and damages a customer's
+    # engine, so this is tracked as a diagnostic warning only - it never
+    # adjusts book stock or any other figure.
+    water_cm = db.Column(db.Float, nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
@@ -560,3 +662,158 @@ class SalaryPayment(db.Model):
     @property
     def net_paid(self):
         return round(self.gross_amount - self.deduction_amount, 2)
+
+
+class Product(db.Model):
+    """A non-fuel item sold at the pump - lubricants, filters, and shop
+    items. The pump's real catalogue runs to ~95 SKUs (Shell Helix/Rimula/
+    Ultra grades in 1/3/4/10/20 L packs, dozens of vehicle-specific
+    filters, brake oil, gear oil, coolant) plus a separate shop line, and
+    together they earn dealer commission comparable to fuel itself on a
+    fraction of the revenue - which is why this table exists at all.
+
+    category is a plain organizing label, exactly like Account.account_type:
+    it never restricts which entry can be posted against a product. It
+    exists purely so lubricant/filter/shop profit can be reported
+    separately later.
+
+    unit says how the product is COUNTED, not what's printed on the pack -
+    lubricants are sold as sealed tins, so they're counted in pieces even
+    though the tin holds liters. The real workbook's "AMOUNT SOLD (L)"
+    column actually holds unit counts; this field exists so that exact
+    confusion can't creep back in here.
+
+    purchase_rate (the indent/dealer rate) and retail_rate are denormalized
+    "current rate" caches over ProductRateHistory - the same relationship
+    FuelType.price_per_liter has to FuelPriceHistory (see
+    product_rates_on_date() in ledger_logic.py).
+
+    opening_stock/opening_stock_date follow Tank.starting_stock_liters/
+    starting_stock_date exactly: opening_stock is the level at the START
+    of opening_stock_date (equivalently, the end of the day before it),
+    and opening_stock_date NULL means "treat as the beginning of time"
+    (see product_stock() in ledger_logic.py).
+
+    Deactivated rather than deleted once a product has sale/purchase
+    history, the same reasoning as User.is_active_user - a ProductSale/
+    ProductPurchase row keeps pointing at product_id, so the product it
+    names has to stay resolvable.
+    """
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    # lubricant | filter | shop | other - see class docstring; a case-
+    # insensitive unique index isn't portable across SQLite/Postgres, so
+    # duplicate matching on name is done in application code instead.
+    category = db.Column(db.String(20), nullable=False, default="lubricant")
+    pack_size = db.Column(db.String(20), nullable=True)  # free text label ("3 L", "0.7 L", "-") - not a quantity
+    unit = db.Column(db.String(10), nullable=False, default="piece")  # piece | litre
+    purchase_rate = db.Column(db.Float, nullable=False, default=0)
+    retail_rate = db.Column(db.Float, nullable=False, default=0)
+    opening_stock = db.Column(db.Float, nullable=False, default=0)
+    opening_stock_date = db.Column(db.Date, nullable=True)
+    low_stock_threshold = db.Column(db.Float, nullable=False, default=0)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+
+    @property
+    def commission(self):
+        """Dealer margin per unit. Never stored - deriving it from the two
+        rates means it can never disagree with them."""
+        return round(self.retail_rate - self.purchase_rate, 2)
+
+    @property
+    def label(self):
+        return f"{self.name} ({self.pack_size})" if self.pack_size else self.name
+
+
+class ProductRateHistory(db.Model):
+    """One row per rate change for a product - mirrors FuelPriceHistory,
+    except it carries BOTH the purchase (indent) and retail rate in the
+    same row, because in practice an indent-rate change almost always
+    arrives together with a new retail rate; splitting them into two
+    tables would let them drift apart for the same date.
+    Product.purchase_rate/retail_rate are kept as "current rate" caches
+    over this table, the same role FuelType.price_per_liter plays over
+    FuelPriceHistory (see product_rates_on_date() in ledger_logic.py)."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False)
+    purchase_rate = db.Column(db.Float, nullable=False)
+    retail_rate = db.Column(db.Float, nullable=False)
+    effective_date = db.Column(db.Date, nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    product = db.relationship("Product", backref="rate_history")
+
+
+class ProductSale(db.Model):
+    """A non-fuel sale line: one product, one shift, one date. Defined now
+    so the whole catalogue lands in one migration; the Ledger entry form
+    and the cash/bank/account balance wiring for this table are built in
+    the next phase, not here.
+
+    Snapshots BOTH purchase_rate and retail_rate at the moment of sale -
+    deliberately stronger than Sale/StockPurchase's treatment of fuel,
+    where cost is a weighted average over purchase invoices because
+    litres are fungible (see weighted_avg_cost() in ledger_logic.py). A
+    product isn't fungible litres pooled in a tank - each unit sold has a
+    specific indent rate that IS its cost - so storing both rates here
+    locks the exact per-line profit and dealer commission at the moment of
+    sale, independent of wherever the rates move to afterwards.
+    """
+
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False)
+    shift_id = db.Column(db.Integer, db.ForeignKey("shift.id"), nullable=False)
+    entry_date = db.Column(db.Date, nullable=False)
+    quantity = db.Column(db.Float, nullable=False)
+    retail_rate = db.Column(db.Float, nullable=False)
+    purchase_rate = db.Column(db.Float, nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank | credit
+    bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
+    account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=True)  # set only when method == "credit"
+    note = db.Column(db.String(200))
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    product = db.relationship("Product", backref="sales")
+    shift = db.relationship("Shift")
+    bank_account = db.relationship("BankAccount", backref="product_sales")
+    account = db.relationship("Account", backref="product_sales")
+    user = db.relationship("User")
+
+
+class ProductPurchase(db.Model):
+    """Stock received for a product. payment_type/method/bank_account_id/
+    account_id follow StockPurchase's split exactly (see StockPurchase's
+    docstring) - defined now for the same one-migration reason as
+    ProductSale, not wired up yet.
+
+    A NEGATIVE quantity records a return to the supplier or a stock-count
+    correction - the real workbook does exactly this rather than keeping a
+    separate "return" table - in which case total_cost must be negative to
+    match: the sign of quantity and total_cost must always agree, or a
+    return would look like stock arriving for free (or a purchase would
+    look like a refund).
+    """
+
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False)
+    entry_date = db.Column(db.Date, nullable=False)
+    quantity = db.Column(db.Float, nullable=False)
+    unit_cost = db.Column(db.Float, nullable=False)
+    total_cost = db.Column(db.Float, nullable=False)
+    payment_type = db.Column(db.String(10), nullable=False, default="cash")  # cash | credit
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank (only when payment_type == cash)
+    bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
+    account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=True)  # supplier, when payment_type == credit
+    note = db.Column(db.String(200))
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    product = db.relationship("Product", backref="purchases")
+    bank_account = db.relationship("BankAccount", backref="product_purchases")
+    account = db.relationship("Account", backref="product_purchases")
+    user = db.relationship("User")

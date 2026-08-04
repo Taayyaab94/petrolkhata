@@ -66,6 +66,9 @@
           {% elif e.kind == "supplier_payment" %}Payment Made
           {% elif e.kind == "employee_loan" %}Loan / Advance
           {% elif e.kind == "salary" %}Salary
+          {% elif e.kind == "sales_return" %}Sales Return
+          {% elif e.kind == "product_sale" %}Non-Fuel Sale
+          {% elif e.kind == "product_purchase" %}Product Purchase (Credit)
           {% endif %}
         </td>
         <td>
@@ -75,6 +78,10 @@
             {{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.tank.label }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
           {% elif e.kind == "salary" %}
             {{ e.obj.period_label or "Salary" }}{% if e.obj.deduction_amount %} &middot; Rs {{ "%.2f"|format(e.obj.deduction_amount) }} deducted against advance{% endif %}
+          {% elif e.kind == "sales_return" %}
+            {{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }} returned to {{ e.obj.tank.label }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
+          {% elif e.kind in ("product_sale", "product_purchase") %}
+            {{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
           {% elif e.obj %}
             {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
           {% else %}-{% endif %}

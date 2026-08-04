@@ -28,6 +28,11 @@
     <div class="value">Rs {{ "%.2f"|format(total_sales) }}</div>
     <div class="sub">{{ "%.2f"|format(total_liters) }} L sold</div>
   </div>
+  <div class="stat-card">
+    <div class="label">Testing</div>
+    <div class="value">{{ "%.2f"|format(total_testing_liters) }} L</div>
+    <div class="sub">Not billed - returns to the tank</div>
+  </div>
   <div class="stat-card accent-green">
     <div class="label">Cash Sales</div>
     <div class="value">Rs {{ "%.2f"|format(cash_sales) }}</div>
@@ -44,6 +49,21 @@
   <div class="stat-card accent-green">
     <div class="label">Receipts from Customers</div>
     <div class="value">Rs {{ "%.2f"|format(total_payments) }}</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Sales Returns</div>
+    <div class="value">Rs {{ "%.2f"|format(total_sales_returns_amount) }}</div>
+    <div class="sub">{{ "%.2f"|format(total_sales_returns_liters) }} L returned</div>
+  </div>
+  <div class="stat-card accent-green">
+    <div class="label">Non-Fuel Sales</div>
+    <div class="value">Rs {{ "%.2f"|format(total_product_sales_amount) }}</div>
+    <div class="sub">{{ "%.2f"|format(total_product_sales_units) }} units sold</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">Product Purchases</div>
+    <div class="value">Rs {{ "%.2f"|format(total_product_purchases_cost) }}</div>
+    <div class="sub">{{ "%.2f"|format(total_product_purchases_units) }} units received</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Expenses</div>
@@ -86,16 +106,17 @@
   <div class="panel-head"><h3>Sales by Fuel Type</h3></div>
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Fuel</th><th>Liters Sold</th><th>Revenue (Rs)</th></tr></thead>
+    <thead><tr><th>Fuel</th><th>Liters Sold</th><th>Testing (L)</th><th>Revenue (Rs)</th></tr></thead>
     <tbody>
       {% for name, d in by_fuel.items() %}
       <tr>
         <td>{{ name }}</td>
         <td>{{ "%.2f"|format(d.liters) }}</td>
+        <td>{{ "%.2f"|format(testing_by_fuel.get(name, 0)) }}</td>
         <td>{{ "%.2f"|format(d.revenue) }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="3">No sales on this date.</td></tr>
+      <tr><td colspan="4">No sales on this date.</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -106,7 +127,7 @@
   <div class="panel-head"><h3>Stock Available per Tank</h3></div>
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Tank</th><th>Fuel</th><th>Book Stock (L)</th><th>Dip Reading (L)</th><th>Variance</th></tr></thead>
+    <thead><tr><th>Tank</th><th>Fuel</th><th>Book Stock (L)</th><th>Dip Reading (L)</th><th>Variance</th><th>Water (cm)</th></tr></thead>
     <tbody>
       {% for row in tank_rows %}
       <tr>
@@ -115,10 +136,91 @@
         <td>{{ "%.2f"|format(row.book_stock) }}</td>
         <td>{{ "%.2f"|format(row.dip) if row.dip is not none else "-" }}</td>
         <td>{% if row.variance is not none %}{{ "+" if row.variance >= 0 }}{{ "%.2f"|format(row.variance) }} L{% else %}-{% endif %}</td>
+        <td>
+          {% if row.water_cm %}{{ "%.1f"|format(row.water_cm) }} <span class="badge badge-low">Water</span>
+          {% elif row.water_cm == 0 %}0.0
+          {% else %}-{% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Sales Returns</h3></div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Fuel</th><th>Tank</th><th>Liters</th><th>Refund (Rs)</th><th>Method</th></tr></thead>
+    <tbody>
+      {% for sr in sales_returns %}
+      <tr>
+        <td>{{ sr.fuel_type.name }}</td>
+        <td>{{ sr.tank.label }}</td>
+        <td>{{ "%.2f"|format(sr.liters) }}</td>
+        <td>{{ "%.2f"|format(sr.amount) }}</td>
+        <td>
+          {% if sr.method == "bank" %}Via {{ sr.bank_account.name }}
+          {% elif sr.method == "credit" %}On account ({{ sr.account.name }})
+          {% else %}Cash{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5">No sales returns on this date.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="two-col">
+  <div class="panel">
+    <div class="panel-head"><h3>Non-Fuel Sales</h3></div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Product</th><th>Units</th><th>Rate (Rs)</th><th>Amount (Rs)</th><th>Method</th></tr></thead>
+      <tbody>
+        {% for ps in product_sales %}
+        <tr>
+          <td>{{ ps.product.label }}</td>
+          <td>{{ "%.2f"|format(ps.quantity) }}</td>
+          <td>{{ "%.2f"|format(ps.retail_rate) }}</td>
+          <td>{{ "%.2f"|format(ps.amount) }}</td>
+          <td>
+            {% if ps.method == "bank" %}Via {{ ps.bank_account.name }}
+            {% elif ps.method == "credit" %}On account ({{ ps.account.name }})
+            {% else %}Cash{% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">No non-fuel sales on this date.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Product Purchases</h3></div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Product</th><th>Units</th><th>Unit Cost (Rs)</th><th>Total (Rs)</th><th>Payment</th></tr></thead>
+      <tbody>
+        {% for pp in product_purchases %}
+        <tr>
+          <td>{{ pp.product.label }}</td>
+          <td>{{ "%.2f"|format(pp.quantity) }}</td>
+          <td>{{ "%.2f"|format(pp.unit_cost) }}</td>
+          <td>{{ "%.2f"|format(pp.total_cost) }}</td>
+          <td>{{ "Credit" if pp.payment_type == "credit" else "Cash" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">No product purchases on this date.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
   </div>
 </div>
 
@@ -231,7 +333,7 @@
   </div>
 </div>
 
-<p class="hint">Net Cash Flow = sales - credit given + receipts - expenses - cash-paid purchases - supplier payments - salaries paid. Purchases made on supplier credit aren't subtracted at the time of purchase since that cash hasn't left yet - it's counted when the supplier is actually paid. For a period profit view (revenue against the cost of fuel actually sold), see the <a href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}">Monthly Report</a>.</p>
+<p class="hint">Net Cash Flow = sales - credit given + receipts - expenses - cash-paid purchases - supplier payments - salaries paid - cash-refunded sales returns + cash-method non-fuel sales - cash-paid product purchases. Purchases made on supplier credit aren't subtracted at the time of purchase since that cash hasn't left yet - it's counted when the supplier is actually paid; a sales return (or non-fuel sale, or product purchase) settled via a bank or a customer's/supplier's account is excluded here the same way, since it doesn't move cash-in-hand (see that bank's balance, or the account's balance, instead). For a period profit view (revenue against the cost of fuel and products actually sold), see the <a href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}">Monthly Report</a>.</p>
 
 <script>
 // Export menu: click the toggle to show/hide its PDF/Excel links, click

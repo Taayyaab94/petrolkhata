@@ -150,6 +150,10 @@
             {% endif %}
             <input type="number" step="0.01" min="0" id="reading_{{ row.nozzle.id }}" name="reading_{{ row.nozzle.id }}" class="nz-current-input"
                    placeholder="This date's reading" value="{{ row.existing_reading if row.existing_reading is not none else '' }}">
+            <label class="nz-testing">Testing (L)
+              <input type="number" step="0.01" min="0" id="testing_{{ row.nozzle.id }}" name="testing_{{ row.nozzle.id }}" class="nz-testing-input"
+                     placeholder="0" value="{{ row.existing_testing if row.existing_testing else '' }}">
+            </label>
             <div class="calc-preview" id="calc_{{ row.nozzle.id }}">{% if row.previous_is_auto %}Enter this date's reading{% else %}No entry for the day before - enter both readings{% endif %}</div>
           </div>
           {% endfor %}
@@ -160,6 +164,129 @@
       </form>
       {% else %}
       <p class="hint">No nozzles configured.</p>
+      {% endif %}
+    </div>
+
+    <div class="ledger-section">
+      <h3>Sales Return</h3>
+      <p class="hint-sm">Fuel a customer physically brings back into a tank, refunded to them - distinct from Testing above, which never involves a customer at all.</p>
+      <form method="post" action="{{ url_for('ledger_sales_return') }}" id="sales-return-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
+        <div class="form-grid">
+          <label>Fuel
+            <select name="fuel_type_id" id="return_fuel_type" required>
+              <option value="">Select...</option>
+              {% for f in fuel_types %}
+              <option value="{{ f.id }}" data-price="{{ fuel_prices_by_id.get(f.id) }}">{{ f.name }} (Rs {{ "%.2f"|format(fuel_prices_by_id.get(f.id)) }}/L)</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Tank (goes back into)
+            <select name="tank_id" required>
+              <option value="">Select...</option>
+              {% for row in tank_rows %}
+              <option value="{{ row.tank.id }}">{{ row.tank.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Liters
+            <input type="number" step="0.01" min="0.01" name="liters" id="return_liters" required>
+          </label>
+          <label>Refund via
+            <select name="method" class="paidvia-select" data-scope="return" id="return_method">
+              <option value="cash">Cash</option>
+              <option value="__new__">+ Add new bank account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+              <option value="credit">On customer's account</option>
+            </select>
+          </label>
+          <label class="new-paidvia-field" data-scope="return" style="display:none;">New bank account name
+            <input type="text" name="new_bank_account_name">
+          </label>
+          <label class="return-customer-field" style="display:none;">Customer
+            <select name="customer_id" class="customer-select" data-scope="return">
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new customer</option>
+              {% for a in accounts_customer_first %}
+              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-customer-field" data-scope="return" style="display:none;">New customer name
+            <input type="text" name="new_customer_name">
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div class="calc-preview" id="return_calc" style="margin-top:10px;">Refund amount will be calculated automatically</div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Sales Return</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="ledger-section">
+      <h3>Non-Fuel Sale</h3>
+      <p class="hint-sm">Lubricants, filters, and shop items sold at the forecourt - priced at this date's rate, snapshotted onto the entry so a later price change never re-prices it.</p>
+      {% if products %}
+      <form method="post" action="{{ url_for('ledger_product_sale') }}" id="product-sale-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
+        <div class="form-grid">
+          <label>Product
+            <select name="product_id" id="product_sale_product" required>
+              <option value="">Select...</option>
+              {% for p in products %}
+              {% set info = product_info.get(p.id, (0, 0, 0)) %}
+              <option value="{{ p.id }}" data-purchase="{{ info[0] }}" data-retail="{{ info[1] }}" data-stock="{{ info[2] }}">{{ p.label }} (Rs {{ "%.2f"|format(info[1]) }})</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Quantity
+            <input type="number" step="0.01" min="0.01" name="quantity" id="product_sale_quantity" required>
+          </label>
+          <label>Received via
+            <select name="method" class="paidvia-select" data-scope="product_sale" id="product_sale_method">
+              <option value="cash">Cash</option>
+              <option value="__new__">+ Add new bank account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+              <option value="credit">On customer's account</option>
+            </select>
+          </label>
+          <label class="new-paidvia-field" data-scope="product_sale" style="display:none;">New bank account name
+            <input type="text" name="new_bank_account_name">
+          </label>
+          <label class="product-sale-customer-field" style="display:none;">Customer
+            <select name="customer_id" class="customer-select" data-scope="product_sale">
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new customer</option>
+              {% for a in accounts_customer_first %}
+              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-customer-field" data-scope="product_sale" style="display:none;">New customer name
+            <input type="text" name="new_customer_name">
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div class="calc-preview" id="product_sale_calc" style="margin-top:10px;">Amount will be calculated automatically</div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Non-Fuel Sale</button>
+        </div>
+      </form>
+      {% else %}
+      <p class="hint">No products set up yet - add some from Settings.</p>
       {% endif %}
     </div>
 
@@ -419,6 +546,72 @@
     </div>
 
     <div class="ledger-section">
+      <h3>Product Purchase / Stock Received <span class="owner-tag">Owner</span></h3>
+      <p class="hint-sm">Stock received for a non-fuel product. A negative quantity records a return to the supplier or a stock-count correction - enter unit cost as the normal positive price either way; the sign of the total comes from the quantity, never from the cost.</p>
+      {% if products %}
+      <form method="post" action="{{ url_for('ledger_product_purchase') }}" id="product-purchase-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Product
+            <select name="product_id" required>
+              <option value="">Select...</option>
+              {% for p in products %}
+              <option value="{{ p.id }}">{{ p.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Quantity <span class="hint-sm">negative = return/correction</span>
+            <input type="number" step="0.01" name="quantity" id="product_purchase_quantity" required>
+          </label>
+          <label>Unit Cost (Rs)
+            <input type="number" step="0.01" min="0.01" name="unit_cost" id="product_purchase_unit_cost" required>
+          </label>
+          <label>Payment
+            <select name="payment_type" id="product_purchase_payment_type">
+              <option value="cash">Paid Cash</option>
+              <option value="credit">On Credit (from supplier)</option>
+            </select>
+          </label>
+          <label id="product-purchase-paidvia-field">Paid via
+            <select name="paid_via" class="paidvia-select" data-scope="product_purchase_cash">
+              <option value="cash">Cash</option>
+              <option value="__new__">+ Add new bank account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-paidvia-field" data-scope="product_purchase_cash" style="display:none;">New bank account name
+            <input type="text" name="new_bank_account_name">
+          </label>
+          <label id="product-purchase-supplier-field" style="display:none;">Supplier
+            <select name="supplier_id" class="supplier-select" data-scope="product_purchase">
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new supplier</option>
+              {% for a in accounts_supplier_first %}
+              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-supplier-field" data-scope="product_purchase" style="display:none;">New supplier name
+            <input type="text" name="new_supplier_name">
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div class="calc-preview" id="product_purchase_calc" style="margin-top:10px;">Total will be calculated automatically</div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Product Purchase</button>
+        </div>
+      </form>
+      {% else %}
+      <p class="hint">No products set up yet - add some from Settings.</p>
+      {% endif %}
+    </div>
+
+    <div class="ledger-section">
       <h3>Payment to Supplier <span class="owner-tag">Owner</span></h3>
       <form method="post" action="{{ url_for('ledger_supplier_payment') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -647,7 +840,7 @@
     <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
     <div class="table-wrap">
     <table class="table">
-      <thead><tr><th>Tank</th><th>Fuel</th><th>Book Stock (L)</th><th>Dip Reading</th><th>Variance</th></tr></thead>
+      <thead><tr><th>Tank</th><th>Fuel</th><th>Book Stock (L)</th><th>Dip Reading</th><th>Variance</th><th>Water (cm)</th></tr></thead>
       <tbody>
         {% for row in tank_rows %}
         <tr class="{{ 'row-low' if row.is_low else '' }}">
@@ -671,6 +864,10 @@
             {% endif %}
           </td>
           <td><div class="calc-preview" id="dipcalc_{{ row.tank.id }}">{% if row.has_chart and row.existing_dip is not none %}= {{ "%.2f"|format(row.existing_dip) }} L{% else %}-{% endif %}</div></td>
+          <td>
+            <input type="number" step="0.1" min="0" name="water_{{ row.tank.id }}"
+                   placeholder="0" value="{{ row.existing_water_cm if row.existing_water_cm is not none else '' }}">
+          </td>
         </tr>
         {% endfor %}
       </tbody>
@@ -690,6 +887,7 @@
       "sale": ("sale", "this nozzle reading"),
       "receipt": ("receipt", "this receipt"),
       "credit": ("credit", "this credit entry"),
+      "sales_return": ("sales-return", "this sales return"),
       "expense": ("expense", "this expense"),
       "purchase": ("purchase", "this fuel purchase"),
       "supplier_payment": ("supplier-payment", "this supplier payment"),
@@ -699,13 +897,19 @@
       "dip": ("dip", "this dip reading"),
       "handover": ("handover", "this cash handover"),
       "salary": ("salary", "this salary payment"),
+      "product_sale": ("product-sale", "this non-fuel sale"),
+      "product_purchase": ("product-purchase", "this product purchase"),
     }[e.kind] %}
     <div class="feed-item">
       <div class="feed-time">{{ e.sort.strftime("%H:%M") }}</div>
       {% if e.kind == "sale" %}
-      <div class="feed-desc"><strong>{{ e.obj.nozzle.label }} &middot; {{ e.obj.nozzle.tank.fuel_type.name }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.nozzle.label }} &middot; {{ e.obj.nozzle.tank.fuel_type.name }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L{% if e.obj.testing_liters %} &middot; {{ "%.2f"|format(e.obj.testing_liters) }} L testing{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-debit">Sale</span>
       <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.total_amount) }}</div>
+      {% elif e.kind == "sales_return" %}
+      <div class="feed-desc"><strong>{{ e.obj.fuel_type.name }} returned to {{ e.obj.tank.label }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else ("On " + e.obj.account.name + "'s account" if e.obj.method == "credit" and e.obj.account else "Cash") }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-credit">Sales Return</span>
+      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
       {% elif e.kind == "receipt" %}
       <div class="feed-desc"><strong>Receipt from {{ e.obj.account.name }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-debit">Receipt</span>
@@ -739,8 +943,8 @@
       <span class="feed-tag feed-tag-credit">Employee Loan</span>
       <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
       {% elif e.kind == "dip" %}
-      <div class="feed-desc"><strong>{{ e.obj.tank.label }} dip</strong><span>{% if e.obj.dip_cm is not none %}{{ "%.1f"|format(e.obj.dip_cm) }} cm = {% endif %}{{ "%.2f"|format(e.obj.dip_liters) }} L &middot; {{ e.obj.user.username }}</span></div>
-      <span class="feed-tag feed-tag-neutral">Dip</span>
+      <div class="feed-desc"><strong>{{ e.obj.tank.label }} dip</strong><span>{% if e.obj.dip_cm is not none %}{{ "%.1f"|format(e.obj.dip_cm) }} cm = {% endif %}{{ "%.2f"|format(e.obj.dip_liters) }} L{% if e.obj.water_cm %} &middot; Water {{ "%.1f"|format(e.obj.water_cm) }} cm{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-neutral">Dip</span>{% if e.obj.water_cm %} <span class="badge badge-low">Water</span>{% endif %}
       <div class="feed-amount neutral">{{ "+" if e.variance >= 0 }}{{ "%.2f"|format(e.variance) }} L</div>
       {% elif e.kind == "handover" %}
       <div class="feed-desc"><strong>{{ e.obj.shift.name }} cash handover</strong><span>Counted Rs {{ "%.2f"|format(e.obj.declared_amount) }}{% if e.obj.attendant %} &middot; {{ e.obj.attendant.name }}{% endif %}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
@@ -750,6 +954,14 @@
       <div class="feed-desc"><strong>Salary to {{ e.obj.account.name }}</strong><span>{% if e.obj.period_label %}{{ e.obj.period_label }} &middot; {% endif %}{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.deduction_amount %} &middot; Rs {{ "%.2f"|format(e.obj.deduction_amount) }} deducted{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Salary</span>
       <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.net_paid) }}</div>
+      {% elif e.kind == "product_sale" %}
+      <div class="feed-desc"><strong>{{ e.obj.product.label }}</strong><span>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} &middot; {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else ("On " + e.obj.account.name + "'s account" if e.obj.method == "credit" and e.obj.account else "Cash") }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-debit">Non-Fuel Sale</span>
+      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      {% elif e.kind == "product_purchase" %}
+      <div class="feed-desc"><strong>{{ e.obj.product.label }}{{ " return/correction" if e.obj.quantity < 0 }}</strong><span>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} &middot; {{ ("Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash") if e.obj.payment_type == "cash" else "On credit" }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-credit">Product Purchase</span>
+      <div class="feed-amount {{ 'debit' if e.obj.total_cost < 0 else 'credit' }}">{{ "+" if e.obj.total_cost < 0 }}Rs {{ "%.2f"|format(e.obj.total_cost|abs) }}</div>
       {% endif %}
       {% if current_user.is_owner %}
       <form method="post" action="{{ url_for('entry_delete', kind=delete_kind, entry_id=e.obj.id) }}"
@@ -777,6 +989,7 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
   const preview = row.querySelector('.calc-preview');
   const price = parseFloat(row.dataset.price);
   const manualPrev = row.querySelector('.nz-previous-input');
+  const testingInput = row.querySelector('.nz-testing-input');
 
   function getPrevious() {
     if (manualPrev) {
@@ -795,18 +1008,32 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
     }
     const val = parseFloat(input.value);
     if (isNaN(val)) return;
-    const liters = val - previous;
-    if (liters < 0) {
+    const gross = val - previous;
+    if (gross < 0) {
       preview.textContent = 'Lower than previous reading (' + previous.toFixed(2) + ' L)';
       preview.className = 'calc-preview has-error';
       return;
     }
+    let testing = testingInput ? parseFloat(testingInput.value) : NaN;
+    if (isNaN(testing) || testing < 0) testing = 0;
+    if (testing > gross) {
+      preview.textContent = "Testing (" + testing.toFixed(2) + " L) can't exceed the meter difference (" + gross.toFixed(2) + " L)";
+      preview.className = 'calc-preview has-error';
+      return;
+    }
+    const liters = gross - testing;
     const amount = liters * price;
-    preview.innerHTML = liters.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+    if (testing > 0) {
+      preview.innerHTML = gross.toFixed(2) + ' L &minus; ' + testing.toFixed(2) + ' L testing = ' + liters.toFixed(2) +
+        ' L &times; Rs ' + price.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+    } else {
+      preview.innerHTML = gross.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+    }
     preview.className = 'calc-preview has-value';
   }
   input.addEventListener('input', update);
   if (manualPrev) manualPrev.addEventListener('input', update);
+  if (testingInput) testingInput.addEventListener('input', update);
   update();
 });
 
@@ -886,6 +1113,128 @@ function updateCreditCalc() {
 if (creditFuelSelect) {
   creditFuelSelect.addEventListener('change', updateCreditCalc);
   creditLiters.addEventListener('input', updateCreditCalc);
+}
+
+// --- Sales Return: live refund-amount calculation, same shape as the
+// credit-to-customer preview above ---
+const returnFuelSelect = document.getElementById('return_fuel_type');
+const returnLiters = document.getElementById('return_liters');
+const returnCalc = document.getElementById('return_calc');
+function updateReturnCalc() {
+  const opt = returnFuelSelect.options[returnFuelSelect.selectedIndex];
+  const price = opt ? parseFloat(opt.dataset.price) : NaN;
+  const liters = parseFloat(returnLiters.value);
+  if (isNaN(price) || isNaN(liters)) {
+    returnCalc.textContent = 'Refund amount will be calculated automatically';
+    returnCalc.className = 'calc-preview';
+    return;
+  }
+  const amount = liters * price;
+  returnCalc.innerHTML = liters.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + ' refund</strong>';
+  returnCalc.className = 'calc-preview has-value';
+}
+if (returnFuelSelect) {
+  returnFuelSelect.addEventListener('change', updateReturnCalc);
+  returnLiters.addEventListener('input', updateReturnCalc);
+}
+
+// --- Sales Return: "On customer's account" reveals the customer picker,
+// same idea as the Fuel Purchase supplier-field toggle below ---
+const returnMethod = document.getElementById('return_method');
+const returnCustomerField = document.querySelector('.return-customer-field');
+if (returnMethod && returnCustomerField) {
+  returnMethod.addEventListener('change', function () {
+    const isCredit = returnMethod.value === 'credit';
+    returnCustomerField.style.display = isCredit ? '' : 'none';
+    returnCustomerField.querySelector('select').required = isCredit;
+  });
+}
+
+// --- Non-Fuel Sale: live amount + commission preview, plus the current
+// stock for the selected product (so overselling is visible before
+// saving, even though the server still accepts and warns rather than
+// blocking) ---
+const productSaleProduct = document.getElementById('product_sale_product');
+const productSaleQuantity = document.getElementById('product_sale_quantity');
+const productSaleCalc = document.getElementById('product_sale_calc');
+function updateProductSaleCalc() {
+  const opt = productSaleProduct.options[productSaleProduct.selectedIndex];
+  const retail = opt ? parseFloat(opt.dataset.retail) : NaN;
+  const purchase = opt ? parseFloat(opt.dataset.purchase) : NaN;
+  const stock = opt ? parseFloat(opt.dataset.stock) : NaN;
+  const qty = parseFloat(productSaleQuantity.value);
+  if (isNaN(retail) || isNaN(qty)) {
+    productSaleCalc.textContent = 'Amount will be calculated automatically';
+    productSaleCalc.className = 'calc-preview';
+    return;
+  }
+  const amount = qty * retail;
+  const commissionPerUnit = retail - purchase;
+  const commission = qty * commissionPerUnit;
+  let msg = qty.toFixed(2) + ' x Rs ' + retail.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+  msg += ' &middot; commission Rs ' + commissionPerUnit.toFixed(2) + '/unit = Rs ' + fmtMoney(commission);
+  let cls = 'has-value';
+  if (!isNaN(stock)) {
+    msg += ' &middot; ' + stock.toFixed(2) + ' in stock';
+    if (qty > stock) {
+      msg += ' - exceeds stock, will still save';
+      cls = 'has-warn';
+    }
+  }
+  productSaleCalc.innerHTML = msg;
+  productSaleCalc.className = 'calc-preview ' + cls;
+}
+if (productSaleProduct) {
+  productSaleProduct.addEventListener('change', updateProductSaleCalc);
+  productSaleQuantity.addEventListener('input', updateProductSaleCalc);
+}
+
+// --- Non-Fuel Sale: "On customer's account" reveals the customer picker,
+// same idea as the Sales Return toggle above ---
+const productSaleMethod = document.getElementById('product_sale_method');
+const productSaleCustomerField = document.querySelector('.product-sale-customer-field');
+if (productSaleMethod && productSaleCustomerField) {
+  productSaleMethod.addEventListener('change', function () {
+    const isCredit = productSaleMethod.value === 'credit';
+    productSaleCustomerField.style.display = isCredit ? '' : 'none';
+    productSaleCustomerField.querySelector('select').required = isCredit;
+  });
+}
+
+// --- Product Purchase: live quantity x unit cost = total calculation,
+// allowing a negative total for a return/correction ---
+const productPurchaseQuantity = document.getElementById('product_purchase_quantity');
+const productPurchaseUnitCost = document.getElementById('product_purchase_unit_cost');
+const productPurchaseCalc = document.getElementById('product_purchase_calc');
+function updateProductPurchaseCalc() {
+  const qty = parseFloat(productPurchaseQuantity.value);
+  const cost = parseFloat(productPurchaseUnitCost.value);
+  if (isNaN(qty) || isNaN(cost) || qty === 0) {
+    productPurchaseCalc.textContent = 'Total will be calculated automatically';
+    productPurchaseCalc.className = 'calc-preview';
+    return;
+  }
+  const total = qty * cost;
+  productPurchaseCalc.innerHTML = qty.toFixed(2) + ' &times; Rs ' + cost.toFixed(2) + ' = <strong>Rs ' + fmtMoney(total) + '</strong>' + (total < 0 ? ' (return / correction)' : '');
+  productPurchaseCalc.className = 'calc-preview has-value';
+}
+if (productPurchaseQuantity && productPurchaseUnitCost) {
+  productPurchaseQuantity.addEventListener('input', updateProductPurchaseCalc);
+  productPurchaseUnitCost.addEventListener('input', updateProductPurchaseCalc);
+}
+
+// --- Product Purchase: show supplier field only when "on credit", same
+// toggle as the Fuel Purchase form below ---
+const productPurchasePaymentType = document.getElementById('product_purchase_payment_type');
+const productPurchaseSupplierField = document.getElementById('product-purchase-supplier-field');
+const productPurchasePaidViaField = document.getElementById('product-purchase-paidvia-field');
+if (productPurchasePaymentType) {
+  productPurchasePaymentType.addEventListener('change', function () {
+    const isCredit = productPurchasePaymentType.value === 'credit';
+    productPurchaseSupplierField.style.display = isCredit ? '' : 'none';
+    productPurchaseSupplierField.querySelector('select').required = isCredit;
+    productPurchasePaidViaField.style.display = isCredit ? 'none' : '';
+  });
 }
 
 // --- Fuel purchase: live cost-per-liter calculation ---

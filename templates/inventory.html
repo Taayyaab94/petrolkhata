@@ -44,6 +44,32 @@
 </div>
 
 <div class="panel">
+  <div class="panel-head"><h3>Product Stock</h3></div>
+  <p class="hint">Products are counted in whole units (pieces) or by the litre, never through a nozzle - which is why they get their own table here instead of joining the fuel tanks above.</p>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Product</th><th>Category</th><th>Unit</th><th>Opening</th><th>Received</th><th>Sold</th><th>On Hand</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for row in product_rows %}
+      <tr class="{{ 'row-low' if row.is_low else '' }}">
+        <td>{{ row.product.label }}</td>
+        <td>{{ row.product.category|capitalize }}</td>
+        <td>{{ row.product.unit }}</td>
+        <td>{{ "%.2f"|format(row.opening) }}</td>
+        <td>{{ "%.2f"|format(row.received) }}</td>
+        <td>{{ "%.2f"|format(row.sold) }}</td>
+        <td>{{ "%.2f"|format(row.on_hand) }}</td>
+        <td>{% if row.is_low %}<span class="badge badge-low">LOW STOCK</span>{% else %}<span class="badge badge-ok">OK</span>{% endif %}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8">No products set up yet - add some from Settings.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="panel">
   <div class="panel-head"><h3>Dispensers &amp; Nozzles</h3></div>
   <div class="table-wrap">
   <table class="table">

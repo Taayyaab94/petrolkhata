@@ -81,13 +81,24 @@ updates it in place instead of duplicating it.
 - **Debit - Sales & Receipts:** enter the date's meter reading for each
   nozzle - Petrol Khata calculates liters sold (this reading − the
   previous one) and the sale amount (liters × price) live, and reduces
-  the nozzle's tank stock. **Payment / Receipt Received** is one merged
-  entry for money coming in from any account - a customer paying down
-  what they owe, or an employee repaying a loan; there's no separate
-  "customer payment" vs. "employee repayment" form, since the account
-  picker already lists every account regardless of type. Bank Sales (the
-  portion of today's sales that came in via card/bank, reconciled to a
-  specific bank account) is also recorded here.
+  the nozzle's tank stock. A **Testing (L)** field next to each reading
+  covers fuel run through the nozzle to test it rather than sold - it's
+  never billed, and because it physically drains back into the same
+  tank it's added back to stock rather than subtracted, so a day spent
+  mostly on testing doesn't look like a phantom stock loss. The reading
+  still shows its full meter difference, just split live into "liters
+  sold" and "L testing" as you type. **Sales Return**, right below,
+  covers the opposite direction - fuel a customer physically brings back
+  into a tank, refunded to them in cash, from a bank, or as a reduction
+  of what a credit customer owes; unlike Testing, a return always
+  involves a customer, and it's priced at whatever rate was in effect on
+  its own date, the same as any sale. **Payment / Receipt Received** is
+  one merged entry for money coming in from any account - a customer
+  paying down what they owe, or an employee repaying a loan; there's no
+  separate "customer payment" vs. "employee repayment" form, since the
+  account picker already lists every account regardless of type. Bank
+  Sales (the portion of today's sales that came in via card/bank,
+  reconciled to a specific bank account) is also recorded here.
 - **Credit - Customer, Expenses & Purchases**, in order: credit given to
   a customer, cash physically deposited into a bank account, an expense,
   a fuel purchase/delivery into a specific tank (cash or on credit from
@@ -97,21 +108,27 @@ updates it in place instead of duplicating it.
   calculation (cost ÷ liters) as you type, so a mistyped cost is easy to
   catch before saving.
 - **Dip - Tank Stock Check:** enter each tank's physical dip reading.
-  Book stock (starting stock + purchases − sales) is calculated
-  automatically; the variance between dip and book stock is shown
-  plainly, without being flagged as an error - small differences from
-  evaporation, temperature, or rounding are normal.
+  Book stock (starting stock + purchases + sales returns − sales) is
+  calculated automatically; the variance between dip and book stock is
+  shown plainly, without being flagged as an error - small differences
+  from evaporation, temperature, or rounding are normal. A **Water
+  (cm)** column alongside it records a stick measurement of any water
+  sitting at the bottom of the tank - always in cm, regardless of
+  whether the tank's own dip is entered in cm or liters. Water displaces
+  fuel (distorting the dip) and damages a customer's engine, so it's
+  purely a diagnostic warning (a low-stock-style badge appears next to
+  any reading above zero) - it never adjusts book stock itself.
 
   Book stock is anchored to the tank's "Stock as of" date (Settings →
   Tanks), not to the beginning of time: for a date on or after it, the
-  starting stock plus that window's purchases/sales gives the book
-  figure; for an earlier date - e.g. backfilling months of history after
-  entering today's physical stock - it's reconstructed backwards by
-  undoing the purchases/sales between the two dates, since stock only
-  ever moves through those two kinds of entry. A tank with no "Stock as
-  of" date set (every tank created before this feature existed) keeps
-  the old behaviour: its starting stock is treated as sitting before all
-  recorded history.
+  starting stock plus that window's purchases/returns/sales gives the
+  book figure; for an earlier date - e.g. backfilling months of history
+  after entering today's physical stock - it's reconstructed backwards
+  by undoing the purchases/returns/sales between the two dates, since
+  stock only ever moves through those kinds of entry. A tank with no
+  "Stock as of" date set (every tank created before this feature
+  existed) keeps the old behaviour: its starting stock is treated as
+  sitting before all recorded history.
 
 Right below the date picker, a **sales breakdown** shows Total Sales
 (from nozzle readings) minus Credit Sales minus Bank Sales, leaving Cash
@@ -178,8 +195,9 @@ the rate that was actually charged back then, never at today's rate.
 
 Cash in hand can never go negative - any action that would draw it down
 past zero on its own date or any later date (an expense, loan, cash-paid
-fuel purchase, supplier payment, deposit, or bank-sale reclassification,
-whether a new entry or an edit to an existing one) is rejected, showing
+fuel purchase, supplier payment, deposit, cash-refunded sales return, or
+bank-sale reclassification, whether a new entry or an edit to an
+existing one) is rejected, showing
 how much could still be spent on that date without a later date's
 balance going negative. The check runs against the whole timeline rather
 than just today's total, which matters when backfilling old paper
@@ -235,22 +253,108 @@ converts to liters automatically, interpolating between the points
 given. A tank without a chart keeps taking dips in liters directly, same
 as before.
 
+## Products (lubricants, filters, shop items)
+
+Lubricants, filters, and shop items are a second business alongside
+fuel - not sold through a nozzle or stored in a tank, but tracked the
+same way in every other respect: a catalogue, dated rates, and a running
+stock figure, with sales and purchases recorded on the Ledger just like
+fuel is.
+
+- **Catalogue (Settings)** — each product has a name, an optional pack
+  size (e.g. "3 L" - a label, not a quantity), a category (lubricant /
+  filter / shop / other, used purely to report shop profit separately
+  from lubricants and filters), a unit it's *counted* in (piece or
+  litre - a lubricant sold as a sealed tin is still counted in pieces,
+  even though the tin holds liters), a purchase (indent) rate, a retail
+  rate, an opening stock, and a low-stock alert level. Rate changes are
+  dated the same way fuel prices are (see "Fuel prices" above) - a
+  backdated sale re-prices to whatever rate was actually in effect on
+  its own date, never today's.
+- **Bulk paste import (Settings)** — the real catalogue runs to dozens or
+  low hundreds of SKUs, far too many to type in one at a time. Paste a
+  price list (one product per line: `name, pack size, purchase rate,
+  retail rate, opening stock, low-stock level` - tab- or comma-separated,
+  the last two columns optional) under a chosen category/unit and an
+  effective date; matching is by name (case-insensitive), so re-pasting
+  next month's price list *updates* existing products and records a new
+  rate change for each one that actually moved, rather than creating
+  duplicates. The import is all-or-nothing - a bad line anywhere means
+  nothing is imported, so a half-imported catalogue is never left for the
+  next paste to somehow have to detect.
+- **Non-Fuel Sale (Ledger, Debit column)** — anyone can record one, the
+  same as a fuel sale at the forecourt. Priced at whatever rate is in
+  effect on the entry's own date, snapshotted onto the row - a later rate
+  change never re-prices an old sale, and a margin report for last month
+  stays correct even after this month's rates move. Received as cash, a
+  specific bank account, or on a customer's account (increases what they
+  owe), the same "Paid via" / "On account" choices used everywhere else.
+  Selling more than the recorded stock shows is *allowed* - overselling
+  almost always means the stock count itself is off, not that the sale
+  didn't happen, so the entry is still saved with a warning rather than
+  being refused.
+- **Product Purchase / Stock Received (Ledger, Credit column, owner
+  only)** — stock arriving for a product, cash or on supplier credit,
+  same split as a fuel purchase/delivery. A *negative* quantity records a
+  return to the supplier or a stock-count correction (the real workbook
+  does exactly this instead of a separate "return" table) - unit cost is
+  always entered as the normal positive price either way; the sign of
+  the total comes from the quantity, never from the cost. A cash-paid
+  purchase goes through the same cash-can't-go-negative guard as a fuel
+  purchase; a return (negative quantity) never can, since it puts money
+  back rather than spending it.
+- **Product stock (Inventory)** — a read-only table alongside the fuel
+  tanks: opening stock, received, sold, and on-hand for every active
+  product, low-stock flagged the same way a tank is. Products are
+  counted in **units**, fuel in **litres** - the two never share a
+  figure or a table.
+- **Cost is exact, not a weighted average** — a delivery of fuel is
+  pooled with whatever's already in the tank (fungible litres), so the
+  cost of the fuel actually *sold* has to be a weighted average across
+  every purchase (see "Cost of Fuel Sold" below). A product isn't pooled
+  that way: every non-fuel sale snapshots BOTH the purchase rate and the
+  retail rate that were in effect at that moment, so the dealer
+  commission on that one line is exact and permanent - it can never be
+  disturbed by a rate change recorded afterwards, today's or any other
+  day's.
+
 ## Reports
 
 - **Daily Report** — pick a date to see that day's total sales (by
-  nozzle/fuel), cash vs. bank vs. credit split, receipts, expenses,
-  salaries, shift cash-handover variances, bank sales, inventory
-  received, and stock available per tank.
-- **Monthly Report** — a period profit view: revenue against the cost of
-  the fuel *actually sold* (COGS, via each fuel's weighted-average
-  purchase cost), gross margin, expenses, salaries, net profit, margin by
-  fuel type, expenses by category, and cash variance by attendant.
+  nozzle/fuel), testing litres, cash vs. bank vs. credit split, receipts,
+  sales returns (litres and refund amount), non-fuel sales (units and
+  amount) and product purchases (units and cost), expenses, salaries,
+  shift cash-handover variances, bank sales, inventory received, and
+  stock available per tank (including any water level flagged on that
+  tank's dip). Net Cash Flow is adjusted for cash-refunded sales returns,
+  cash-method non-fuel sales, and cash-paid product purchases only - a
+  bank or on-account settlement (of any of the three) shows up against
+  that bank's or that account's balance instead, the same way a credit
+  fuel purchase doesn't hit cash until the supplier is actually paid.
+- **Monthly Report** — a period profit view, presented as an income
+  statement: Fuel Revenue (gross) less Sales Returns gives Net Fuel
+  Revenue, less the Cost of Fuel Sold (COGS, via each fuel's
+  weighted-average purchase cost) gives Fuel Gross Margin; separately,
+  Product Revenue less the Cost of Products Sold gives Product Gross
+  Margin - Fuel and Product Gross Margin together are the Total Gross
+  Margin, which less Expenses and Salaries is Net Profit. A **Margin by
+  Product Category** table breaks the product side out by
+  lubricant/filter/shop/other, so shop profit is visible as its own
+  line rather than blended into lubricants - which is the whole point of
+  tracking it separately at all. Revenue and Gross Margin stay gross (as
+  originally sold, from meter readings a later return never edits); Net
+  Profit is the one figure that's actually net of the month's sales
+  returns, regardless of how each was refunded.
 - **Trends** — the same metrics as charts over the past 15 days, month,
-  3 months, or year, so patterns are visible over time, including the
-  same COGS-based Profit figure as the Monthly Report. Costing the fuel
-  actually *sold* rather than subtracting whatever was *bought* that day
-  is what stops a large delivery from showing up as a big fake loss on
-  the day it arrives - the stock is still sitting in the tank, unsold.
+  3 months, or year, so patterns are visible over time, including a
+  **Product Margin** stat card and the same COGS-based Profit figure as
+  the Monthly Report - now inclusive of product margin too, so the two
+  pages always reconcile for the same month. Costing the fuel actually
+  *sold* rather than subtracting whatever was *bought* that day is what
+  stops a large delivery from showing up as a big fake loss on the day it
+  arrives - the stock is still sitting in the tank, unsold. Product
+  margin needs no such adjustment at all: every line's cost is already
+  exact (see "Cost is exact" above), so there's nothing to smooth out.
 
 ## Accounts (customers, suppliers, employees)
 

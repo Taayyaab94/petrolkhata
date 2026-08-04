@@ -102,6 +102,18 @@
         <td><span class="badge badge-low">Salary &middot; <a href="{{ url_for('account_detail', account_id=e.obj.account_id) }}">{{ e.obj.account.name }}</a></span></td>
         <td>{% if e.obj.period_label %}{{ e.obj.period_label }}{% else %}Salary{% endif %}{% if e.obj.deduction_amount %} &middot; Rs {{ "%.2f"|format(e.obj.deduction_amount) }} held against advance{% endif %}</td>
         <td>-{{ "%.2f"|format(e.obj.net_paid) }}</td>
+        {% elif e.kind == "sales_return" %}
+        <td><span class="badge badge-low">Sales Return</span></td>
+        <td>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }} &middot; {{ e.obj.tank.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
+        {% elif e.kind == "product_sale" %}
+        <td><span class="badge badge-ok">Non-Fuel Sale</span></td>
+        <td>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        {% elif e.kind == "product_purchase" %}
+        <td><span class="badge badge-low">Product Purchase</span></td>
+        <td>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>{{ "+" if -e.obj.total_cost >= 0 }}{{ "%.2f"|format(-e.obj.total_cost) }}</td>
         {% endif %}
         <td>{{ "%.2f"|format(e.running_balance) }}</td>
         <td>{{ e.obj.user.label if e.obj and e.obj.user else "-" }}</td>

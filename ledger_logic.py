@@ -23,9 +23,14 @@ from models import (
     FuelType,
     Nozzle,
     NozzleReset,
+    Product,
+    ProductPurchase,
+    ProductRateHistory,
+    ProductSale,
     Receipt,
     Sale,
     SalaryPayment,
+    SalesReturn,
     Shift,
     StockPurchase,
     SupplierPayment,
@@ -36,8 +41,8 @@ from models import (
 
 def book_stock(tank, as_of_date):
     """Book stock for `tank` at the END of as_of_date - starting stock
-    plus every purchase into this tank, minus every sale from a nozzle on
-    this tank.
+    plus every purchase and sales return into this tank, minus every sale
+    from a nozzle on this tank.
 
     tank.starting_stock_liters is the level at the START of
     tank.starting_stock_date (equivalently, the END of the day before it -
@@ -45,25 +50,35 @@ def book_stock(tank, as_of_date):
 
     - starting_stock_date is None: back-compat for every tank that
       existed before this column did. Treat the baseline as sitting
-      before all recorded history and sum every purchase/sale up to and
-      including as_of_date - exactly the original, only-ever-had-one-mode
-      behaviour.
-    - as_of_date >= starting_stock_date (FORWARD): sum purchases/sales
-      from starting_stock_date through as_of_date, inclusive on both
-      ends.
+      before all recorded history and sum every purchase/return/sale up
+      to and including as_of_date - exactly the original,
+      only-ever-had-one-mode behaviour.
+    - as_of_date >= starting_stock_date (FORWARD): sum purchases/returns/
+      sales from starting_stock_date through as_of_date, inclusive on
+      both ends.
     - as_of_date < starting_stock_date (BACKWARD): there's no ledger
       history before the baseline to sum forward from, so instead undo
       everything strictly between the two dates - subtract back out each
-      purchase, add back each sale. Stock only ever moves via those two
-      kinds of entry, so running the ledger backwards from the baseline
-      is valid arithmetic. This is what makes "measure today's stock,
-      then backfill months of older records" come out correct instead of
-      subtracting sales that today's baseline already reflects.
+      purchase and return, add back each sale. Stock only ever moves via
+      those kinds of entry, so running the ledger backwards from the
+      baseline is valid arithmetic. This is what makes "measure today's
+      stock, then backfill months of older records" come out correct
+      instead of subtracting sales that today's baseline already
+      reflects.
+
+    A SalesReturn is a stock inflow just like a StockPurchase - fuel a
+    customer brings back physically re-enters the tank - so it's summed
+    and undone exactly the same way purchases are, with no special case.
     """
     if tank.starting_stock_date is None:
         purchased = (
             db.session.query(func.coalesce(func.sum(StockPurchase.liters), 0))
             .filter(StockPurchase.tank_id == tank.id, StockPurchase.entry_date <= as_of_date)
+            .scalar()
+        )
+        returned = (
+            db.session.query(func.coalesce(func.sum(SalesReturn.liters), 0))
+            .filter(SalesReturn.tank_id == tank.id, SalesReturn.entry_date <= as_of_date)
             .scalar()
         )
         sold = (
@@ -72,7 +87,7 @@ def book_stock(tank, as_of_date):
             .filter(Nozzle.tank_id == tank.id, Sale.entry_date <= as_of_date)
             .scalar()
         )
-        return round(tank.starting_stock_liters + purchased - sold, 2)
+        return round(tank.starting_stock_liters + purchased + returned - sold, 2)
 
     if as_of_date >= tank.starting_stock_date:
         purchased = (
@@ -81,6 +96,15 @@ def book_stock(tank, as_of_date):
                 StockPurchase.tank_id == tank.id,
                 StockPurchase.entry_date >= tank.starting_stock_date,
                 StockPurchase.entry_date <= as_of_date,
+            )
+            .scalar()
+        )
+        returned = (
+            db.session.query(func.coalesce(func.sum(SalesReturn.liters), 0))
+            .filter(
+                SalesReturn.tank_id == tank.id,
+                SalesReturn.entry_date >= tank.starting_stock_date,
+                SalesReturn.entry_date <= as_of_date,
             )
             .scalar()
         )
@@ -94,7 +118,7 @@ def book_stock(tank, as_of_date):
             )
             .scalar()
         )
-        return round(tank.starting_stock_liters + purchased - sold, 2)
+        return round(tank.starting_stock_liters + purchased + returned - sold, 2)
 
     # BACKWARD: as_of_date < starting_stock_date - undo the entries
     # strictly between the two dates instead of summing forward.
@@ -104,6 +128,15 @@ def book_stock(tank, as_of_date):
             StockPurchase.tank_id == tank.id,
             StockPurchase.entry_date > as_of_date,
             StockPurchase.entry_date < tank.starting_stock_date,
+        )
+        .scalar()
+    )
+    returned = (
+        db.session.query(func.coalesce(func.sum(SalesReturn.liters), 0))
+        .filter(
+            SalesReturn.tank_id == tank.id,
+            SalesReturn.entry_date > as_of_date,
+            SalesReturn.entry_date < tank.starting_stock_date,
         )
         .scalar()
     )
@@ -117,7 +150,7 @@ def book_stock(tank, as_of_date):
         )
         .scalar()
     )
-    return round(tank.starting_stock_liters - purchased + sold, 2)
+    return round(tank.starting_stock_liters - purchased - returned + sold, 2)
 
 
 def previous_slot(entry_date, shift):
@@ -355,6 +388,16 @@ def stock_series(tank, dates):
         .group_by(StockPurchase.entry_date)
         .all()
     )
+    returns_by_day = dict(
+        db.session.query(SalesReturn.entry_date, func.sum(SalesReturn.liters))
+        .filter(
+            SalesReturn.tank_id == tank.id,
+            SalesReturn.entry_date >= start,
+            SalesReturn.entry_date <= dates[-1],
+        )
+        .group_by(SalesReturn.entry_date)
+        .all()
+    )
     sales_by_day = dict(
         db.session.query(Sale.entry_date, func.sum(Sale.liters))
         .join(Nozzle, Sale.nozzle_id == Nozzle.id)
@@ -369,7 +412,7 @@ def stock_series(tank, dates):
 
     series = []
     for d in dates:
-        running += purchases_by_day.get(d, 0) - sales_by_day.get(d, 0)
+        running += purchases_by_day.get(d, 0) + returns_by_day.get(d, 0) - sales_by_day.get(d, 0)
         series.append(round(running, 2))
     return series
 
@@ -511,38 +554,82 @@ def weighted_avg_cost(fuel_type, as_of_date):
 
 
 def cogs_for_period(start, end):
-    """Cost of the fuel actually sold between start and end: for each fuel
-    type, liters sold x that fuel's weighted average purchase cost as of
-    the end of the period. Returns (total_cost, per_fuel_detail)."""
+    """Cost of the fuel actually sold between start and end, NET of any
+    SalesReturn in the same window - a return un-sells the fuel, so both
+    the liters and the revenue it's costed against have to come back out
+    HERE, or it gets charged for fuel that came back into the tank while
+    also being credited the full retail refund elsewhere (see the
+    Sale.liters/testing_liters split for the equivalent idea on the
+    other side of a sale). This is the ONLY place sales returns are
+    netted into cost/margin - callers (reports_monthly(), reports_trends())
+    must not subtract a sales-returns figure again on top of anything
+    derived from here, or the refund gets double-counted.
+
+    For each fuel type: net liters (gross sold minus gross returned) x
+    that fuel's weighted average purchase cost as of the end of the
+    period. Returns (total_cost, per_fuel_detail); total_cost is already
+    net. Each detail dict keeps its original keys ("liters"/"revenue" are
+    the NET figures margin is actually computed from) plus "gross_revenue",
+    "returns_liters" and "returns_amount" so a caller can show the
+    deduction instead of hiding it.
+    """
     detail = []
     total = 0.0
     for ft in FuelType.query.order_by(FuelType.name).all():
-        liters = (
+        gross_liters = (
             db.session.query(func.coalesce(func.sum(Sale.liters), 0))
             .join(Nozzle, Sale.nozzle_id == Nozzle.id)
             .join(Tank, Nozzle.tank_id == Tank.id)
             .filter(Tank.fuel_type_id == ft.id, Sale.entry_date >= start, Sale.entry_date <= end)
             .scalar()
         )
-        revenue = (
+        gross_revenue = (
             db.session.query(func.coalesce(func.sum(Sale.total_amount), 0))
             .join(Nozzle, Sale.nozzle_id == Nozzle.id)
             .join(Tank, Nozzle.tank_id == Tank.id)
             .filter(Tank.fuel_type_id == ft.id, Sale.entry_date >= start, Sale.entry_date <= end)
             .scalar()
         )
+        returns_liters = (
+            db.session.query(func.coalesce(func.sum(SalesReturn.liters), 0))
+            .filter(
+                SalesReturn.fuel_type_id == ft.id,
+                SalesReturn.entry_date >= start,
+                SalesReturn.entry_date <= end,
+            )
+            .scalar()
+        )
+        returns_amount = (
+            db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0))
+            .filter(
+                SalesReturn.fuel_type_id == ft.id,
+                SalesReturn.entry_date >= start,
+                SalesReturn.entry_date <= end,
+            )
+            .scalar()
+        )
+        net_liters = gross_liters - returns_liters
+        net_revenue = gross_revenue - returns_amount
         unit_cost = weighted_avg_cost(ft, end)
-        cost = round(liters * unit_cost, 2)
+        # A full (or, across a window, an over-) return nets to zero or
+        # fewer liters actually kept sold - cost can't go negative just
+        # because more came back than was sold in this particular window,
+        # and this also sidesteps ever dividing by a zero/negative liters
+        # figure anywhere margin-per-liter is computed downstream.
+        cost = 0.0 if net_liters <= 0 else round(net_liters * unit_cost, 2)
         total += cost
-        if liters:
+        if gross_liters or returns_liters:
             detail.append(
                 {
                     "fuel": ft.name,
-                    "liters": round(liters, 2),
-                    "revenue": round(revenue, 2),
+                    "gross_revenue": round(gross_revenue, 2),
+                    "returns_liters": round(returns_liters, 2),
+                    "returns_amount": round(returns_amount, 2),
+                    "liters": round(net_liters, 2),
+                    "revenue": round(net_revenue, 2),
                     "unit_cost": unit_cost,
                     "cost": cost,
-                    "margin": round(revenue - cost, 2),
+                    "margin": round(net_revenue - cost, 2),
                 }
             )
     return round(total, 2), detail
@@ -555,7 +642,22 @@ def credit_aging(account, as_of_date):
     Receipts are applied FIFO against the oldest unsettled debit entries
     (the way a shopkeeper actually clears a khata), so what's left is the
     genuinely oldest money still owed. Only meaningful for a positive
-    (owed-to-us) balance; a settled or creditor account ages to nothing."""
+    (owed-to-us) balance; a settled or creditor account ages to nothing.
+
+    CRITICAL INVARIANT: the debit and credit sides built here MUST mirror
+    Account.balance's terms EXACTLY, kind for kind and sign for sign - the
+    buckets this returns have to sum to that same account's .balance (see
+    test_credit_aging_matches_balance_all_kinds() in the scratchpad, which
+    asserts exactly that across every kind at once). This drifted three
+    times before this comment existed - a Phase 1 gap on credit-method
+    SalesReturn, and two Phase 2B gaps on ProductSale/ProductPurchase -
+    each time leaving an aging table that silently disagreed with the
+    balance printed right above it on the Accounts/Statement pages, which
+    is exactly backwards for a feature whose only job is deciding who to
+    chase. Adding any new account-affecting entry type to Account.balance
+    in the future means adding the matching line HERE in the same change,
+    not as a follow-up.
+    """
     debits = []
     if account.opening_balance > 0:
         opening_date = account.opening_balance_date or account.created_at.date()
@@ -566,14 +668,41 @@ def credit_aging(account, as_of_date):
         debits.append({"date": l.entry_date, "amount": l.amount})
     for sp in account.supplier_payments:
         debits.append({"date": sp.entry_date, "amount": sp.amount})
-    debits.sort(key=lambda d: d["date"])
+    for ps in account.product_sales:
+        # account_id is only ever set on a ProductSale for method ==
+        # "credit" (see ProductSale's docstring in models.py) - same
+        # defensive guard account_ledger_events() uses for this backref.
+        if ps.method == "credit":
+            debits.append({"date": ps.entry_date, "amount": ps.amount})
 
     credits_total = (
         sum(r.amount for r in account.receipts)
         + sum((p.cost or 0) for p in account.stock_purchases if p.payment_type == "credit")
         + sum(s.deduction_amount for s in account.salary_payments)
+        # A sales return refunded "on account" (method == "credit")
+        # reduces what this account owes, the same direction as a
+        # receipt - mirrors the identical guard in account_ledger_events().
+        + sum(sr.amount for sr in account.sales_returns if sr.method == "credit")
         + (-account.opening_balance if account.opening_balance < 0 else 0)
     )
+    # ProductPurchase.total_cost can be NEGATIVE (a return to the supplier
+    # or a stock correction posted on credit against this account - see
+    # ProductPurchase's docstring in models.py). A positive total_cost is
+    # a credit here exactly like a fuel purchase's cost above (it reduces
+    # what this account owes), but a negative one flips direction: it
+    # claws back some of that credit, which is really a DEBIT - and it
+    # needs its own date to age correctly, so it goes into the dated
+    # debits list rather than getting netted into credits_total's single
+    # undated figure the way a same-signed sum would.
+    for pp in account.product_purchases:
+        if pp.payment_type != "credit":
+            continue
+        if pp.total_cost >= 0:
+            credits_total += pp.total_cost
+        else:
+            debits.append({"date": pp.entry_date, "amount": -pp.total_cost})
+
+    debits.sort(key=lambda d: d["date"])
 
     # Clear the oldest debits first with everything that's come in.
     remaining = credits_total
@@ -673,6 +802,27 @@ def account_ledger_events(account):
         events.append(
             {"kind": "salary", "entry_date": s.entry_date, "sort_key": (s.entry_date, s.recorded_at), "obj": s, "delta": -s.deduction_amount}
         )
+    for sr in account.sales_returns:
+        # Refunded "on account" reduces what this account owes, the same
+        # direction as a receipt - account_id is only ever set on a
+        # SalesReturn for method == "credit", so this backref never picks
+        # up a cash/bank return by mistake.
+        if sr.method == "credit":
+            events.append(
+                {"kind": "sales_return", "entry_date": sr.entry_date, "sort_key": (sr.entry_date, sr.recorded_at), "obj": sr, "delta": -sr.amount}
+            )
+    for ps in account.product_sales:
+        # account_id is only ever set on a ProductSale for method ==
+        # "credit" - same defensive guard as sales_returns above.
+        if ps.method == "credit":
+            events.append(
+                {"kind": "product_sale", "entry_date": ps.entry_date, "sort_key": (ps.entry_date, ps.recorded_at), "obj": ps, "delta": ps.amount}
+            )
+    for pp in account.product_purchases:
+        if pp.payment_type == "credit":
+            events.append(
+                {"kind": "product_purchase", "entry_date": pp.entry_date, "sort_key": (pp.entry_date, pp.recorded_at), "obj": pp, "delta": -(pp.total_cost or 0)}
+            )
 
     events.sort(key=lambda e: e["sort_key"])
     running = 0.0
@@ -730,6 +880,21 @@ def cash_account_balance(cash_account):
         .filter(SalaryPayment.method == "cash")
         .scalar()
     )
+    total_cash_returns = (
+        db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0))
+        .filter(SalesReturn.method == "cash")
+        .scalar()
+    )
+    total_cash_product_sales = (
+        db.session.query(func.coalesce(func.sum(ProductSale.amount), 0))
+        .filter(ProductSale.method == "cash")
+        .scalar()
+    )
+    total_cash_product_purchases = (
+        db.session.query(func.coalesce(func.sum(ProductPurchase.total_cost), 0))
+        .filter(ProductPurchase.payment_type == "cash", ProductPurchase.method == "cash")
+        .scalar()
+    )
     return round(
         cash_account.opening_balance
         + total_sales
@@ -741,7 +906,10 @@ def cash_account_balance(cash_account):
         - total_cash_expenses
         - total_cash_purchases
         - total_supplier_payments
-        - total_cash_salaries,
+        - total_cash_salaries
+        - total_cash_returns
+        + total_cash_product_sales
+        - total_cash_product_purchases,
         2,
     )
 
@@ -838,6 +1006,26 @@ def _cash_daily_net_changes():
         )
         .filter(SalaryPayment.method == "cash")
         .group_by(SalaryPayment.entry_date)
+        .all(),
+        sign=-1,
+    )
+    add(
+        db.session.query(SalesReturn.entry_date, func.sum(SalesReturn.amount))
+        .filter(SalesReturn.method == "cash")
+        .group_by(SalesReturn.entry_date)
+        .all(),
+        sign=-1,
+    )
+    add(
+        db.session.query(ProductSale.entry_date, func.sum(ProductSale.amount))
+        .filter(ProductSale.method == "cash")
+        .group_by(ProductSale.entry_date)
+        .all()
+    )
+    add(
+        db.session.query(ProductPurchase.entry_date, func.sum(ProductPurchase.total_cost))
+        .filter(ProductPurchase.payment_type == "cash", ProductPurchase.method == "cash")
+        .group_by(ProductPurchase.entry_date)
         .all(),
         sign=-1,
     )
@@ -989,6 +1177,18 @@ def cash_account_ledger_events(cash_account):
         events.append(
             {"kind": "salary", "entry_date": s.entry_date, "sort_key": (s.entry_date, s.recorded_at), "obj": s, "delta": -s.net_paid}
         )
+    for sr in SalesReturn.query.filter_by(method="cash").all():
+        events.append(
+            {"kind": "sales_return", "entry_date": sr.entry_date, "sort_key": (sr.entry_date, sr.recorded_at), "obj": sr, "delta": -sr.amount}
+        )
+    for ps in ProductSale.query.filter_by(method="cash").all():
+        events.append(
+            {"kind": "product_sale", "entry_date": ps.entry_date, "sort_key": (ps.entry_date, ps.recorded_at), "obj": ps, "delta": ps.amount}
+        )
+    for pp in ProductPurchase.query.filter_by(payment_type="cash", method="cash").all():
+        events.append(
+            {"kind": "product_purchase", "entry_date": pp.entry_date, "sort_key": (pp.entry_date, pp.recorded_at), "obj": pp, "delta": -(pp.total_cost or 0)}
+        )
 
     events.sort(key=lambda e: e["sort_key"])
     running = 0.0
@@ -998,6 +1198,262 @@ def cash_account_ledger_events(cash_account):
 
     events.reverse()
     return events
+
+
+# ------------------------------------------------------- product catalogue
+
+def product_rates_on_date(product, entry_date):
+    """The (purchase_rate, retail_rate) actually in effect on entry_date,
+    from ProductRateHistory - not necessarily the product's current cached
+    rates. Falls back to the product's current purchase_rate/retail_rate
+    if no history row applies (e.g. a product that predates rate history
+    being tracked). Mirrors price_on_date() exactly, including its
+    same-day tie-break (the highest id wins when two rows share an
+    effective_date)."""
+    row = (
+        ProductRateHistory.query.filter(
+            ProductRateHistory.product_id == product.id,
+            ProductRateHistory.effective_date <= entry_date,
+        )
+        .order_by(ProductRateHistory.effective_date.desc(), ProductRateHistory.id.desc())
+        .first()
+    )
+    if row:
+        return row.purchase_rate, row.retail_rate
+    return product.purchase_rate, product.retail_rate
+
+
+def record_product_rates(product, purchase_rate, retail_rate, effective_date):
+    """Log a rate change effective as of effective_date, and keep
+    Product.purchase_rate/retail_rate (the "current rate" cache read
+    everywhere that just wants today's rates) pointing at whichever
+    history row is latest as of today - so a same-day change becomes
+    today's rate, and a correction to an older date doesn't make today's
+    rate stale. Mirrors record_fuel_price()."""
+    db.session.add(
+        ProductRateHistory(
+            product_id=product.id,
+            purchase_rate=purchase_rate,
+            retail_rate=retail_rate,
+            effective_date=effective_date,
+        )
+    )
+    db.session.flush()
+    product.purchase_rate, product.retail_rate = product_rates_on_date(product, datetime.now().date())
+
+
+def product_rate_resolver(products=None):
+    """Bulk-loaded equivalent of product_rates_on_date(), for pages that
+    need date-specific rates for MANY rows at once - see price_resolver()'s
+    docstring for why this matters: resolving one product's rate per row
+    with product_rates_on_date() would fire one query per row per product,
+    an N+1 storm this codebase has already been bitten by once.
+
+    Loads every relevant ProductRateHistory row in ONE query, then
+    resolves "latest effective_date <= on_date" with a binary search per
+    lookup instead of a database round trip. Pass the Product objects the
+    caller already has (products) so the fallback rates -
+    Product.purchase_rate/retail_rate, read when no history row applies
+    yet - are available with no extra query either; omitting it loads
+    every product instead.
+
+    Returns resolve(product_or_id, on_date) -> (purchase_rate, retail_rate),
+    matching product_rates_on_date()'s semantics exactly, including its
+    fallback and its same-day tie-break.
+    """
+    if products is not None:
+        products_by_id = {p.id: p for p in products}
+        history_q = ProductRateHistory.query.filter(ProductRateHistory.product_id.in_(products_by_id.keys()))
+    else:
+        products_by_id = {p.id: p for p in Product.query.all()}
+        history_q = ProductRateHistory.query
+
+    # Ascending order within each product - by effective_date, then id so
+    # that same-day rows land with the highest id last, matching
+    # product_rates_on_date()'s "effective_date desc, id desc" tie-break
+    # once we bisect back from the right below.
+    rows = history_q.order_by(
+        ProductRateHistory.product_id, ProductRateHistory.effective_date, ProductRateHistory.id
+    ).all()
+
+    dates_by_product = {}
+    rates_by_product = {}
+    for row in rows:
+        dates_by_product.setdefault(row.product_id, []).append(row.effective_date)
+        rates_by_product.setdefault(row.product_id, []).append((row.purchase_rate, row.retail_rate))
+
+    def resolve(product_or_id, on_date):
+        product_id = product_or_id.id if hasattr(product_or_id, "id") else product_or_id
+        dates = dates_by_product.get(product_id)
+        if dates:
+            idx = bisect.bisect_right(dates, on_date) - 1
+            if idx >= 0:
+                return rates_by_product[product_id][idx]
+        product = products_by_id.get(product_id)
+        if product is None:
+            # Only reachable when products was passed but didn't include
+            # this id - fall back to a direct lookup rather than crashing.
+            product = db.session.get(Product, product_id)
+            products_by_id[product_id] = product
+        return product.purchase_rate, product.retail_rate
+
+    return resolve
+
+
+def product_stock(product, as_of_date):
+    """Book stock for `product` at the END of as_of_date - opening stock
+    plus every purchase minus every sale. Mirrors book_stock()'s
+    three-branch structure EXACTLY (see book_stock() above for the full
+    reasoning - the only difference is there's no separate "returns"
+    table here: a product return is just a negative-quantity
+    ProductPurchase, see its docstring in models.py, so it falls out of
+    the same purchases sum with no special case).
+
+    product.opening_stock is the level at the START of
+    product.opening_stock_date (equivalently, the END of the day before
+    it - see Product in models.py), which splits into the same three
+    cases book_stock() handles:
+
+    - opening_stock_date is None: back-compat/beginning-of-time - sum
+      every purchase and sale up to and including as_of_date.
+    - as_of_date >= opening_stock_date (FORWARD): sum purchases/sales from
+      opening_stock_date through as_of_date, inclusive on both ends.
+    - as_of_date < opening_stock_date (BACKWARD): there's no ledger
+      history before the baseline to sum forward from, so instead undo
+      everything strictly between the two dates. Stock only ever moves by
+      purchase in and sale out, so running it backwards is valid
+      arithmetic - this is what makes "count stock today, then backfill
+      last month" come out correct.
+    """
+    if product.opening_stock_date is None:
+        purchased = (
+            db.session.query(func.coalesce(func.sum(ProductPurchase.quantity), 0))
+            .filter(ProductPurchase.product_id == product.id, ProductPurchase.entry_date <= as_of_date)
+            .scalar()
+        )
+        sold = (
+            db.session.query(func.coalesce(func.sum(ProductSale.quantity), 0))
+            .filter(ProductSale.product_id == product.id, ProductSale.entry_date <= as_of_date)
+            .scalar()
+        )
+        return round(product.opening_stock + purchased - sold, 2)
+
+    if as_of_date >= product.opening_stock_date:
+        purchased = (
+            db.session.query(func.coalesce(func.sum(ProductPurchase.quantity), 0))
+            .filter(
+                ProductPurchase.product_id == product.id,
+                ProductPurchase.entry_date >= product.opening_stock_date,
+                ProductPurchase.entry_date <= as_of_date,
+            )
+            .scalar()
+        )
+        sold = (
+            db.session.query(func.coalesce(func.sum(ProductSale.quantity), 0))
+            .filter(
+                ProductSale.product_id == product.id,
+                ProductSale.entry_date >= product.opening_stock_date,
+                ProductSale.entry_date <= as_of_date,
+            )
+            .scalar()
+        )
+        return round(product.opening_stock + purchased - sold, 2)
+
+    # BACKWARD: as_of_date < opening_stock_date - undo the entries
+    # strictly between the two dates instead of summing forward.
+    purchased = (
+        db.session.query(func.coalesce(func.sum(ProductPurchase.quantity), 0))
+        .filter(
+            ProductPurchase.product_id == product.id,
+            ProductPurchase.entry_date > as_of_date,
+            ProductPurchase.entry_date < product.opening_stock_date,
+        )
+        .scalar()
+    )
+    sold = (
+        db.session.query(func.coalesce(func.sum(ProductSale.quantity), 0))
+        .filter(
+            ProductSale.product_id == product.id,
+            ProductSale.entry_date > as_of_date,
+            ProductSale.entry_date < product.opening_stock_date,
+        )
+        .scalar()
+    )
+    return round(product.opening_stock - purchased + sold, 2)
+
+
+def product_stock_summary(as_of_date, products=None):
+    """Per-product stock summary as of as_of_date: opening stock,
+    received, sold, and on-hand stock - one row per product. Defaults to
+    every ACTIVE product (alphabetical) when products isn't given; pass
+    an explicit list (e.g. including inactive ones) to override that.
+
+    Computed with two GROUPED queries (purchases-by-product-and-date,
+    sales-by-product-and-date) instead of calling product_stock() once per
+    product, which would be 2 extra queries per product - an N+1 this
+    codebase treats as a bug rather than a style nit (see
+    product_rate_resolver()'s docstring for the same argument applied to
+    rates). "on_hand" for each product is computed with exactly the same
+    forward/backward window product_stock() would use for that product's
+    own opening_stock_date, so the two MUST always agree - this is
+    asserted in tests rather than just hoped for.
+    """
+    if products is None:
+        products = Product.query.filter_by(is_active=True).order_by(Product.name).all()
+    if not products:
+        return []
+
+    ids = [p.id for p in products]
+
+    purchase_rows = (
+        db.session.query(ProductPurchase.product_id, ProductPurchase.entry_date, func.sum(ProductPurchase.quantity))
+        .filter(ProductPurchase.product_id.in_(ids))
+        .group_by(ProductPurchase.product_id, ProductPurchase.entry_date)
+        .all()
+    )
+    sale_rows = (
+        db.session.query(ProductSale.product_id, ProductSale.entry_date, func.sum(ProductSale.quantity))
+        .filter(ProductSale.product_id.in_(ids))
+        .group_by(ProductSale.product_id, ProductSale.entry_date)
+        .all()
+    )
+
+    purchases_by_product = {}
+    for pid, d, qty in purchase_rows:
+        purchases_by_product.setdefault(pid, []).append((d, qty))
+    sales_by_product = {}
+    for pid, d, qty in sale_rows:
+        sales_by_product.setdefault(pid, []).append((d, qty))
+
+    summary = []
+    for p in products:
+        purchases = purchases_by_product.get(p.id, [])
+        sales = sales_by_product.get(p.id, [])
+
+        if p.opening_stock_date is None or as_of_date >= p.opening_stock_date:
+            lower = p.opening_stock_date  # None means no lower bound - mirrors product_stock()'s back-compat branch
+            received = sum(qty for d, qty in purchases if (lower is None or d >= lower) and d <= as_of_date)
+            sold = sum(qty for d, qty in sales if (lower is None or d >= lower) and d <= as_of_date)
+            on_hand = p.opening_stock + received - sold
+        else:
+            # BACKWARD - undo entries strictly between as_of_date and
+            # opening_stock_date, same as product_stock()'s BACKWARD branch.
+            received = sum(qty for d, qty in purchases if as_of_date < d < p.opening_stock_date)
+            sold = sum(qty for d, qty in sales if as_of_date < d < p.opening_stock_date)
+            on_hand = p.opening_stock - received + sold
+
+        on_hand = round(on_hand, 2)
+        summary.append(
+            {
+                "product": p,
+                "opening": p.opening_stock,
+                "received": round(received, 2),
+                "sold": round(sold, 2),
+                "on_hand": on_hand,
+                "is_low": on_hand <= p.low_stock_threshold,
+            }
+        )
+    return summary
 
 
 def bank_account_ledger_events(bank_account):
@@ -1050,6 +1506,24 @@ def bank_account_ledger_events(bank_account):
         events.append(
             {"kind": "salary", "entry_date": s.entry_date, "sort_key": (s.entry_date, s.recorded_at), "obj": s, "delta": -s.net_paid}
         )
+    for sr in bank_account.sales_returns:
+        # bank_account_id is only ever set on a SalesReturn for
+        # method == "bank", so this backref never picks up a cash/credit
+        # return by mistake.
+        if sr.method == "bank":
+            events.append(
+                {"kind": "sales_return", "entry_date": sr.entry_date, "sort_key": (sr.entry_date, sr.recorded_at), "obj": sr, "delta": -sr.amount}
+            )
+    for ps in bank_account.product_sales:
+        if ps.method == "bank":
+            events.append(
+                {"kind": "product_sale", "entry_date": ps.entry_date, "sort_key": (ps.entry_date, ps.recorded_at), "obj": ps, "delta": ps.amount}
+            )
+    for pp in bank_account.product_purchases:
+        if pp.payment_type == "cash":
+            events.append(
+                {"kind": "product_purchase", "entry_date": pp.entry_date, "sort_key": (pp.entry_date, pp.recorded_at), "obj": pp, "delta": -(pp.total_cost or 0)}
+            )
 
     events.sort(key=lambda e: e["sort_key"])
     running = 0.0
@@ -1059,3 +1533,67 @@ def bank_account_ledger_events(bank_account):
 
     events.reverse()
     return events
+
+
+def product_margin_for_period(start, end):
+    """Dealer commission earned on non-fuel products (lubricants, filters,
+    shop items) sold between start and end.
+
+    Unlike cogs_for_period() - which has to value fuel SOLD at a weighted
+    average of every purchase invoice, because liters pooled in a tank are
+    fungible and any one liter sold can't be traced to one delivery - this
+    is EXACT, no weighted average involved at all. Every ProductSale row
+    already carries its own purchase_rate, snapshotted at the moment of
+    sale (see ProductSale's docstring in models.py), so a line's cost is
+    just quantity x that row's own rate. There's no "as of end date" cost
+    lookup here the way weighted_avg_cost() needs one - the rate a sale
+    locked in at the time is the number that counts, forever, regardless
+    of where rates move to afterwards (see product_margin exactness in the
+    Phase 2B acceptance tests).
+
+    Returns (total_revenue, total_cost, total_commission,
+    detail_by_category) - detail_by_category has one row per category
+    (lubricant/filter/shop/other) that had at least one unit sold in the
+    period, each with quantity/revenue/cost/margin, computed with ONE
+    grouped query (join + group by category) rather than a per-product
+    loop - see product_rate_resolver()'s docstring for why that matters on
+    a ~95-SKU catalogue.
+    """
+    qty_expr = func.coalesce(func.sum(ProductSale.quantity), 0)
+    revenue_expr = func.coalesce(func.sum(ProductSale.amount), 0)
+    cost_expr = func.coalesce(func.sum(ProductSale.quantity * ProductSale.purchase_rate), 0)
+
+    rows = (
+        db.session.query(Product.category, qty_expr, revenue_expr, cost_expr)
+        .select_from(ProductSale)
+        .join(Product, ProductSale.product_id == Product.id)
+        .filter(ProductSale.entry_date >= start, ProductSale.entry_date <= end)
+        .group_by(Product.category)
+        .all()
+    )
+
+    detail = []
+    total_revenue = 0.0
+    total_cost = 0.0
+    for category, quantity, revenue, cost in rows:
+        if not quantity:
+            continue
+        revenue = round(float(revenue), 2)
+        cost = round(float(cost), 2)
+        total_revenue += revenue
+        total_cost += cost
+        detail.append(
+            {
+                "category": category,
+                "quantity": round(quantity, 2),
+                "revenue": revenue,
+                "cost": cost,
+                "margin": round(revenue - cost, 2),
+            }
+        )
+    detail.sort(key=lambda d: d["category"])
+
+    total_revenue = round(total_revenue, 2)
+    total_cost = round(total_cost, 2)
+    total_commission = round(total_revenue - total_cost, 2)
+    return total_revenue, total_cost, total_commission, detail

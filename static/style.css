@@ -671,7 +671,7 @@ button { cursor: pointer; font-weight: 600; border: none; }
 
 .nozzle-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1.1fr) minmax(100px, 130px) 110px 1.3fr;
+  grid-template-columns: minmax(120px, 1.1fr) minmax(100px, 130px) 110px 90px 1.3fr;
   gap: var(--s3);
   align-items: center;
   padding: var(--s2) var(--s3);
@@ -697,6 +697,7 @@ button { cursor: pointer; font-weight: 600; border: none; }
   border-color: var(--warn-border);
   background: var(--warn-soft);
 }
+.nozzle-row .nz-testing { font-size: 0.78rem; color: var(--muted); gap: 3px; }
 
 .calc-preview {
   font-size: 0.78rem;
