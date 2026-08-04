@@ -80,7 +80,20 @@ class Tank(db.Model):
     Stock is never stored as a mutable counter here - it's always
     calculated from starting_stock_liters + purchases - sales, filtered to
     a date, so backfilling or editing a past ledger entry can never leave
-    stock out of sync (see book_stock() in app.py).
+    stock out of sync (see book_stock() in ledger_logic.py).
+
+    starting_stock_liters is the level at the START of starting_stock_date
+    (equivalently, the end of the day before it) - not "since the
+    beginning of time". This mirrors Account/BankAccount/CashAccount's
+    opening_balance + opening_balance_date pattern, so a tank set up with
+    today's physical stock can still be backfilled with months of older
+    purchases/sales without every historical figure double-counting them.
+
+    starting_stock_date NULL means "treat as the beginning of time" - the
+    same meaning an unset date carries for those other opening balances,
+    and exactly the behaviour this column didn't used to have a choice
+    about, so existing installations (every tank created before this
+    column existed) are unaffected.
     """
 
     id = db.Column(db.Integer, primary_key=True)
@@ -88,6 +101,7 @@ class Tank(db.Model):
     fuel_type_id = db.Column(db.Integer, db.ForeignKey("fuel_type.id"), nullable=False)
     capacity_liters = db.Column(db.Float, nullable=False)
     starting_stock_liters = db.Column(db.Float, nullable=False, default=0)
+    starting_stock_date = db.Column(db.Date, nullable=True)
     low_stock_threshold = db.Column(db.Float, nullable=False, default=0)
 
     fuel_type = db.relationship("FuelType")

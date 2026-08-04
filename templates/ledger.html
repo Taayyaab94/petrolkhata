@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Petrol Khata - Ledger{% endblock %}
 {% block content %}
+{% set ledger_next = url_for('ledger', date=selected_date.isoformat(), shift=selected_shift.id) if selected_shift else url_for('ledger', date=selected_date.isoformat()) %}
 <div class="page-head">
   <div>
     <h1>Ledger</h1>
@@ -620,6 +621,14 @@
             <button type="submit" class="btn btn-sm btn-ghost">Write off Rs {{ "%.2f"|format(-row.variance) }} shortfall as expense</button>
           </form>
           {% endif %}
+          {% if current_user.is_owner and row.handover %}
+          <form method="post" action="{{ url_for('entry_delete', kind='handover', entry_id=row.handover.id) }}" style="margin-top:10px;"
+                onsubmit="return confirm('Delete the recorded cash handover for {{ row.shift.name }}? This removes the reconciliation record - it does not change any sales.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="next" value="{{ ledger_next }}">
+            <button type="submit" class="btn btn-sm btn-danger">Delete Handover</button>
+          </form>
+          {% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -677,6 +686,20 @@
   <div class="panel-head"><h3>Entries for {{ selected_date.strftime("%d %b %Y") }}</h3></div>
   <div class="feed-list">
     {% for e in feed %}
+    {% set delete_kind, delete_label = {
+      "sale": ("sale", "this nozzle reading"),
+      "receipt": ("receipt", "this receipt"),
+      "credit": ("credit", "this credit entry"),
+      "expense": ("expense", "this expense"),
+      "purchase": ("purchase", "this fuel purchase"),
+      "supplier_payment": ("supplier-payment", "this supplier payment"),
+      "bank_sale": ("bank-sale", "this bank sale"),
+      "cash_deposit": ("cash-deposit", "this cash deposit"),
+      "employee_loan": ("employee-loan", "this loan/advance"),
+      "dip": ("dip", "this dip reading"),
+      "handover": ("handover", "this cash handover"),
+      "salary": ("salary", "this salary payment"),
+    }[e.kind] %}
     <div class="feed-item">
       <div class="feed-time">{{ e.sort.strftime("%H:%M") }}</div>
       {% if e.kind == "sale" %}
@@ -727,6 +750,14 @@
       <div class="feed-desc"><strong>Salary to {{ e.obj.account.name }}</strong><span>{% if e.obj.period_label %}{{ e.obj.period_label }} &middot; {% endif %}{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.deduction_amount %} &middot; Rs {{ "%.2f"|format(e.obj.deduction_amount) }} deducted{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Salary</span>
       <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.net_paid) }}</div>
+      {% endif %}
+      {% if current_user.is_owner %}
+      <form method="post" action="{{ url_for('entry_delete', kind=delete_kind, entry_id=e.obj.id) }}"
+            onsubmit="return confirm('Delete {{ delete_label }}? This cannot be undone.');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="next" value="{{ ledger_next }}">
+        <button type="submit" class="feed-delete">Delete</button>
+      </form>
       {% endif %}
     </div>
     {% else %}

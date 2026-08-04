@@ -9,6 +9,13 @@
   <div>
     <a href="{{ url_for('account_detail', account_id=account.id) }}" class="btn btn-ghost btn-sm">&larr; Back to account</a>
     <button type="button" class="btn btn-sm" onclick="window.print()">Print / Save PDF</button>
+    <div class="export-menu">
+      <button type="button" class="btn btn-ghost btn-sm export-toggle" aria-expanded="false">Export</button>
+      <div class="export-menu-items" hidden>
+        <a href="{{ url_for('account_statement_export', account_id=account.id, format='pdf', from=from_date.isoformat(), to=to_date.isoformat()) }}">PDF</a>
+        <a href="{{ url_for('account_statement_export', account_id=account.id, format='xlsx', from=from_date.isoformat(), to=to_date.isoformat()) }}">Excel</a>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -113,4 +120,35 @@
   {% endif %}
   {% endif %}
 </div>
+
+<script>
+// Export menu: click the toggle to show/hide its PDF/Excel links, click
+// anywhere else (or press Escape) to close whatever's open. Same minimal
+// snippet repeated on every page with an export menu.
+(function () {
+  function closeExportMenus() {
+    document.querySelectorAll('.export-menu-items').forEach(function (menu) {
+      menu.hidden = true;
+      var btn = menu.previousElementSibling;
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+    });
+  }
+  document.querySelectorAll('.export-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var menu = btn.nextElementSibling;
+      var wasHidden = menu.hidden;
+      closeExportMenus();
+      if (wasHidden) {
+        menu.hidden = false;
+        btn.setAttribute('aria-expanded', 'true');
+      }
+    });
+  });
+  document.addEventListener('click', closeExportMenus);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeExportMenus();
+  });
+})();
+</script>
 {% endblock %}

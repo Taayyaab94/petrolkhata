@@ -92,6 +92,7 @@
         {% endif %}
       </tr>
       {% if current_user.is_owner and e.kind in ("expense", "fuel_purchase") %}
+      {% set delete_kind = "expense" if e.kind == "expense" else "purchase" %}
       <tr class="edit-row" style="display:none;">
         <td colspan="7">
           {% if e.kind == "expense" %}
@@ -155,6 +156,12 @@
             <button type="submit" class="btn btn-sm">Save</button>
           </form>
           {% endif %}
+          <form method="post" action="{{ url_for('entry_delete', kind=delete_kind, entry_id=e.obj.id) }}" style="margin-top:10px;"
+                onsubmit="return confirm('Delete this entry? This cannot be undone.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="next" value="{{ url_for('cash_account_detail') }}">
+            <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+          </form>
         </td>
       </tr>
       {% endif %}

@@ -1,6 +1,7 @@
 import csv
 import io
 import os
+import re
 import secrets
 import zipfile
 from datetime import date, datetime, timedelta
@@ -30,6 +31,7 @@ from sqlalchemy import func, inspect
 from sqlalchemy.exc import IntegrityError
 
 import charts
+from exports import build_pdf, build_xlsx
 from extensions import db, login_manager, migrate
 from ledger_logic import (
     account_ledger_events,
@@ -43,6 +45,7 @@ from ledger_logic import (
     cogs_for_period,
     credit_aging,
     default_shift,
+    first_negative_cash_date,
     fuel_sales_for_date,
     handover_rows_for_date,
     latest_reset_for,
@@ -165,6 +168,30 @@ def parse_date_param(raw, fallback=None):
     return fallback or date.today()
 
 
+def parse_stock_date(raw):
+    """Parse a tank's starting-stock as-of date. Unlike parse_date_param,
+    this can't silently fall back to today - a wrong physical-stock date
+    corrupts every backward/forward book_stock() calculation for that
+    tank, so a malformed or future date has to be rejected rather than
+    guessed at.
+
+    Returns (date_or_None, error) - blank input parses to (None, None),
+    meaning "no baseline date" (the caller decides whether that means
+    "default to today" or "clear it to NULL"). error is None on success,
+    else "invalid" or "future" for the caller to turn into a
+    field-specific flash message."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None, None
+    try:
+        parsed = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return None, "invalid"
+    if parsed > date.today():
+        return None, "future"
+    return parsed, None
+
+
 def setup_is_complete():
     return Dispenser.query.count() > 0
 
@@ -207,6 +234,42 @@ def cash_shortfall_message(entry_date):
         f"Not enough cash in hand on {entry_date} for this (at most "
         f"Rs {max_cash_available_on(entry_date):,.2f} is available then without going negative later)."
     )
+
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _resolve_export_format():
+    """?format=pdf|xlsx on every export route, defaulting to pdf. Anything
+    else falls back to pdf with a flash rather than a hard 400 - a stray
+    or stale query string shouldn't dead-end someone trying to get a
+    report out."""
+    fmt = request.args.get("format", "pdf")
+    if fmt not in ("pdf", "xlsx"):
+        flash(f'Unrecognized export format "{fmt}" - showing a PDF instead.', "error")
+        return "pdf"
+    return fmt
+
+
+def _send_export(fmt, pdf_title, pdf_subtitle, xlsx_sheet_name, blocks, filename_base):
+    """Shared tail end of every export route once its blocks are built."""
+    if fmt == "xlsx":
+        buffer = build_xlsx([{"name": xlsx_sheet_name, "blocks": blocks}])
+        return send_file(
+            buffer, mimetype=XLSX_MIME, as_attachment=True, download_name=f"{filename_base}.xlsx"
+        )
+    buffer = build_pdf(pdf_title, pdf_subtitle, blocks)
+    return send_file(
+        buffer, mimetype="application/pdf", as_attachment=True, download_name=f"{filename_base}.pdf"
+    )
+
+
+def slugify(text):
+    """Lowercase, hyphenated, filesystem/URL-safe version of text - used
+    for download filenames (e.g. an account's name) that might otherwise
+    contain spaces or punctuation."""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug or "account"
 
 
 @app.before_request
@@ -306,6 +369,7 @@ def setup_tanks():
             fuel_name = request.form.get(f"fuel_name_{i}", "").strip()
             capacity = request.form.get(f"capacity_{i}", type=float)
             stock = request.form.get(f"stock_{i}", type=float)
+            raw_stock_date = request.form.get(f"stock_date_{i}", "").strip()
             if not fuel_name:
                 error = f"Tank {i + 1}: please enter a fuel name."
                 break
@@ -318,7 +382,24 @@ def setup_tanks():
             if stock > capacity:
                 error = f"Tank {i + 1}: current stock can't exceed capacity."
                 break
-            tanks.append({"fuel_name": fuel_name, "capacity": capacity, "stock": stock})
+            stock_date, date_error = parse_stock_date(raw_stock_date)
+            if date_error == "invalid":
+                error = f"Tank {i + 1}: please enter a valid stock date."
+                break
+            if date_error == "future":
+                error = f"Tank {i + 1}: stock date can't be in the future."
+                break
+            stock_date = stock_date or date.today()
+            # Stored as an ISO string, not a date - the session is JSON-serialised
+            # into a cookie between setup steps, and a date object won't survive that.
+            tanks.append(
+                {
+                    "fuel_name": fuel_name,
+                    "capacity": capacity,
+                    "stock": stock,
+                    "stock_date": stock_date.isoformat(),
+                }
+            )
 
         if not tanks and not error:
             error = "Please add at least one tank."
@@ -329,7 +410,7 @@ def setup_tanks():
             session["setup"] = {"tanks": tanks}
             return redirect(url_for("setup_prices"))
 
-    return render_template("setup_tanks.html")
+    return render_template("setup_tanks.html", today=date.today())
 
 
 @app.route("/setup/prices", methods=["GET", "POST"])
@@ -426,11 +507,18 @@ def setup_dispensers():
 
             created_tanks = []
             for i, t in enumerate(setup["tanks"]):
+                # stock_date was serialised to an ISO string for the session
+                # cookie (see setup_tanks()) - parse it back to a date here.
+                raw_stock_date = t.get("stock_date")
+                stock_date = (
+                    datetime.strptime(raw_stock_date, "%Y-%m-%d").date() if raw_stock_date else None
+                )
                 tank = Tank(
                     number=i + 1,
                     fuel_type_id=fuel_type_by_name[t["fuel_name"].lower()].id,
                     capacity_liters=t["capacity"],
                     starting_stock_liters=t["stock"],
+                    starting_stock_date=stock_date,
                     low_stock_threshold=round(t["capacity"] * 0.1, 2),
                 )
                 db.session.add(tank)
@@ -565,6 +653,7 @@ def settings_add_tank():
     fuel_name = request.form.get("fuel_name", "").strip()
     capacity = request.form.get("capacity", type=float)
     stock = request.form.get("stock", type=float)
+    stock_date, date_error = parse_stock_date(request.form.get("stock_date", ""))
 
     if not fuel_name:
         flash("Please enter a fuel name.", "error")
@@ -572,6 +661,10 @@ def settings_add_tank():
         flash("Please enter a valid capacity.", "error")
     elif stock is None or stock < 0 or stock > capacity:
         flash("Please enter a valid starting stock (not more than capacity).", "error")
+    elif date_error == "invalid":
+        flash("Please enter a valid stock date.", "error")
+    elif date_error == "future":
+        flash("Stock date can't be in the future.", "error")
     else:
         fuel_type = FuelType.query.filter(func.lower(FuelType.name) == fuel_name.lower()).first()
         if not fuel_type:
@@ -589,6 +682,7 @@ def settings_add_tank():
                 fuel_type_id=fuel_type.id,
                 capacity_liters=capacity,
                 starting_stock_liters=stock,
+                starting_stock_date=stock_date or date.today(),
                 low_stock_threshold=round(capacity * 0.1, 2),
             )
         )
@@ -605,14 +699,28 @@ def settings_edit_tank(tank_id):
     tank = db.session.get(Tank, tank_id) or abort(404)
     capacity = request.form.get("capacity", type=float)
     threshold = request.form.get("threshold", type=float)
+    stock = request.form.get("stock", type=float)
+    stock_date, date_error = parse_stock_date(request.form.get("stock_date", ""))
 
     if not capacity or capacity <= 0:
         flash("Please enter a valid capacity.", "error")
     elif threshold is None or threshold < 0:
         flash("Please enter a valid low-stock alert level.", "error")
+    elif stock is None or stock < 0 or stock > capacity:
+        flash("Please enter a valid starting stock (not more than capacity).", "error")
+    elif date_error == "invalid":
+        flash("Please enter a valid stock date.", "error")
+    elif date_error == "future":
+        flash("Stock date can't be in the future.", "error")
     else:
         tank.capacity_liters = capacity
         tank.low_stock_threshold = threshold
+        tank.starting_stock_liters = stock
+        # A blank date clears the baseline to NULL, i.e. "beginning of
+        # time" - the same fallback every tank had before this column
+        # existed, and the escape hatch for "I don't actually know when
+        # this figure was measured".
+        tank.starting_stock_date = stock_date
         db.session.commit()
         flash(f"Updated Tank {tank.number}.", "success")
 
@@ -2107,6 +2215,82 @@ def ledger_employee_loan():
     return redirect(url_for("ledger", date=entry_date))
 
 
+# Every entry kind that can be deleted, keyed by the URL segment used in
+# entry_delete() below - one generic route instead of twelve near-identical
+# ones. Adding a new deletable kind later is just one more line here.
+DELETABLE_ENTRIES = {
+    "sale": (Sale, "nozzle reading"),
+    "dip": (TankDip, "dip reading"),
+    "handover": (CashHandover, "cash handover"),
+    "credit": (CreditGiven, "credit entry"),
+    "receipt": (Receipt, "receipt"),
+    "purchase": (StockPurchase, "fuel purchase"),
+    "supplier-payment": (SupplierPayment, "supplier payment"),
+    "employee-loan": (EmployeeLoan, "loan/advance"),
+    "salary": (SalaryPayment, "salary payment"),
+    "bank-sale": (BankSale, "bank sale"),
+    "cash-deposit": (CashDeposit, "cash deposit"),
+    "expense": (Expense, "expense"),
+}
+
+
+@app.route("/entry/<kind>/<int:entry_id>/delete", methods=["POST"])
+@login_required
+@owner_required
+def entry_delete(kind, entry_id):
+    """Delete any single ledger row, from whichever page linked here (via
+    the hidden "next" field) - the two months of paper records about to be
+    transcribed will inevitably produce a few mis-slotted entries that
+    editing alone can't fix.
+
+    Deliberately does NOT block on either of the two ways a delete can
+    ripple: a deleted Sale breaks the meter-reading chain for whatever
+    comes after it, and any deleted entry can leave a LATER day's
+    cash-in-hand negative. Refusing the delete in either case would trap
+    the user with the bad entry still on file - instead both are surfaced
+    as flashes after the fact, the same way a gap or a variance is
+    surfaced elsewhere rather than prevented.
+    """
+    model_label = DELETABLE_ENTRIES.get(kind)
+    if not model_label:
+        abort(404)
+    model, label = model_label
+    entry = db.session.get(model, entry_id) or abort(404)
+    next_url = request.form.get("next") or url_for("ledger")
+
+    # Read what's needed for the post-delete Sale flash now - once the row
+    # is committed as deleted, the ORM instance's attributes are no longer
+    # safe to read (SQLAlchemy expires them on commit).
+    sale_gap_info = (entry.entry_date, entry.nozzle.label) if kind == "sale" else None
+
+    db.session.delete(entry)
+    db.session.commit()
+    flash(f"Deleted {label}.", "success")
+
+    if sale_gap_info:
+        gap_date, nozzle_label = sale_gap_info
+        # The next reading for this nozzle - if one already exists after
+        # this slot - just fell back to "no entry for the day before",
+        # exactly like any other gap in the chain; nothing to fix
+        # automatically, just worth knowing about.
+        flash(
+            f"Removed the {gap_date} reading for {nozzle_label} - the next "
+            "recorded reading for this nozzle may need its previous "
+            "reading re-entered by hand.",
+            "info",
+        )
+
+    bad_date = first_negative_cash_date()
+    if bad_date:
+        flash(
+            f"Heads up: cash in hand is now negative on {bad_date} - you "
+            "may need to correct or remove entries on or after that date.",
+            "error",
+        )
+
+    return redirect(next_url)
+
+
 # ------------------------------------------------------------ dashboard ---
 
 @app.route("/dashboard")
@@ -2211,11 +2395,10 @@ def inventory():
 ACCOUNT_TYPES = ("customer", "supplier", "employee")
 
 
-@app.route("/accounts")
-@login_required
-def accounts():
-    kind = request.args.get("kind", "all")
-    type_filter = request.args.get("type", "all")
+def _accounts_context(kind, type_filter):
+    """Shared by the Accounts page and its PDF/Excel export, so the two
+    can never quietly drift apart - same filters, same rows, same aging
+    totals, just rendered differently."""
     if type_filter in ("bank", "cash"):
         # Debtor/creditor is a concept that only applies to customer/
         # supplier/employee accounts - bank accounts and cash-in-hand are
@@ -2280,16 +2463,85 @@ def accounts():
             for bucket, value in r["aging"]["buckets"].items():
                 aging_totals[bucket] = round(aging_totals[bucket] + value, 2)
 
-    return render_template(
-        "accounts.html",
-        rows=rows,
-        kind=kind,
-        type_filter=type_filter,
-        today=date.today(),
-        expenses=expenses,
-        bank_accounts=bank_accounts,
-        aging_totals=aging_totals,
-        aging_total=round(sum(aging_totals.values()), 2),
+    return {
+        "rows": rows,
+        "kind": kind,
+        "type_filter": type_filter,
+        "expenses": expenses,
+        "bank_accounts": bank_accounts,
+        "aging_totals": aging_totals,
+        "aging_total": round(sum(aging_totals.values()), 2),
+    }
+
+
+@app.route("/accounts")
+@login_required
+def accounts():
+    kind = request.args.get("kind", "all")
+    type_filter = request.args.get("type", "all")
+    ctx = _accounts_context(kind, type_filter)
+    return render_template("accounts.html", today=date.today(), **ctx)
+
+
+@app.route("/accounts/export")
+@login_required
+def accounts_export():
+    """Mirrors accounts() - same kind/type filters, same rows and aging
+    totals - as either a PDF or an Excel workbook. Available to staff too,
+    matching the page itself (owner-only content there is limited to the
+    Expenses/Add-account panels, which this export doesn't include)."""
+    fmt = _resolve_export_format()
+    kind = request.args.get("kind", "all")
+    type_filter = request.args.get("type", "all")
+    ctx = _accounts_context(kind, type_filter)
+
+    def oldest_label(row):
+        aging = row.get("aging")
+        if aging and aging.get("oldest_days") is not None:
+            return f"{aging['oldest_days']} days"
+        return "-"
+
+    table_rows = []
+    for r in ctx["rows"]:
+        type_label = {"bank": "Bank Account", "cash": "Cash"}.get(r["kind"]) or r["obj"].account_type.capitalize()
+        phone = (r["obj"].phone or "-") if r["kind"] == "account" else "-"
+        table_rows.append([r["name"], type_label, phone, r["balance"], oldest_label(r)])
+
+    blocks = [
+        {
+            "type": "table",
+            "heading": "Accounts",
+            "columns": ["Name", "Type", "Phone", "Balance (Rs)", "Oldest Unpaid"],
+            "rows": table_rows,
+            "align": ["left", "left", "left", "right", "left"],
+        },
+        {"type": "note", "text": "How old is the money owed to you - across every account with a positive balance."},
+        {
+            "type": "summary",
+            "rows": [
+                ("0-30 days (Rs)", ctx["aging_totals"]["0-30"]),
+                ("31-60 days (Rs)", ctx["aging_totals"]["31-60"]),
+                ("61-90 days (Rs)", ctx["aging_totals"]["61-90"]),
+                ("Over 90 days (Rs)", ctx["aging_totals"]["90+"]),
+                ("Total Owed To You (Rs)", ctx["aging_total"]),
+            ],
+        },
+    ]
+
+    filter_bits = []
+    if kind != "all":
+        filter_bits.append(kind)
+    if type_filter != "all":
+        filter_bits.append(type_filter)
+    subtitle = f"As of {date.today().isoformat()}" + (f" - {' / '.join(filter_bits)}" if filter_bits else "")
+
+    return _send_export(
+        fmt,
+        pdf_title="Accounts",
+        pdf_subtitle=subtitle,
+        xlsx_sheet_name="Accounts",
+        blocks=blocks,
+        filename_base=f"petrol-khata-accounts-{date.today().isoformat()}",
     )
 
 
@@ -2625,33 +2877,162 @@ def account_entry_salary_edit(entry_id):
     return redirect(next_url)
 
 
+def _account_statement_context(account, from_date, to_date):
+    """The balance carried into a date range, every entry inside it, and
+    the closing balance - all derived from the same account_ledger_events()
+    the account detail page uses. Shared by the Statement page and its
+    PDF/Excel export."""
+    all_events = list(reversed(account_ledger_events(account)))  # oldest first
+    before = [e for e in all_events if e["entry_date"] < from_date]
+    inside = [e for e in all_events if from_date <= e["entry_date"] <= to_date]
+    # sum() starts from 0.0, not the default 0 - a brand-new account (or a
+    # range with nothing before it) would otherwise leave `opening` as a
+    # bare int, which the PDF/Excel export would then render as "0"
+    # instead of "0.00" alongside every other money figure.
+    opening = round(sum((e["delta"] for e in before), 0.0), 2)
+
+    return {
+        "opening": opening,
+        "events": inside,
+        "closing": inside[-1]["running_balance"] if inside else opening,
+        "aging": credit_aging(account, to_date),
+    }
+
+
 @app.route("/accounts/<int:account_id>/statement")
 @login_required
 def account_statement(account_id):
     """A print-friendly statement for a date range - the thing you actually
-    hand or send to a credit customer. Shows the balance carried into the
-    range, every entry inside it, and the closing balance, all derived from
-    the same account_ledger_events() the detail page uses."""
+    hand or send to a credit customer."""
     account = db.session.get(Account, account_id) or abort(404)
     today = date.today()
     from_date = parse_date_param(request.args.get("from"), fallback=today.replace(day=1))
     to_date = parse_date_param(request.args.get("to"), fallback=today)
-
-    all_events = list(reversed(account_ledger_events(account)))  # oldest first
-    before = [e for e in all_events if e["entry_date"] < from_date]
-    inside = [e for e in all_events if from_date <= e["entry_date"] <= to_date]
-    opening = round(sum(e["delta"] for e in before), 2)
+    ctx = _account_statement_context(account, from_date, to_date)
 
     return render_template(
         "account_statement.html",
         account=account,
         from_date=from_date,
         to_date=to_date,
-        opening=opening,
-        events=inside,
-        closing=inside[-1]["running_balance"] if inside else opening,
-        aging=credit_aging(account, to_date),
         today=today,
+        **ctx,
+    )
+
+
+_STATEMENT_KIND_LABELS = {
+    "opening": "Opening Balance",
+    "credit": "Fuel on Credit",
+    "receipt": "Payment Received",
+    "purchase": "Purchase (Credit)",
+    "supplier_payment": "Payment Made",
+    "employee_loan": "Loan / Advance",
+    "salary": "Salary",
+}
+
+
+def _statement_event_details(e):
+    """Same "Details" column text the account_statement.html table shows
+    for one event, reused so the export doesn't drift from the page."""
+    obj = e["obj"]
+    if e["kind"] == "credit":
+        bits = [f"{obj.liters:.2f} L {obj.fuel_type.name}"]
+        if obj.vehicle_number:
+            bits.append(obj.vehicle_number)
+        if obj.note:
+            bits.append(obj.note)
+        return " - ".join(bits)
+    if e["kind"] == "purchase":
+        bits = [f"{obj.liters:.2f} L {obj.tank.label}"]
+        if obj.note:
+            bits.append(obj.note)
+        return " - ".join(bits)
+    if e["kind"] == "salary":
+        text = obj.period_label or "Salary"
+        if obj.deduction_amount:
+            text += f" - Rs {obj.deduction_amount:,.2f} deducted against advance"
+        return text
+    if obj is not None:
+        text = f"Via {obj.bank_account.name}" if obj.method == "bank" else "Cash"
+        if obj.note:
+            text += f" - {obj.note}"
+        return text
+    return "-"
+
+
+@app.route("/accounts/<int:account_id>/statement/export")
+@login_required
+def account_statement_export(account_id):
+    """Mirrors account_statement() - same account, same date range - as a
+    PDF or Excel download instead of a page."""
+    fmt = _resolve_export_format()
+    account = db.session.get(Account, account_id) or abort(404)
+    today = date.today()
+    from_date = parse_date_param(request.args.get("from"), fallback=today.replace(day=1))
+    to_date = parse_date_param(request.args.get("to"), fallback=today)
+    ctx = _account_statement_context(account, from_date, to_date)
+
+    statement_rows = [
+        [from_date.isoformat(), "Brought Forward", "Balance carried into this period", "", "", ctx["opening"]]
+    ]
+    for e in ctx["events"]:
+        statement_rows.append(
+            [
+                e["entry_date"].isoformat(),
+                _STATEMENT_KIND_LABELS.get(e["kind"], e["kind"]),
+                _statement_event_details(e),
+                e["delta"] if e["delta"] > 0 else "",
+                -e["delta"] if e["delta"] < 0 else "",
+                e["running_balance"],
+            ]
+        )
+    statement_rows.append(
+        ["", "", f"Closing balance as of {to_date.isoformat()}", "", "", ctx["closing"]]
+    )
+
+    blocks = [
+        {
+            "type": "summary",
+            "rows": [
+                ("Account", account.name),
+                ("Type", account.account_type.capitalize()),
+                ("Phone", account.phone or "-"),
+                ("Period", f"{from_date.isoformat()} to {to_date.isoformat()}"),
+            ],
+        },
+        {
+            "type": "table",
+            "heading": "Statement",
+            "columns": ["Date", "Type", "Details", "Debit (Rs)", "Credit (Rs)", "Balance (Rs)"],
+            "rows": statement_rows,
+            "align": ["left", "left", "left", "right", "right", "right"],
+        },
+    ]
+    if ctx["aging"] and ctx["aging"]["outstanding"]:
+        blocks.append(
+            {
+                "type": "table",
+                "heading": "Age of Outstanding Amount",
+                "columns": ["0-30 days", "31-60 days", "61-90 days", "Over 90 days"],
+                "rows": [
+                    [
+                        ctx["aging"]["buckets"]["0-30"],
+                        ctx["aging"]["buckets"]["31-60"],
+                        ctx["aging"]["buckets"]["61-90"],
+                        ctx["aging"]["buckets"]["90+"],
+                    ]
+                ],
+                "align": ["right", "right", "right", "right"],
+            }
+        )
+
+    return _send_export(
+        fmt,
+        pdf_title=f"Statement - {account.name}",
+        pdf_subtitle=f"{from_date.strftime('%d %b %Y')} to {to_date.strftime('%d %b %Y')}",
+        xlsx_sheet_name="Statement",
+        blocks=blocks,
+        filename_base=f"petrol-khata-statement-{slugify(account.name)}-{date.today().isoformat()}",
     )
 
 
@@ -2913,46 +3294,49 @@ def cash_account_opening_balance():
 
 # -------------------------------------------------------------- reports ---
 
-@app.route("/reports")
-@login_required
-@owner_required
-def reports():
-    selected_date = parse_date_param(request.args.get("date"))
-
+def _reports_context(selected_date):
+    """Every figure the Daily Report shows, for one date - shared by the
+    HTML page and its PDF/Excel export so the two can never drift apart."""
     sales = (
         Sale.query.filter_by(entry_date=selected_date)
         .join(Nozzle)
         .order_by(Nozzle.dispenser_id, Nozzle.nozzle_number)
         .all()
     )
-    total_sales = sum(s.total_amount for s in sales)
-    total_liters = sum(s.liters for s in sales)
+    # Every sum() below starts from 0.0 rather than the default 0 - on a
+    # date with none of that kind, plain sum(empty) is an int, which the
+    # HTML template's "%.2f" format papers over but the PDF export's
+    # formatter (which has to tell a count apart from a money figure by
+    # its Python type) would otherwise render as a bare "0" instead of
+    # "0.00", inconsistent with every other row.
+    total_sales = sum((s.total_amount for s in sales), 0.0)
+    total_liters = sum((s.liters for s in sales), 0.0)
     by_fuel = fuel_sales_for_date(selected_date)
 
     credit_given = CreditGiven.query.filter_by(entry_date=selected_date).all()
-    total_credit_given = sum(c.amount for c in credit_given)
+    total_credit_given = sum((c.amount for c in credit_given), 0.0)
 
     bank_sales = BankSale.query.filter_by(entry_date=selected_date).all()
-    total_bank_sales = sum(b.amount for b in bank_sales)
+    total_bank_sales = sum((b.amount for b in bank_sales), 0.0)
     cash_sales = total_sales - total_credit_given - total_bank_sales
 
     payments = Receipt.query.filter_by(entry_date=selected_date).all()
-    total_payments = sum(p.amount for p in payments)
+    total_payments = sum((p.amount for p in payments), 0.0)
 
     expenses = Expense.query.filter_by(entry_date=selected_date).order_by(Expense.recorded_at).all()
-    total_expenses = sum(e.amount for e in expenses)
+    total_expenses = sum((e.amount for e in expenses), 0.0)
 
     purchases = (
         StockPurchase.query.filter_by(entry_date=selected_date).order_by(StockPurchase.recorded_at).all()
     )
-    total_purchased_liters = sum(p.liters for p in purchases)
-    cash_purchases_total = sum(p.cost or 0 for p in purchases if p.payment_type == "cash")
+    total_purchased_liters = sum((p.liters for p in purchases), 0.0)
+    cash_purchases_total = sum((p.cost or 0 for p in purchases if p.payment_type == "cash"), 0.0)
 
     supplier_payments = SupplierPayment.query.filter_by(entry_date=selected_date).all()
-    total_supplier_payments = sum(p.amount for p in supplier_payments)
+    total_supplier_payments = sum((p.amount for p in supplier_payments), 0.0)
 
     salaries = SalaryPayment.query.filter_by(entry_date=selected_date).all()
-    total_salaries_net = sum(s.net_paid for s in salaries)
+    total_salaries_net = sum((s.net_paid for s in salaries), 0.0)
 
     tanks = Tank.query.order_by(Tank.number).all()
     tank_rows = []
@@ -2977,47 +3361,178 @@ def reports():
         - total_supplier_payments
         - total_salaries_net
     )
-    outstanding_credit = sum(b for a in Account.query.all() if (b := a.balance) > 0)
+    outstanding_credit = sum((b for a in Account.query.all() if (b := a.balance) > 0), 0.0)
     cash_balance = cash_account_balance(get_cash_account())
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
 
-    return render_template(
-        "reports.html",
-        selected_date=selected_date,
-        today=date.today(),
-        total_sales=total_sales,
-        total_liters=total_liters,
-        by_fuel=by_fuel,
-        cash_sales=cash_sales,
-        total_credit_given=total_credit_given,
-        bank_sales=bank_sales,
-        total_bank_sales=total_bank_sales,
-        total_payments=total_payments,
-        expenses=expenses,
-        total_expenses=total_expenses,
-        purchases=purchases,
-        total_purchased_liters=total_purchased_liters,
-        total_supplier_payments=total_supplier_payments,
-        tank_rows=tank_rows,
-        net_cash_flow=net_cash_flow,
-        outstanding_credit=outstanding_credit,
-        cash_balance=cash_balance,
-        bank_accounts=bank_accounts,
-        salaries=salaries,
-        total_salaries_net=total_salaries_net,
-        handover_rows=handover_rows_for_date(selected_date),
+    return {
+        "total_sales": total_sales,
+        "total_liters": total_liters,
+        "by_fuel": by_fuel,
+        "cash_sales": cash_sales,
+        "total_credit_given": total_credit_given,
+        "bank_sales": bank_sales,
+        "total_bank_sales": total_bank_sales,
+        "total_payments": total_payments,
+        "expenses": expenses,
+        "total_expenses": total_expenses,
+        "purchases": purchases,
+        "total_purchased_liters": total_purchased_liters,
+        "total_supplier_payments": total_supplier_payments,
+        "tank_rows": tank_rows,
+        "net_cash_flow": net_cash_flow,
+        "outstanding_credit": outstanding_credit,
+        "cash_balance": cash_balance,
+        "bank_accounts": bank_accounts,
+        "salaries": salaries,
+        "total_salaries_net": total_salaries_net,
+        "handover_rows": handover_rows_for_date(selected_date),
+    }
+
+
+@app.route("/reports")
+@login_required
+@owner_required
+def reports():
+    selected_date = parse_date_param(request.args.get("date"))
+    ctx = _reports_context(selected_date)
+    return render_template("reports.html", selected_date=selected_date, today=date.today(), **ctx)
+
+
+@app.route("/reports/export")
+@login_required
+@owner_required
+def reports_export():
+    """Mirrors reports() - same figures, same date - as a PDF or Excel
+    download instead of a page."""
+    fmt = _resolve_export_format()
+    selected_date = parse_date_param(request.args.get("date"))
+    ctx = _reports_context(selected_date)
+
+    summary_rows = [
+        ("Total Sales (Rs)", ctx["total_sales"]),
+        ("Liters Sold", ctx["total_liters"]),
+        ("Cash Sales (Rs)", ctx["cash_sales"]),
+        ("Bank Sales (Rs)", ctx["total_bank_sales"]),
+        ("Credit Given (Rs)", ctx["total_credit_given"]),
+        ("Receipts from Customers (Rs)", ctx["total_payments"]),
+        ("Expenses (Rs)", ctx["total_expenses"]),
+        ("Payments to Suppliers (Rs)", ctx["total_supplier_payments"]),
+        ("Salaries Paid Out, Net (Rs)", ctx["total_salaries_net"]),
+        ("Net Cash Flow (Rs)", ctx["net_cash_flow"]),
+        ("Outstanding Receivables (Rs)", ctx["outstanding_credit"]),
+        ("Cash in Hand (Rs)", ctx["cash_balance"]),
+    ]
+    for b in ctx["bank_accounts"]:
+        summary_rows.append((f"{b.name} (Rs)", b.balance))
+
+    blocks = [
+        {"type": "summary", "rows": summary_rows},
+        {
+            "type": "table",
+            "heading": "Sales by Fuel Type",
+            "columns": ["Fuel", "Liters Sold", "Revenue (Rs)"],
+            "rows": [[name, d["liters"], d["revenue"]] for name, d in ctx["by_fuel"].items()],
+            "align": ["left", "right", "right"],
+        },
+        {
+            "type": "table",
+            "heading": "Stock / Dip per Tank",
+            "columns": ["Tank", "Fuel", "Book Stock (L)", "Dip Reading (L)", "Variance (L)"],
+            "rows": [
+                [
+                    r["tank"].label,
+                    r["tank"].fuel_type.name,
+                    r["book_stock"],
+                    r["dip"] if r["dip"] is not None else "-",
+                    r["variance"] if r["variance"] is not None else "-",
+                ]
+                for r in ctx["tank_rows"]
+            ],
+            "align": ["left", "left", "right", "right", "right"],
+        },
+        {
+            "type": "table",
+            "heading": "Cash Handover - Shift Reconciliation",
+            "columns": ["Shift", "Expected Cash (Rs)", "Counted (Rs)", "Variance (Rs)", "Attendant"],
+            "rows": [
+                [
+                    r["shift"].name,
+                    r["expected"],
+                    r["declared"] if r["declared"] is not None else "-",
+                    r["variance"] if r["variance"] is not None else "Not reconciled",
+                    r["handover"].attendant.name if r["handover"] and r["handover"].attendant else "-",
+                ]
+                for r in ctx["handover_rows"]
+            ],
+            "align": ["left", "right", "right", "right", "left"],
+        },
+        {
+            "type": "table",
+            "heading": "Inventory Received",
+            "columns": ["Tank", "Liters", "Payment"],
+            "rows": [
+                [p.tank.label, p.liters, "Credit" if p.payment_type == "credit" else "Cash"]
+                for p in ctx["purchases"]
+            ],
+            "align": ["left", "right", "left"],
+        },
+        {
+            "type": "table",
+            "heading": "Expenses",
+            "columns": ["Category", "Description", "Paid via", "Amount (Rs)"],
+            "rows": [
+                [
+                    e.category,
+                    e.description or "-",
+                    f"Via {e.bank_account.name}" if e.method == "bank" else "Cash",
+                    e.amount,
+                ]
+                for e in ctx["expenses"]
+            ],
+            "align": ["left", "left", "left", "right"],
+        },
+        {
+            "type": "table",
+            "heading": "Bank Sales",
+            "columns": ["Bank Account", "Amount (Rs)"],
+            "rows": [[b.bank_account.name, b.amount] for b in ctx["bank_sales"]],
+            "align": ["left", "right"],
+        },
+        {
+            "type": "table",
+            "heading": "Salaries",
+            "columns": ["Employee", "Period", "Salary (Rs)", "Deducted (Rs)", "Net Paid (Rs)", "Paid via"],
+            "rows": [
+                [
+                    s.account.name,
+                    s.period_label or "-",
+                    s.gross_amount,
+                    s.deduction_amount,
+                    s.net_paid,
+                    f"Via {s.bank_account.name}" if s.method == "bank" else "Cash",
+                ]
+                for s in ctx["salaries"]
+            ],
+            "align": ["left", "left", "right", "right", "right", "left"],
+        },
+    ]
+
+    return _send_export(
+        fmt,
+        pdf_title="Daily Report",
+        pdf_subtitle=selected_date.strftime("%A, %d %B %Y"),
+        xlsx_sheet_name="Daily Report",
+        blocks=blocks,
+        filename_base=f"petrol-khata-daily-{selected_date.isoformat()}",
     )
 
 
-@app.route("/reports/monthly")
-@login_required
-@owner_required
-def reports_monthly():
-    """Month-end closing statement. Unlike the Daily Report (which is a
-    cash-movement view of one day), this is a period profit view: revenue
-    against the cost of the fuel actually sold (COGS via weighted average
-    purchase cost), then operating costs, then net."""
-    raw_month = request.args.get("month", "")
+def _month_range_from_param(raw_month):
+    """Parse a "YYYY-MM" query param into (start, end) dates spanning that
+    calendar month, falling back to the current month for anything
+    missing or malformed - shared by the Monthly Report page and its
+    export so an odd/blank ?month= behaves identically for both."""
     today = date.today()
     try:
         year, month = (int(p) for p in raw_month.split("-"))
@@ -3025,24 +3540,35 @@ def reports_monthly():
     except (ValueError, AttributeError):
         start = today.replace(day=1)
     end = (start + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+    return start, end
 
-    revenue = (
+
+def _reports_monthly_context(start, end):
+    """Every figure the Monthly Report shows, for one date range - shared
+    by the HTML page and its PDF/Excel export."""
+    # Each of these is wrapped in float() because coalesce(sum(x), 0) comes
+    # back as a Python int when nothing matches (SQLite has no rows to sum,
+    # so it falls back to the literal 0) - the HTML template's "%.2f"
+    # format hides that, but the PDF export's formatter tells a money
+    # figure from a count by its Python type, so an unwrapped int here
+    # would render as a bare "0" instead of "0.00".
+    revenue = float(
         db.session.query(func.coalesce(func.sum(Sale.total_amount), 0))
         .filter(Sale.entry_date >= start, Sale.entry_date <= end)
         .scalar()
     )
-    liters_sold = (
+    liters_sold = float(
         db.session.query(func.coalesce(func.sum(Sale.liters), 0))
         .filter(Sale.entry_date >= start, Sale.entry_date <= end)
         .scalar()
     )
     cogs, cogs_detail = cogs_for_period(start, end)
-    expenses_total = (
+    expenses_total = float(
         db.session.query(func.coalesce(func.sum(Expense.amount), 0))
         .filter(Expense.entry_date >= start, Expense.entry_date <= end)
         .scalar()
     )
-    salaries_total = (
+    salaries_total = float(
         db.session.query(func.coalesce(func.sum(SalaryPayment.gross_amount), 0))
         .filter(SalaryPayment.entry_date >= start, SalaryPayment.entry_date <= end)
         .scalar()
@@ -3055,22 +3581,22 @@ def reports_monthly():
         .all()
     )
 
-    credit_given = (
+    credit_given = float(
         db.session.query(func.coalesce(func.sum(CreditGiven.amount), 0))
         .filter(CreditGiven.entry_date >= start, CreditGiven.entry_date <= end)
         .scalar()
     )
-    receipts_total = (
+    receipts_total = float(
         db.session.query(func.coalesce(func.sum(Receipt.amount), 0))
         .filter(Receipt.entry_date >= start, Receipt.entry_date <= end)
         .scalar()
     )
-    purchases_liters = (
+    purchases_liters = float(
         db.session.query(func.coalesce(func.sum(StockPurchase.liters), 0))
         .filter(StockPurchase.entry_date >= start, StockPurchase.entry_date <= end)
         .scalar()
     )
-    purchases_cost = (
+    purchases_cost = float(
         db.session.query(func.coalesce(func.sum(StockPurchase.cost), 0))
         .filter(StockPurchase.entry_date >= start, StockPurchase.entry_date <= end)
         .scalar()
@@ -3079,9 +3605,39 @@ def reports_monthly():
     gross_margin = round(revenue - cogs, 2)
     net_profit = round(gross_margin - expenses_total - salaries_total, 2)
 
+    return {
+        "revenue": revenue,
+        "liters_sold": liters_sold,
+        "cogs": cogs,
+        "cogs_detail": cogs_detail,
+        "gross_margin": gross_margin,
+        "expenses_total": expenses_total,
+        "expenses_by_category": expenses_by_category,
+        "salaries_total": salaries_total,
+        "net_profit": net_profit,
+        "credit_given": credit_given,
+        "receipts_total": receipts_total,
+        "purchases_liters": purchases_liters,
+        "purchases_cost": purchases_cost,
+        "attendant_variances": attendant_variance_summary(start, end),
+    }
+
+
+@app.route("/reports/monthly")
+@login_required
+@owner_required
+def reports_monthly():
+    """Month-end closing statement. Unlike the Daily Report (which is a
+    cash-movement view of one day), this is a period profit view: revenue
+    against the cost of the fuel actually sold (COGS via weighted average
+    purchase cost), then operating costs, then net."""
+    today = date.today()
+    start, end = _month_range_from_param(request.args.get("month", ""))
+    ctx = _reports_monthly_context(start, end)
+
     # Previous/next month links, capped so you can't page into the future.
     prev_month = (start - timedelta(days=1)).replace(day=1)
-    next_month = (end + timedelta(days=1))
+    next_month = end + timedelta(days=1)
     return render_template(
         "reports_monthly.html",
         start=start,
@@ -3089,21 +3645,82 @@ def reports_monthly():
         month_label=start.strftime("%B %Y"),
         prev_month=prev_month.strftime("%Y-%m"),
         next_month=next_month.strftime("%Y-%m") if next_month <= today else None,
-        revenue=revenue,
-        liters_sold=liters_sold,
-        cogs=cogs,
-        cogs_detail=cogs_detail,
-        gross_margin=gross_margin,
-        expenses_total=expenses_total,
-        expenses_by_category=expenses_by_category,
-        salaries_total=salaries_total,
-        net_profit=net_profit,
-        credit_given=credit_given,
-        receipts_total=receipts_total,
-        purchases_liters=purchases_liters,
-        purchases_cost=purchases_cost,
-        attendant_variances=attendant_variance_summary(start, end),
         today=today,
+        **ctx,
+    )
+
+
+@app.route("/reports/monthly/export")
+@login_required
+@owner_required
+def reports_monthly_export():
+    """Mirrors reports_monthly() - same figures, same month - as a PDF or
+    Excel download instead of a page."""
+    fmt = _resolve_export_format()
+    start, end = _month_range_from_param(request.args.get("month", ""))
+    ctx = _reports_monthly_context(start, end)
+
+    blocks = [
+        {
+            "type": "summary",
+            "rows": [
+                ("Revenue (Rs)", ctx["revenue"]),
+                ("Liters Sold", ctx["liters_sold"]),
+                ("Cost of Fuel Sold (Rs)", ctx["cogs"]),
+                ("Gross Margin (Rs)", ctx["gross_margin"]),
+                ("Expenses (Rs)", ctx["expenses_total"]),
+                ("Salaries (Rs)", ctx["salaries_total"]),
+                ("Net Profit (Rs)", ctx["net_profit"]),
+            ],
+        },
+        {
+            "type": "table",
+            "heading": "Margin by Fuel Type",
+            "columns": ["Fuel", "Liters Sold", "Revenue (Rs)", "Avg Cost / L", "Cost (Rs)", "Margin (Rs)"],
+            "rows": [
+                [r["fuel"], r["liters"], r["revenue"], r["unit_cost"], r["cost"], r["margin"]]
+                for r in ctx["cogs_detail"]
+            ],
+            "align": ["left", "right", "right", "right", "right", "right"],
+        },
+        {
+            "type": "table",
+            "heading": "Expenses by Category",
+            "columns": ["Category", "Amount (Rs)"],
+            "rows": [[category, amount] for category, amount in ctx["expenses_by_category"]],
+            "align": ["left", "right"],
+        },
+        {
+            "type": "table",
+            "heading": "Credit & Stock Movement",
+            "columns": ["Metric", "Value"],
+            "rows": [
+                ["Credit given to customers (Rs)", ctx["credit_given"]],
+                ["Payments received (Rs)", ctx["receipts_total"]],
+                ["Fuel purchased (L)", ctx["purchases_liters"]],
+                ["Spent on fuel purchases (Rs)", ctx["purchases_cost"]],
+            ],
+            "align": ["left", "right"],
+        },
+        {
+            "type": "table",
+            "heading": "Cash Variance by Attendant",
+            "columns": ["Attendant", "Shifts Reconciled", "Shifts Short", "Net Variance (Rs)"],
+            "rows": [
+                [r["name"], r["shifts"], r["shortfalls"], r["total_variance"]]
+                for r in ctx["attendant_variances"]
+            ],
+            "align": ["left", "right", "right", "right"],
+        },
+    ]
+
+    return _send_export(
+        fmt,
+        pdf_title=f"Monthly Report - {start.strftime('%B %Y')}",
+        pdf_subtitle=f"{start.strftime('%d %b')} to {end.strftime('%d %b %Y')}",
+        xlsx_sheet_name="Monthly Report",
+        blocks=blocks,
+        filename_base=f"petrol-khata-monthly-{start.strftime('%Y-%m')}",
     )
 
 

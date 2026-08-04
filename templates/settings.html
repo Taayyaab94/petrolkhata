@@ -111,18 +111,21 @@
   <div class="panel-head"><h3>Tanks</h3></div>
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Tank</th><th>Fuel</th><th>Starting Stock (L)</th><th>Capacity &amp; alert level</th><th></th></tr></thead>
+    <thead><tr><th>Tank</th><th>Fuel</th><th>Starting Stock (L)</th><th>Stock as of</th><th>Capacity, alert level &amp; stock baseline</th><th></th></tr></thead>
     <tbody>
       {% for t in tanks %}
       <tr>
         <td>Tank {{ t.number }}</td>
         <td>{{ t.fuel_type.name }}</td>
         <td>{{ "%.2f"|format(t.starting_stock_liters) }}</td>
+        <td>{{ t.starting_stock_date.isoformat() if t.starting_stock_date else "from the beginning" }}</td>
         <td>
           <form method="post" action="{{ url_for('settings_edit_tank', tank_id=t.id) }}" class="inline-edit-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="number" step="0.01" min="0.01" name="capacity" value="{{ t.capacity_liters }}" required title="Capacity (L)">
             <input type="number" step="0.01" min="0" name="threshold" value="{{ t.low_stock_threshold }}" required title="Low-stock alert (L)">
+            <input type="number" step="0.01" min="0" name="stock" value="{{ t.starting_stock_liters }}" required title="Starting stock (L)">
+            <input type="date" name="stock_date" value="{{ t.starting_stock_date.isoformat() if t.starting_stock_date else '' }}" max="{{ today.isoformat() }}" title="Stock as of (blank = from the beginning)">
             <button type="submit" class="btn btn-sm">Save</button>
           </form>
         </td>
@@ -139,6 +142,7 @@
   </table>
   </div>
   <p class="hint">Delete only works for a tank with no purchases, sales, or dip readings yet - a genuine setup mistake, not real history.</p>
+  <p class="hint">"Stock as of" is the point the starting stock was measured from - every historical stock and dip-variance figure for that tank is reconstructed relative to it (nothing is stored per-date, so changing it just recalculates). Leaving it blank treats the starting stock as if it's always applied, from the beginning.</p>
 </div>
 
 <div class="panel">
@@ -156,6 +160,9 @@
     </label>
     <label>Current stock (L)
       <input type="number" step="0.01" min="0" name="stock" required>
+    </label>
+    <label>Stock as of <span class="hint-sm">the date this stock level was measured</span>
+      <input type="date" name="stock_date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}">
     </label>
     <label>Price / L (Rs) <span class="hint-sm">only used if fuel is new</span>
       <input type="number" step="0.01" min="0" name="price">

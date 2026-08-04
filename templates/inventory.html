@@ -38,6 +38,9 @@
     </tbody>
   </table>
   </div>
+  <p class="hint-sm">
+    {% for row in tank_rows %}Tank {{ row.tank.number }}: stock as of {{ row.tank.starting_stock_date.isoformat() if row.tank.starting_stock_date else "the beginning" }}{{ ", " if not loop.last }}{% endfor %}
+  </p>
 </div>
 
 <div class="panel">

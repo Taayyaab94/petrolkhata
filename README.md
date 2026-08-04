@@ -53,7 +53,8 @@ in, or have the owner reset either one from Settings.
 The first time an Owner logs in, Petrol Khata walks through a one-time bootstrap:
 
 1. **Tanks** — add each physical storage tank: its fuel type, capacity,
-   and current stock. You can add more than one tank of the same fuel
+   current stock, and the date that stock was measured ("Stock as of",
+   prefilled to today). You can add more than one tank of the same fuel
    (e.g. two separate Diesel tanks).
 2. **Fuel prices** — one price per fuel type.
 3. **Dispensers & nozzles** — how many dispensers, how many nozzles each,
@@ -100,6 +101,17 @@ updates it in place instead of duplicating it.
   automatically; the variance between dip and book stock is shown
   plainly, without being flagged as an error - small differences from
   evaporation, temperature, or rounding are normal.
+
+  Book stock is anchored to the tank's "Stock as of" date (Settings →
+  Tanks), not to the beginning of time: for a date on or after it, the
+  starting stock plus that window's purchases/sales gives the book
+  figure; for an earlier date - e.g. backfilling months of history after
+  entering today's physical stock - it's reconstructed backwards by
+  undoing the purchases/sales between the two dates, since stock only
+  ever moves through those two kinds of entry. A tank with no "Stock as
+  of" date set (every tank created before this feature existed) keeps
+  the old behaviour: its starting stock is treated as sitting before all
+  recorded history.
 
 Right below the date picker, a **sales breakdown** shows Total Sales
 (from nozzle readings) minus Credit Sales minus Bank Sales, leaving Cash
@@ -303,6 +315,19 @@ account's history, including the opening balance itself, always
 correctly ripples forward through every later entry's running balance
 and the account's current total - there's nothing cached to go stale.
 
+Any entry can also be **deleted** (owner only) - a "Delete" button sits
+next to "Edit" wherever an entry is shown, including the Ledger's daily
+feed. Two things deliberately aren't blocked: deleting a nozzle reading
+leaves a gap in that nozzle's meter chain, so the next recorded reading
+falls back to "no entry for the day before - enter both readings", the
+same as any other gap - you just re-bridge it by hand from that slot.
+And deleting an entry that a later date's numbers depended on (e.g.
+removing a sale whose cash was already deposited) can leave cash in hand
+negative on some day after it; that's allowed rather than refused, since
+blocking it would leave a wrong entry stuck on the books, but the page
+flashes a warning naming the earliest day affected so it doesn't go
+unnoticed.
+
 ## Bank accounts &amp; cash in hand
 
 The pump can have multiple named bank accounts (e.g. "Meezan", "HBL").
@@ -369,6 +394,12 @@ everything after it reads as a correct running balance.
   on Accounts - there's only ever one cash-in-hand account, so it's
   editable rather than something you "add".
 
+Tanks have an analogous "Stock as of" date (set during the setup wizard
+or edited any time from Settings → Tanks) instead of an opening balance,
+with one difference: book stock is reconstructed on both sides of that
+date, not just forward from it - see the Dip - Tank Stock Check
+discussion above.
+
 ## Users &amp; Roles
 
 - **Owner** — full access: everything on the Ledger, Settings, and all
@@ -396,6 +427,21 @@ that holds your business data. Whether you're running locally or on a
 hosted Postgres deployment, **Settings → Backup** gives you the same
 safety net from inside the app: a ZIP of every table as CSV, downloadable
 with one click.
+
+### Exporting a report (PDF / Excel)
+
+The full backup above is for safekeeping — everything, raw, one CSV per
+table. **Exports** are a different thing: a single formatted report,
+meant for sharing or handing to someone (a partner, an accountant) rather
+than for restoring the database. Wherever a report or statement page has
+an **Export** button — Daily Report, Monthly Report, Accounts, and an
+account's Statement — click it for a **PDF** (laid out for reading or
+printing) or **Excel** (the same figures as real numbers, so they can be
+re-totalled or dropped into a spreadsheet) version of exactly what's on
+screen, honouring whatever date/month/filter is currently selected.
+Staff can export Accounts and a Statement the same as they can view
+those pages; the Daily and Monthly Report exports are owner only, like
+the reports themselves.
 
 ## Deploying online (Vercel)
 
@@ -478,5 +524,11 @@ database periodically the same way you'd back up `instance/petrolpump.db`.
 - Editing an account's transaction entry can change its date, amount,
   paid-via, and other details, but not which account it's attached to
   (or, for a fuel purchase, whether it was paid cash/bank vs. on
-  credit). There's also no delete - to correct an entry logged against
-  the wrong account, log an offsetting entry instead.
+  credit). To move an entry to a different account, delete it and
+  re-enter it against the right one instead.
+- Deleting an entry is intentionally not "safe" the way editing's cash
+  guard is - it never refuses on the grounds that something later
+  depends on it. A deleted nozzle reading just leaves a gap for the next
+  reading to re-bridge, and a delete that leaves a later day's cash in
+  hand negative still goes through, with a flash naming the earliest
+  affected date instead of a block.

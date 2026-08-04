@@ -6,7 +6,16 @@
     <h1>Accounts</h1>
     <div class="subtitle">Customers, suppliers, employees and bank accounts. Record credit/payments/loans from the Ledger screen - click an account below to view or edit its history.</div>
   </div>
-  <a href="{{ url_for('ledger') }}" class="btn">Open Ledger &rarr;</a>
+  <div>
+    <div class="export-menu">
+      <button type="button" class="btn btn-ghost btn-sm export-toggle" aria-expanded="false">Export</button>
+      <div class="export-menu-items" hidden>
+        <a href="{{ url_for('accounts_export', format='pdf', kind=kind, type=type_filter) }}">PDF</a>
+        <a href="{{ url_for('accounts_export', format='xlsx', kind=kind, type=type_filter) }}">Excel</a>
+      </div>
+    </div>
+    <a href="{{ url_for('ledger') }}" class="btn">Open Ledger &rarr;</a>
+  </div>
 </div>
 
 <div class="filter-row">
@@ -141,6 +150,12 @@
             </label>
             <button type="submit" class="btn btn-sm">Save</button>
           </form>
+          <form method="post" action="{{ url_for('entry_delete', kind='expense', entry_id=e.id) }}" style="margin-top:10px;"
+                onsubmit="return confirm('Delete this expense ({{ e.category }})? This cannot be undone.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="next" value="{{ url_for('accounts', kind=kind, type=type_filter) }}">
+            <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+          </form>
         </td>
       </tr>
       {% else %}
@@ -195,4 +210,36 @@ document.querySelectorAll('.edit-toggle').forEach(function (link) {
 });
 </script>
 {% endif %}
+
+<script>
+// Export menu: click the toggle to show/hide its PDF/Excel links, click
+// anywhere else (or press Escape) to close whatever's open. Outside the
+// owner-only block above since staff can export this page too. Same
+// minimal snippet repeated on every page with an export menu.
+(function () {
+  function closeExportMenus() {
+    document.querySelectorAll('.export-menu-items').forEach(function (menu) {
+      menu.hidden = true;
+      var btn = menu.previousElementSibling;
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+    });
+  }
+  document.querySelectorAll('.export-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var menu = btn.nextElementSibling;
+      var wasHidden = menu.hidden;
+      closeExportMenus();
+      if (wasHidden) {
+        menu.hidden = false;
+        btn.setAttribute('aria-expanded', 'true');
+      }
+    });
+  });
+  document.addEventListener('click', closeExportMenus);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeExportMenus();
+  });
+})();
+</script>
 {% endblock %}

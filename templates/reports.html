@@ -12,6 +12,13 @@
     </label>
     <a href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}" class="btn btn-ghost btn-sm">Monthly &rarr;</a>
     <a href="{{ url_for('reports_trends') }}" class="btn btn-ghost btn-sm">View Trends &rarr;</a>
+    <div class="export-menu">
+      <button type="button" class="btn btn-ghost btn-sm export-toggle" aria-expanded="false">Export</button>
+      <div class="export-menu-items" hidden>
+        <a href="{{ url_for('reports_export', format='pdf', date=selected_date.isoformat()) }}">PDF</a>
+        <a href="{{ url_for('reports_export', format='xlsx', date=selected_date.isoformat()) }}">Excel</a>
+      </div>
+    </div>
   </form>
 </div>
 
@@ -225,4 +232,35 @@
 </div>
 
 <p class="hint">Net Cash Flow = sales - credit given + receipts - expenses - cash-paid purchases - supplier payments - salaries paid. Purchases made on supplier credit aren't subtracted at the time of purchase since that cash hasn't left yet - it's counted when the supplier is actually paid. For a period profit view (revenue against the cost of fuel actually sold), see the <a href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}">Monthly Report</a>.</p>
+
+<script>
+// Export menu: click the toggle to show/hide its PDF/Excel links, click
+// anywhere else (or press Escape) to close whatever's open. Same minimal
+// snippet repeated on every page with an export menu.
+(function () {
+  function closeExportMenus() {
+    document.querySelectorAll('.export-menu-items').forEach(function (menu) {
+      menu.hidden = true;
+      var btn = menu.previousElementSibling;
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+    });
+  }
+  document.querySelectorAll('.export-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var menu = btn.nextElementSibling;
+      var wasHidden = menu.hidden;
+      closeExportMenus();
+      if (wasHidden) {
+        menu.hidden = false;
+        btn.setAttribute('aria-expanded', 'true');
+      }
+    });
+  });
+  document.addEventListener('click', closeExportMenus);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeExportMenus();
+  });
+})();
+</script>
 {% endblock %}

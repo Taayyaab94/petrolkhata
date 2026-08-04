@@ -34,20 +34,89 @@ from models import (
 
 
 def book_stock(tank, as_of_date):
-    """Starting stock + purchases into this tank - sales from nozzles on
-    this tank, all up to and including as_of_date."""
+    """Book stock for `tank` at the END of as_of_date - starting stock
+    plus every purchase into this tank, minus every sale from a nozzle on
+    this tank.
+
+    tank.starting_stock_liters is the level at the START of
+    tank.starting_stock_date (equivalently, the END of the day before it -
+    see Tank in models.py). That splits into three cases:
+
+    - starting_stock_date is None: back-compat for every tank that
+      existed before this column did. Treat the baseline as sitting
+      before all recorded history and sum every purchase/sale up to and
+      including as_of_date - exactly the original, only-ever-had-one-mode
+      behaviour.
+    - as_of_date >= starting_stock_date (FORWARD): sum purchases/sales
+      from starting_stock_date through as_of_date, inclusive on both
+      ends.
+    - as_of_date < starting_stock_date (BACKWARD): there's no ledger
+      history before the baseline to sum forward from, so instead undo
+      everything strictly between the two dates - subtract back out each
+      purchase, add back each sale. Stock only ever moves via those two
+      kinds of entry, so running the ledger backwards from the baseline
+      is valid arithmetic. This is what makes "measure today's stock,
+      then backfill months of older records" come out correct instead of
+      subtracting sales that today's baseline already reflects.
+    """
+    if tank.starting_stock_date is None:
+        purchased = (
+            db.session.query(func.coalesce(func.sum(StockPurchase.liters), 0))
+            .filter(StockPurchase.tank_id == tank.id, StockPurchase.entry_date <= as_of_date)
+            .scalar()
+        )
+        sold = (
+            db.session.query(func.coalesce(func.sum(Sale.liters), 0))
+            .join(Nozzle, Sale.nozzle_id == Nozzle.id)
+            .filter(Nozzle.tank_id == tank.id, Sale.entry_date <= as_of_date)
+            .scalar()
+        )
+        return round(tank.starting_stock_liters + purchased - sold, 2)
+
+    if as_of_date >= tank.starting_stock_date:
+        purchased = (
+            db.session.query(func.coalesce(func.sum(StockPurchase.liters), 0))
+            .filter(
+                StockPurchase.tank_id == tank.id,
+                StockPurchase.entry_date >= tank.starting_stock_date,
+                StockPurchase.entry_date <= as_of_date,
+            )
+            .scalar()
+        )
+        sold = (
+            db.session.query(func.coalesce(func.sum(Sale.liters), 0))
+            .join(Nozzle, Sale.nozzle_id == Nozzle.id)
+            .filter(
+                Nozzle.tank_id == tank.id,
+                Sale.entry_date >= tank.starting_stock_date,
+                Sale.entry_date <= as_of_date,
+            )
+            .scalar()
+        )
+        return round(tank.starting_stock_liters + purchased - sold, 2)
+
+    # BACKWARD: as_of_date < starting_stock_date - undo the entries
+    # strictly between the two dates instead of summing forward.
     purchased = (
         db.session.query(func.coalesce(func.sum(StockPurchase.liters), 0))
-        .filter(StockPurchase.tank_id == tank.id, StockPurchase.entry_date <= as_of_date)
+        .filter(
+            StockPurchase.tank_id == tank.id,
+            StockPurchase.entry_date > as_of_date,
+            StockPurchase.entry_date < tank.starting_stock_date,
+        )
         .scalar()
     )
     sold = (
         db.session.query(func.coalesce(func.sum(Sale.liters), 0))
         .join(Nozzle, Sale.nozzle_id == Nozzle.id)
-        .filter(Nozzle.tank_id == tank.id, Sale.entry_date <= as_of_date)
+        .filter(
+            Nozzle.tank_id == tank.id,
+            Sale.entry_date > as_of_date,
+            Sale.entry_date < tank.starting_stock_date,
+        )
         .scalar()
     )
-    return round(tank.starting_stock_liters + purchased - sold, 2)
+    return round(tank.starting_stock_liters - purchased + sold, 2)
 
 
 def previous_slot(entry_date, shift):
@@ -199,20 +268,18 @@ def record_fuel_price(fuel_type, price, effective_date):
 def stock_series(tank, dates):
     """Book stock for `tank` at the end of each date in `dates` (ascending,
     contiguous-ish is fine). Computed as one running total instead of one
-    query per day."""
+    query per day.
+
+    Seeded with book_stock() at the end of the day before the window
+    starts, rather than re-deriving that figure here - book_stock() has
+    already done the forward/backward work of anchoring it to
+    starting_stock_date, so this only has to agree with it once at the
+    seed; walking forward by each day's net purchases-minus-sales change
+    is the same arithmetic on either side of that date."""
     if not dates:
         return []
     start = dates[0]
-    running = tank.starting_stock_liters + (
-        db.session.query(func.coalesce(func.sum(StockPurchase.liters), 0))
-        .filter(StockPurchase.tank_id == tank.id, StockPurchase.entry_date < start)
-        .scalar()
-    ) - (
-        db.session.query(func.coalesce(func.sum(Sale.liters), 0))
-        .join(Nozzle, Sale.nozzle_id == Nozzle.id)
-        .filter(Nozzle.tank_id == tank.id, Sale.entry_date < start)
-        .scalar()
-    )
+    running = book_stock(tank, start - timedelta(days=1))
 
     purchases_by_day = dict(
         db.session.query(StockPurchase.entry_date, func.sum(StockPurchase.liters))
@@ -748,6 +815,24 @@ def cash_would_go_negative(hypothetical_changes):
         if entry_date >= earliest and running < -0.01:
             return True
     return False
+
+
+def first_negative_cash_date():
+    """The earliest date whose end-of-day cash-in-hand running balance is
+    below -0.01, or None if cash never goes negative anywhere in the
+    timeline. Unlike cash_would_go_negative() (which simulates a
+    hypothetical change before it's applied, to decide whether to reject
+    it), this reads the ledger as it actually stands right now - used
+    after a delete, which is never blocked even if it leaves a later day
+    negative, to name the day that needs attention. Reuses the same
+    daily-net-changes walk as cash_would_go_negative()."""
+    changes = _cash_daily_net_changes()
+    running = 0.0
+    for entry_date in sorted(changes):
+        running += changes[entry_date]
+        if running < -0.01:
+            return entry_date
+    return None
 
 
 def max_cash_available_on(entry_date):
