@@ -5,6 +5,7 @@ models.py) - every figure here is derived fresh from ledger rows so that
 editing or backfilling a past date can never leave numbers out of sync.
 """
 
+import bisect
 from datetime import datetime, timedelta
 
 from sqlalchemy import func
@@ -263,6 +264,69 @@ def record_fuel_price(fuel_type, price, effective_date):
     )
     db.session.flush()
     fuel_type.price_per_liter = price_on_date(fuel_type, datetime.now().date())
+
+
+def price_resolver(fuel_types=None):
+    """Bulk-loaded equivalent of price_on_date(), for pages that need a
+    date-specific price for MANY rows at once (e.g. one lookup per
+    historical ledger entry). price_on_date() issues one SELECT per call,
+    which is fine for the handful of lookups the ledger page does (one per
+    fuel type, or one per nozzle, for a single date) but turns into an N+1
+    storm - entries x fuel types queries - on a page like account_detail
+    that resolves a price for every credit entry in an account's history.
+
+    Loads every relevant FuelPriceHistory row in ONE query, then resolves
+    "latest effective_date <= on_date" with a binary search per lookup
+    instead of a database round trip. Pass the FuelType objects the caller
+    already has (fuel_types) so the fallback price - FuelType.price_per_liter,
+    read when no history row applies yet - is available with no extra
+    query either; omitting it loads every fuel type instead.
+
+    Returns resolve(fuel_type_or_id, on_date) -> price, matching
+    price_on_date()'s semantics exactly, including its fallback and its
+    same-day tie-break (the highest id wins when two rows share an
+    effective_date).
+    """
+    if fuel_types is not None:
+        types_by_id = {f.id: f for f in fuel_types}
+        history_q = FuelPriceHistory.query.filter(FuelPriceHistory.fuel_type_id.in_(types_by_id.keys()))
+    else:
+        types_by_id = {f.id: f for f in FuelType.query.all()}
+        history_q = FuelPriceHistory.query
+
+    # Ascending order within each fuel type - by effective_date, then id so
+    # that same-day rows land with the highest id last, matching
+    # price_on_date()'s "effective_date desc, id desc" tie-break once we
+    # bisect back from the right below.
+    rows = history_q.order_by(
+        FuelPriceHistory.fuel_type_id, FuelPriceHistory.effective_date, FuelPriceHistory.id
+    ).all()
+
+    dates_by_fuel = {}
+    prices_by_fuel = {}
+    for row in rows:
+        dates_by_fuel.setdefault(row.fuel_type_id, []).append(row.effective_date)
+        prices_by_fuel.setdefault(row.fuel_type_id, []).append(row.price_per_liter)
+
+    def resolve(fuel_type_or_id, on_date):
+        fuel_id = fuel_type_or_id.id if hasattr(fuel_type_or_id, "id") else fuel_type_or_id
+        dates = dates_by_fuel.get(fuel_id)
+        if dates:
+            # bisect_right lands just past every row dated on_date or
+            # earlier - the entry immediately before that point is the
+            # latest one in force, mirroring effective_date <= on_date.
+            idx = bisect.bisect_right(dates, on_date) - 1
+            if idx >= 0:
+                return prices_by_fuel[fuel_id][idx]
+        fuel_type = types_by_id.get(fuel_id)
+        if fuel_type is None:
+            # Only reachable when fuel_types was passed but didn't include
+            # this id - fall back to a direct lookup rather than crashing.
+            fuel_type = db.session.get(FuelType, fuel_id)
+            types_by_id[fuel_id] = fuel_type
+        return fuel_type.price_per_liter
+
+    return resolve
 
 
 def stock_series(tank, dates):

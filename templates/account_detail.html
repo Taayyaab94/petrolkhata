@@ -159,10 +159,10 @@
             <label>Date
               <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
             </label>
-            <label>Fuel
+            <label>Fuel <span class="hint-sm">rate as of {{ e.obj.entry_date.strftime("%d %b %Y") }} - editing the date above re-prices to that date's rate on save</span>
               <select name="fuel_type_id" required>
                 {% for f in fuel_types %}
-                <option value="{{ f.id }}" {{ "selected" if f.id == e.obj.fuel_type_id }}>{{ f.name }} (Rs {{ "%.2f"|format(f.price_per_liter) }}/L)</option>
+                <option value="{{ f.id }}" {{ "selected" if f.id == e.obj.fuel_type_id }}>{{ f.name }} (Rs {{ "%.2f"|format(e.fuel_prices.get(f.id)) }}/L)</option>
                 {% endfor %}
               </select>
             </label>

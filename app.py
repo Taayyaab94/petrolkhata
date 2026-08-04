@@ -56,6 +56,7 @@ from ledger_logic import (
     previous_reading_for,
     previous_slot,
     price_on_date,
+    price_resolver,
     record_fuel_price,
     sales_breakdown_for_date,
     stock_series,
@@ -2592,6 +2593,20 @@ def account_detail(account_id):
     account = db.session.get(Account, account_id) or abort(404)
     events = account_ledger_events(account)
     fuel_types = FuelType.query.order_by(FuelType.name).all()
+    # A resolver bulk-loads FuelPriceHistory once instead of a query per
+    # (entry, fuel type) pair - price_on_date() would be entries x fuel
+    # types SELECTs here, which is fine for a handful of rows but an N+1
+    # storm on an account with a long credit history (see price_resolver()).
+    resolve_price = price_resolver(fuel_types)
+    for e in events:
+        if e["kind"] == "credit":
+            # The edit form's fuel dropdown must label each option with the
+            # rate in force on THIS entry's own date, not today's cached
+            # price - otherwise editing an old entry shows a price that was
+            # never actually charged (see price_on_date()). Only credit
+            # entries have an edit form with a fuel picker, so no other kind
+            # needs this.
+            e["fuel_prices"] = {f.id: resolve_price(f, e["entry_date"]) for f in fuel_types}
     tanks = Tank.query.order_by(Tank.number).all()
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
     today = date.today()
