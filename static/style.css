@@ -605,7 +605,9 @@ button { cursor: pointer; font-weight: 600; border: none; }
 }
 
 @media (max-width: 980px) {
-  .ledger-grid { grid-template-columns: 1fr; }
+  /* minmax(0, ...) not 1fr - see the note on .two-col below for why a
+     bare 1fr lets wide content push the whole page sideways. */
+  .ledger-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 .ledger-col {
@@ -1145,7 +1147,13 @@ button { cursor: pointer; font-weight: 600; border: none; }
   grid-template-columns: 1fr 1fr;
   gap: var(--s5);
 }
-@media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+/* minmax(0, ...) rather than a bare 1fr: a plain 1fr track has an "auto"
+   minimum, i.e. min-content, so a wide table inside a panel inflates the
+   track past the container and scrolls the whole PAGE sideways instead of
+   just the table (the Daily Report's Non-Fuel Sales / Product Purchases
+   panels did exactly this). Letting the track shrink below min-content
+   hands the overflow back to .table-wrap, which is built to scroll it. */
+@media (max-width: 900px) { .two-col { grid-template-columns: minmax(0, 1fr); } }
 
 /* ---------------------------------------------- statements & printing --- */
 /* Statements are meant to be handed to a credit customer, so the sheet
@@ -1241,6 +1249,71 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
   .panel { padding: var(--s4); }
   .feed-item { grid-template-columns: 50px 1fr auto; }
   .feed-item .feed-tag { display: none; }
+}
+
+/* ---------- phones ---------- */
+/* Everything below is phone-only and lives entirely inside this media
+   query - the desktop layout above is deliberately left untouched. The
+   app is used one-handed at the forecourt to type meter readings, so
+   this is about making entry survivable on a small touch screen, not
+   about restyling anything. */
+
+@media (max-width: 640px) {
+  /* 1. iOS Safari zooms the whole page in whenever a focused field's text
+     is under 16px, and never zooms back out - on a form this dense that
+     leaves the user pinching back after every single entry. 16px is the
+     threshold that suppresses it; it is NOT a visual preference. Buttons
+     are left alone: they never receive text input, so they never trigger
+     the zoom, and resizing them would shift the layout for no reason. */
+  input, select, textarea { font-size: 16px; }
+
+  /* 2. Touch targets. 44px is the standard minimum for a reliable finger
+     tap; the base 9px padding lands most controls around 30-38px. Applied
+     as a minimum only, so nothing that is already larger changes. */
+  input, select, textarea, .btn, button[type="submit"] { min-height: 44px; }
+  .btn-sm { min-height: 44px; }
+  .sidebar-user a,
+  .export-menu a,
+  .feed-item .delete-link,
+  .edit-toggle {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  /* 3. The nav is 8 items wide - as a single non-wrapping strip that is
+     ~965px of horizontal scrolling on a 375px screen, with no visual hint
+     that it scrolls, so the later pages are effectively unreachable. Let
+     it wrap onto as many rows as it needs instead.
+     flex-basis:100% is the part that actually does the work: the 860px
+     block above sets flex:0 0 auto, which sizes the nav to its own
+     content (965px) and therefore never gives its children a reason to
+     wrap. Pinning it to the sidebar's width is what makes flex-wrap bite. */
+  .sidebar { flex-wrap: wrap; padding: var(--s2) var(--s3); }
+  .sidebar-nav {
+    flex: 1 1 100%;
+    /* Two even columns rather than ragged wrapping - the labels vary from
+       "Trends" to "Monthly Report", so left-packed flex items leave a
+       jagged right edge. Two columns is what actually fits at 44px-tall
+       tap targets; the whole bar is position:static here, so it scrolls
+       away with the page and only costs height at the very top. */
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--s1);
+  }
+  .sidebar-brand { flex: 1 1 auto; }
+  .sidebar-user { margin-left: auto; }
+
+  /* 4. Nothing may push the page sideways. Grid and flex children default
+     to min-width:auto (min-content), which lets a wide table or a long
+     unbroken string inflate its parent past the viewport - the same trap
+     the .two-col fix above addresses, applied to the remaining containers. */
+  .panel, .ledger-col, .ledger-section, .form-grid > *, .feed-desc { min-width: 0; }
+  .feed-desc strong, .feed-desc span { overflow-wrap: anywhere; }
+
+  /* 5. Wide tables stay readable by scrolling themselves rather than the
+     page, with momentum scrolling on iOS. */
+  .table-wrap { -webkit-overflow-scrolling: touch; }
 }
 
 @media print {
