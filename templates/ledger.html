@@ -135,7 +135,9 @@
         <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
         <div class="nozzle-list">
           {% for row in nozzle_rows %}
-          <div class="nozzle-row" data-price="{{ row.price }}" {% if row.previous_is_auto %}data-last="{{ row.previous_reading }}"{% endif %}>
+          <div class="nozzle-row" data-price="{{ row.price }}" {% if row.previous_is_auto %}data-last="{{ row.previous_reading }}"{% endif %}
+               data-testing="{{ row.existing_testing if row.existing_testing is not none else 0 }}"
+               data-gross="{{ row.existing_gross if row.existing_gross is not none else '' }}">
             <div>
               <div class="nz-label">D{{ row.dispenser.number }} &middot; Nozzle {{ row.nozzle.nozzle_number }}</div>
               <div class="nz-fuel">{{ row.nozzle.tank.label }} &middot; Rs {{ "%.2f"|format(row.price) }}/L{% if selected_date != today %} (as of {{ selected_date.strftime("%d %b") }}){% endif %}</div>
@@ -150,10 +152,6 @@
             {% endif %}
             <input type="number" step="0.01" min="0" id="reading_{{ row.nozzle.id }}" name="reading_{{ row.nozzle.id }}" class="nz-current-input"
                    placeholder="This date's reading" value="{{ row.existing_reading if row.existing_reading is not none else '' }}">
-            <label class="nz-testing">Testing (L)
-              <input type="number" step="0.01" min="0" id="testing_{{ row.nozzle.id }}" name="testing_{{ row.nozzle.id }}" class="nz-testing-input"
-                     placeholder="0" value="{{ row.existing_testing if row.existing_testing else '' }}">
-            </label>
             <div class="calc-preview" id="calc_{{ row.nozzle.id }}">{% if row.previous_is_auto %}Enter this date's reading{% else %}No entry for the day before - enter both readings{% endif %}</div>
           </div>
           {% endfor %}
@@ -168,8 +166,15 @@
     </div>
 
     <div class="ledger-section">
-      <h3>Sales Return</h3>
-      <p class="hint-sm">Fuel a customer physically brings back into a tank, refunded to them - distinct from Testing above, which never involves a customer at all.</p>
+      <h3>Sales Return / Testing</h3>
+      <p class="hint-sm">A customer return is refunded and moves money - fuel comes back into a tank and cash/bank/credit goes back out to the customer. Nozzle testing never involves a customer at all: it drains into the same tank and moves no money, it's simply carved out of that nozzle's sale.</p>
+      <label>Type
+        <select id="return_entry_type">
+          <option value="return">Customer Return (refunded)</option>
+          <option value="testing">Nozzle Testing (no refund)</option>
+        </select>
+      </label>
+      <div id="return-type-return">
       <form method="post" action="{{ url_for('ledger_sales_return') }}" id="sales-return-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
@@ -228,25 +233,53 @@
           <button type="submit" class="btn btn-sm">Record Sales Return</button>
         </div>
       </form>
+      </div>
+      <div id="return-type-testing" style="display:none;">
+      <form method="post" action="{{ url_for('ledger_testing') }}" id="testing-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
+        <div class="form-grid">
+          <label>Nozzle
+            <select name="nozzle_id" id="testing_nozzle" required>
+              <option value="">Select...</option>
+              {% for row in nozzle_rows %}
+              <option value="{{ row.nozzle.id }}"
+                      data-gross="{{ row.existing_gross if row.existing_gross is not none else '' }}"
+                      data-testing="{{ row.existing_testing if row.existing_testing is not none else 0 }}">
+                D{{ row.dispenser.number }} &middot; Nozzle {{ row.nozzle.nozzle_number }} - {{ row.nozzle.tank.label }}
+              </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Litres
+            <input type="number" step="0.01" min="0.01" name="liters" id="testing_liters" required>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div class="calc-preview" id="testing_calc" style="margin-top:10px;">Select a nozzle to see the meter difference</div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Testing</button>
+        </div>
+      </form>
+      </div>
     </div>
 
     <div class="ledger-section">
       <h3>Non-Fuel Sale</h3>
-      <p class="hint-sm">Lubricants, filters, and shop items sold at the forecourt - priced at this date's rate, snapshotted onto the entry so a later price change never re-prices it.</p>
-      {% if products %}
+      <p class="hint-sm">Lubricants, filters, and shop items sold at the forecourt - priced at this date's rate, snapshotted onto the entry so a later price change never re-prices it. Search the catalogue below, or add a new product on the fly.</p>
       <form method="post" action="{{ url_for('ledger_product_sale') }}" id="product-sale-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
         <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
         <div class="form-grid">
-          <label>Product
-            <select name="product_id" id="product_sale_product" required>
-              <option value="">Select...</option>
-              {% for p in products %}
-              {% set info = product_info.get(p.id, (0, 0, 0)) %}
-              <option value="{{ p.id }}" data-purchase="{{ info[0] }}" data-retail="{{ info[1] }}" data-stock="{{ info[2] }}">{{ p.label }} (Rs {{ "%.2f"|format(info[1]) }})</option>
-              {% endfor %}
-            </select>
+          <label class="product-picker" data-scope="product_sale">Product
+            <input type="text" class="product-search" placeholder="Type to search products..."
+                   autocomplete="off" role="combobox" aria-expanded="false" aria-autocomplete="list">
+            <input type="hidden" name="product_id" class="product-id-input">
+            <div class="product-results" hidden></div>
           </label>
           <label>Quantity
             <input type="number" step="0.01" min="0.01" name="quantity" id="product_sale_quantity" required>
@@ -280,14 +313,44 @@
             <input type="text" name="note">
           </label>
         </div>
+        <div class="new-product-fields" data-scope="product_sale" style="display:none;">
+          <div class="form-grid">
+            <label>New product name
+              <input type="text" name="new_product_name">
+            </label>
+            <label>Pack size (optional)
+              <input type="text" name="new_product_pack_size" placeholder="e.g. 4 L">
+            </label>
+            <label>Category
+              <select name="new_product_category">
+                <option value="lubricant">Lubricant</option>
+                <option value="filter">Filter</option>
+                <option value="shop">Shop</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label>Unit
+              <select name="new_product_unit">
+                <option value="piece">Piece</option>
+                <option value="litre">Litre</option>
+              </select>
+            </label>
+            <label>Purchase rate (Rs)
+              <input type="number" step="0.01" min="0" name="new_product_purchase_rate">
+            </label>
+            <label>Retail rate (Rs)
+              <input type="number" step="0.01" min="0" name="new_product_retail_rate">
+            </label>
+            <label>Opening stock
+              <input type="number" step="0.01" min="0" name="new_product_opening_stock" value="0">
+            </label>
+          </div>
+        </div>
         <div class="calc-preview" id="product_sale_calc" style="margin-top:10px;">Amount will be calculated automatically</div>
         <div style="margin-top:12px;">
           <button type="submit" class="btn btn-sm">Record Non-Fuel Sale</button>
         </div>
       </form>
-      {% else %}
-      <p class="hint">No products set up yet - add some from Settings.</p>
-      {% endif %}
     </div>
 
     <div class="ledger-section">
@@ -547,19 +610,16 @@
 
     <div class="ledger-section">
       <h3>Product Purchase / Stock Received <span class="owner-tag">Owner</span></h3>
-      <p class="hint-sm">Stock received for a non-fuel product. A negative quantity records a return to the supplier or a stock-count correction - enter unit cost as the normal positive price either way; the sign of the total comes from the quantity, never from the cost.</p>
-      {% if products %}
+      <p class="hint-sm">Stock received for a non-fuel product. A negative quantity records a return to the supplier or a stock-count correction - enter unit cost as the normal positive price either way; the sign of the total comes from the quantity, never from the cost. Search the catalogue below, or add a new product on the fly.</p>
       <form method="post" action="{{ url_for('ledger_product_purchase') }}" id="product-purchase-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
         <div class="form-grid">
-          <label>Product
-            <select name="product_id" required>
-              <option value="">Select...</option>
-              {% for p in products %}
-              <option value="{{ p.id }}">{{ p.label }}</option>
-              {% endfor %}
-            </select>
+          <label class="product-picker" data-scope="product_purchase">Product
+            <input type="text" class="product-search" placeholder="Type to search products..."
+                   autocomplete="off" role="combobox" aria-expanded="false" aria-autocomplete="list">
+            <input type="hidden" name="product_id" class="product-id-input">
+            <div class="product-results" hidden></div>
           </label>
           <label>Quantity <span class="hint-sm">negative = return/correction</span>
             <input type="number" step="0.01" name="quantity" id="product_purchase_quantity" required>
@@ -601,14 +661,39 @@
             <input type="text" name="note">
           </label>
         </div>
+        <div class="new-product-fields" data-scope="product_purchase" style="display:none;">
+          <p class="hint-sm">The unit cost above is used as this new product's purchase rate - there's no separate field for it here, so the two can never disagree.</p>
+          <div class="form-grid">
+            <label>New product name
+              <input type="text" name="new_product_name">
+            </label>
+            <label>Pack size (optional)
+              <input type="text" name="new_product_pack_size" placeholder="e.g. 4 L">
+            </label>
+            <label>Category
+              <select name="new_product_category">
+                <option value="lubricant">Lubricant</option>
+                <option value="filter">Filter</option>
+                <option value="shop">Shop</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label>Unit
+              <select name="new_product_unit">
+                <option value="piece">Piece</option>
+                <option value="litre">Litre</option>
+              </select>
+            </label>
+            <label>Retail rate (Rs)
+              <input type="number" step="0.01" min="0" name="new_product_retail_rate">
+            </label>
+          </div>
+        </div>
         <div class="calc-preview" id="product_purchase_calc" style="margin-top:10px;">Total will be calculated automatically</div>
         <div style="margin-top:12px;">
           <button type="submit" class="btn btn-sm">Record Product Purchase</button>
         </div>
       </form>
-      {% else %}
-      <p class="hint">No products set up yet - add some from Settings.</p>
-      {% endif %}
     </div>
 
     <div class="ledger-section">
@@ -899,6 +984,7 @@
       "salary": ("salary", "this salary payment"),
       "product_sale": ("product-sale", "this non-fuel sale"),
       "product_purchase": ("product-purchase", "this product purchase"),
+      "nozzle_testing": ("nozzle-testing", "this testing entry"),
     }[e.kind] %}
     <div class="feed-item">
       <div class="feed-time">{{ e.sort.strftime("%H:%M") }}</div>
@@ -962,6 +1048,10 @@
       <div class="feed-desc"><strong>{{ e.obj.product.label }}{{ " return/correction" if e.obj.quantity < 0 }}</strong><span>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} &middot; {{ ("Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash") if e.obj.payment_type == "cash" else "On credit" }} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Product Purchase</span>
       <div class="feed-amount {{ 'debit' if e.obj.total_cost < 0 else 'credit' }}">{{ "+" if e.obj.total_cost < 0 }}Rs {{ "%.2f"|format(e.obj.total_cost|abs) }}</div>
+      {% elif e.kind == "nozzle_testing" %}
+      <div class="feed-desc"><strong>{{ e.obj.nozzle.label }} testing</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; drains back into {{ e.obj.nozzle.tank.label }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-neutral">Testing</span>
+      <div class="feed-amount neutral">{{ "%.2f"|format(e.obj.liters) }} L</div>
       {% endif %}
       {% if current_user.is_owner %}
       <form method="post" action="{{ url_for('entry_delete', kind=delete_kind, entry_id=e.obj.id) }}"
@@ -984,12 +1074,16 @@ function fmtMoney(v) {
 }
 
 // --- Nozzle reading live calculation ---
+// Testing is no longer typed in here (it's its own entry, in the Sales
+// Return/Testing section below) - row.dataset.testing is READ-ONLY info
+// about whatever's already recorded for this slot, shown purely so the
+// split is visible while entering a reading, never editable from here.
 document.querySelectorAll('.nozzle-row').forEach(function (row) {
   const input = row.querySelector('.nz-current-input');
   const preview = row.querySelector('.calc-preview');
   const price = parseFloat(row.dataset.price);
   const manualPrev = row.querySelector('.nz-previous-input');
-  const testingInput = row.querySelector('.nz-testing-input');
+  const existingTesting = parseFloat(row.dataset.testing) || 0;
 
   function getPrevious() {
     if (manualPrev) {
@@ -1014,13 +1108,9 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
       preview.className = 'calc-preview has-error';
       return;
     }
-    let testing = testingInput ? parseFloat(testingInput.value) : NaN;
-    if (isNaN(testing) || testing < 0) testing = 0;
-    if (testing > gross) {
-      preview.textContent = "Testing (" + testing.toFixed(2) + " L) can't exceed the meter difference (" + gross.toFixed(2) + " L)";
-      preview.className = 'calc-preview has-error';
-      return;
-    }
+    // Clamp for display only - the server does the real clamping (and
+    // reports over_by) via sync_sale_testing() once this is saved.
+    const testing = Math.min(existingTesting, gross);
     const liters = gross - testing;
     const amount = liters * price;
     if (testing > 0) {
@@ -1033,7 +1123,6 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
   }
   input.addEventListener('input', update);
   if (manualPrev) manualPrev.addEventListener('input', update);
-  if (testingInput) testingInput.addEventListener('input', update);
   update();
 });
 
@@ -1150,44 +1239,251 @@ if (returnMethod && returnCustomerField) {
   });
 }
 
+// --- Sales Return / Testing: the type selector swaps between the two
+// forms - purely a UI switch, neither form's fields are submitted with
+// the other's, so this only ever toggles which one is visible ---
+const returnEntryType = document.getElementById('return_entry_type');
+const returnTypeReturn = document.getElementById('return-type-return');
+const returnTypeTesting = document.getElementById('return-type-testing');
+if (returnEntryType && returnTypeReturn && returnTypeTesting) {
+  returnEntryType.addEventListener('change', function () {
+    const isTesting = returnEntryType.value === 'testing';
+    returnTypeReturn.style.display = isTesting ? 'none' : '';
+    returnTypeTesting.style.display = isTesting ? '' : 'none';
+  });
+}
+
+// --- Testing: live meter-difference / net-sold preview from the selected
+// nozzle's data-gross/data-testing (from nozzle_rows - see app.py's
+// ledger() route), same read-only info the reading row's own calc-preview
+// shows, plus what this NEW entry would add on top of it ---
+const testingNozzle = document.getElementById('testing_nozzle');
+const testingLitersInput = document.getElementById('testing_liters');
+const testingCalc = document.getElementById('testing_calc');
+function updateTestingCalc() {
+  const opt = testingNozzle.options[testingNozzle.selectedIndex];
+  if (!opt || !opt.value) {
+    testingCalc.textContent = 'Select a nozzle to see the meter difference';
+    testingCalc.className = 'calc-preview';
+    return;
+  }
+  const grossRaw = opt.dataset.gross;
+  const alreadyTesting = parseFloat(opt.dataset.testing) || 0;
+  if (grossRaw === '' || grossRaw === undefined) {
+    testingCalc.textContent = 'No meter reading has been saved yet for this nozzle on this date/shift - ' +
+      'this testing will be carved out of the sale automatically once that reading is saved.';
+    testingCalc.className = 'calc-preview has-warn';
+    return;
+  }
+  const gross = parseFloat(grossRaw);
+  const newLiters = parseFloat(testingLitersInput.value);
+  if (isNaN(newLiters)) {
+    testingCalc.innerHTML = 'Meter difference: ' + gross.toFixed(2) + ' L' +
+      (alreadyTesting > 0 ? ' &middot; ' + alreadyTesting.toFixed(2) + ' L testing already recorded' : '');
+    testingCalc.className = 'calc-preview';
+    return;
+  }
+  const totalTesting = alreadyTesting + newLiters;
+  const clampedTesting = Math.min(totalTesting, gross);
+  const net = gross - clampedTesting;
+  let msg = gross.toFixed(2) + ' L meter difference &minus; ' + clampedTesting.toFixed(2) +
+    ' L total testing = <strong>' + net.toFixed(2) + ' L net sold</strong>';
+  let cls = 'has-value';
+  if (totalTesting > gross) {
+    msg += ' (testing would exceed the meter difference by ' + (totalTesting - gross).toFixed(2) + ' L - will be clamped)';
+    cls = 'has-warn';
+  }
+  testingCalc.innerHTML = msg;
+  testingCalc.className = 'calc-preview ' + cls;
+}
+if (testingNozzle) {
+  testingNozzle.addEventListener('change', updateTestingCalc);
+  testingLitersInput.addEventListener('input', updateTestingCalc);
+}
+
+// --- Product picker: searchable "type to filter" combobox shared by the
+// Non-Fuel Sale and Product Purchase forms, with inline "add new product"
+// - the real catalogue runs to ~95 SKUs, so this reads PRODUCTS (rendered
+// once from app.py's ledger() route) instead of two <select> elements
+// each holding ~95 <option> nodes. See resolve_product() in app.py for
+// the server-side __new__ handling this hidden input feeds into.
+const PRODUCTS = {{ products_json | tojson }};
+
+function initProductPicker(scope, onChange) {
+  const picker = document.querySelector('.product-picker[data-scope="' + scope + '"]');
+  if (!picker) return;
+  const search = picker.querySelector('.product-search');
+  const hidden = picker.querySelector('.product-id-input');
+  const results = picker.querySelector('.product-results');
+  const newFields = document.querySelector('.new-product-fields[data-scope="' + scope + '"]');
+  const newRequiredInputs = newFields
+    ? newFields.querySelectorAll('[name="new_product_name"], [name="new_product_retail_rate"], [name="new_product_purchase_rate"]')
+    : [];
+  const newNameInput = newFields ? newFields.querySelector('[name="new_product_name"]') : null;
+  let activeIndex = -1;
+  let currentMatches = [];
+
+  function matches(query) {
+    const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!tokens.length) return PRODUCTS.slice(0, 8);
+    return PRODUCTS.filter(function (p) {
+      const label = p.label.toLowerCase();
+      return tokens.every(function (t) { return label.indexOf(t) !== -1; });
+    }).slice(0, 8);
+  }
+
+  function isExactExisting(query) {
+    const q = query.toLowerCase();
+    return PRODUCTS.some(function (p) { return p.label.toLowerCase() === q; });
+  }
+
+  function setActive(index) {
+    const rows = results.children;
+    for (let i = 0; i < rows.length; i++) rows[i].classList.toggle('is-active', i === index);
+    activeIndex = index;
+  }
+
+  function selectProduct(p) {
+    hidden.value = p.id;
+    search.value = p.label;
+    close();
+    if (newFields) {
+      newFields.style.display = 'none';
+      newRequiredInputs.forEach(function (el) { el.required = false; });
+    }
+    if (onChange) onChange();
+  }
+
+  function selectAddNew(query) {
+    hidden.value = '__new__';
+    close();
+    if (newFields) {
+      newFields.style.display = '';
+      if (newNameInput) newNameInput.value = query;
+      newRequiredInputs.forEach(function (el) { el.required = true; });
+    }
+    if (onChange) onChange();
+  }
+
+  function render(query) {
+    currentMatches = matches(query);
+    results.innerHTML = '';
+    currentMatches.forEach(function (p) {
+      const row = document.createElement('div');
+      row.className = 'product-result';
+      row.innerHTML = '<span>' + p.label + '</span><span class="product-result-meta">Rs ' +
+        p.retail.toFixed(2) + ' &middot; ' + p.stock.toFixed(2) + ' in stock</span>';
+      row.addEventListener('mousedown', function (e) { e.preventDefault(); selectProduct(p); });
+      results.appendChild(row);
+    });
+    const trimmed = query.trim();
+    const addRow = document.createElement('div');
+    addRow.className = 'product-result product-result-add';
+    addRow.textContent = trimmed && !isExactExisting(trimmed)
+      ? '+ Add "' + trimmed + '" as a new product'
+      : '+ Add a new product';
+    addRow.addEventListener('mousedown', function (e) { e.preventDefault(); selectAddNew(trimmed); });
+    results.appendChild(addRow);
+
+    activeIndex = -1;
+    results.hidden = false;
+    search.setAttribute('aria-expanded', 'true');
+  }
+
+  function close() {
+    results.hidden = true;
+    search.setAttribute('aria-expanded', 'false');
+    activeIndex = -1;
+  }
+
+  function activateRow(index, query) {
+    if (index < 0) return;
+    if (index < currentMatches.length) {
+      selectProduct(currentMatches[index]);
+    } else {
+      selectAddNew(query.trim());
+    }
+  }
+
+  search.addEventListener('focus', function () { render(search.value); });
+  search.addEventListener('input', function () {
+    // Editing the text after a selection invalidates it - a stale id must
+    // never be submitted alongside mismatched visible text.
+    hidden.value = '';
+    if (newFields) {
+      newFields.style.display = 'none';
+      newRequiredInputs.forEach(function (el) { el.required = false; });
+    }
+    render(search.value);
+    if (onChange) onChange();
+  });
+  search.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (results.hidden) { render(search.value); return; }
+      setActive((activeIndex + 1) % results.children.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (results.hidden) { render(search.value); return; }
+      setActive((activeIndex - 1 + results.children.length) % results.children.length);
+    } else if (e.key === 'Enter') {
+      if (!results.hidden) {
+        e.preventDefault();
+        activateRow(activeIndex, search.value);
+      }
+    } else if (e.key === 'Escape') {
+      close();
+    }
+  });
+  document.addEventListener('click', function (e) {
+    if (!picker.contains(e.target)) close();
+  });
+}
+
 // --- Non-Fuel Sale: live amount + commission preview, plus the current
 // stock for the selected product (so overselling is visible before
 // saving, even though the server still accepts and warns rather than
 // blocking) ---
-const productSaleProduct = document.getElementById('product_sale_product');
+const productSaleHidden = document.querySelector('.product-picker[data-scope="product_sale"] .product-id-input');
 const productSaleQuantity = document.getElementById('product_sale_quantity');
 const productSaleCalc = document.getElementById('product_sale_calc');
+function findProduct(id) {
+  if (!id || id === '__new__') return null;
+  const numId = parseInt(id, 10);
+  return PRODUCTS.find(function (p) { return p.id === numId; }) || null;
+}
 function updateProductSaleCalc() {
-  const opt = productSaleProduct.options[productSaleProduct.selectedIndex];
-  const retail = opt ? parseFloat(opt.dataset.retail) : NaN;
-  const purchase = opt ? parseFloat(opt.dataset.purchase) : NaN;
-  const stock = opt ? parseFloat(opt.dataset.stock) : NaN;
+  if (productSaleHidden.value === '__new__') {
+    productSaleCalc.textContent = 'New product - amount will be calculated once it is saved';
+    productSaleCalc.className = 'calc-preview';
+    return;
+  }
+  const product = findProduct(productSaleHidden.value);
   const qty = parseFloat(productSaleQuantity.value);
-  if (isNaN(retail) || isNaN(qty)) {
+  if (!product || isNaN(qty)) {
     productSaleCalc.textContent = 'Amount will be calculated automatically';
     productSaleCalc.className = 'calc-preview';
     return;
   }
-  const amount = qty * retail;
-  const commissionPerUnit = retail - purchase;
+  const amount = qty * product.retail;
+  const commissionPerUnit = product.retail - product.purchase;
   const commission = qty * commissionPerUnit;
-  let msg = qty.toFixed(2) + ' x Rs ' + retail.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+  let msg = qty.toFixed(2) + ' x Rs ' + product.retail.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
   msg += ' &middot; commission Rs ' + commissionPerUnit.toFixed(2) + '/unit = Rs ' + fmtMoney(commission);
   let cls = 'has-value';
-  if (!isNaN(stock)) {
-    msg += ' &middot; ' + stock.toFixed(2) + ' in stock';
-    if (qty > stock) {
-      msg += ' - exceeds stock, will still save';
-      cls = 'has-warn';
-    }
+  msg += ' &middot; ' + product.stock.toFixed(2) + ' in stock';
+  if (qty > product.stock) {
+    msg += ' - exceeds stock, will still save';
+    cls = 'has-warn';
   }
   productSaleCalc.innerHTML = msg;
   productSaleCalc.className = 'calc-preview ' + cls;
 }
-if (productSaleProduct) {
-  productSaleProduct.addEventListener('change', updateProductSaleCalc);
+if (productSaleQuantity) {
   productSaleQuantity.addEventListener('input', updateProductSaleCalc);
 }
+initProductPicker('product_sale', updateProductSaleCalc);
+updateProductSaleCalc();
 
 // --- Non-Fuel Sale: "On customer's account" reveals the customer picker,
 // same idea as the Sales Return toggle above ---
@@ -1200,6 +1496,32 @@ if (productSaleMethod && productSaleCustomerField) {
     productSaleCustomerField.querySelector('select').required = isCredit;
   });
 }
+
+// --- Product Purchase: product picker (add-new fieldset only, no
+// calc-preview dependency - unit cost/quantity below don't need the
+// product's own rates) ---
+initProductPicker('product_purchase', null);
+
+// --- Both product forms: the hidden product_id can't carry `required`
+// (hidden inputs are excluded from HTML constraint validation), so guard
+// on submit instead - block, focus the search box, and explain in the
+// form's own calc-preview. The server-side check in resolve_product() is
+// the real guard; this is just UX. ---
+function guardProductPicker(formId, scope, calcEl) {
+  const form = document.getElementById(formId);
+  if (!form) return;
+  form.addEventListener('submit', function (e) {
+    const hidden = document.querySelector('.product-picker[data-scope="' + scope + '"] .product-id-input');
+    if (!hidden.value) {
+      e.preventDefault();
+      document.querySelector('.product-picker[data-scope="' + scope + '"] .product-search').focus();
+      calcEl.textContent = 'Please choose a product (or add a new one) before saving.';
+      calcEl.className = 'calc-preview has-error';
+    }
+  });
+}
+guardProductPicker('product-sale-form', 'product_sale', productSaleCalc);
+guardProductPicker('product-purchase-form', 'product_purchase', document.getElementById('product_purchase_calc'));
 
 // --- Product Purchase: live quantity x unit cost = total calculation,
 // allowing a negative total for a return/correction ---

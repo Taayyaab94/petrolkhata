@@ -66,6 +66,7 @@ from ledger_logic import (
     record_product_rates,
     sales_breakdown_for_date,
     stock_series,
+    sync_sale_testing,
     weighted_avg_cost,
 )
 from models import (
@@ -83,6 +84,7 @@ from models import (
     FuelType,
     Nozzle,
     NozzleReset,
+    NozzleTesting,
     Product,
     ProductPurchase,
     ProductRateHistory,
@@ -617,6 +619,7 @@ BACKUP_MODELS = [
     Sale,
     CreditGiven,
     SalesReturn,
+    NozzleTesting,
     StockPurchase,
     SupplierPayment,
     Receipt,
@@ -1574,6 +1577,8 @@ def get_feed_for_date(entry_date, full_visibility):
         )
     for ps in ProductSale.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "product_sale", "sort": ps.recorded_at, "obj": ps})
+    for nt in NozzleTesting.query.filter_by(entry_date=entry_date).all():
+        events.append({"kind": "nozzle_testing", "sort": nt.recorded_at, "obj": nt})
 
     if full_visibility:
         for e in Expense.query.filter_by(entry_date=entry_date).all():
@@ -1623,6 +1628,12 @@ def ledger():
                     "previous_is_auto": prev_auto,
                     "existing_reading": existing.current_reading if existing else None,
                     "existing_testing": existing.testing_liters if existing else None,
+                    # Read-only info for the reading row's calc-preview (the
+                    # per-nozzle "Testing (L)" input is gone - testing is
+                    # now recorded separately via the Sales Return/Testing
+                    # section and reconciled by sync_sale_testing()) and for
+                    # the Testing form's own per-nozzle calc-preview.
+                    "existing_gross": round(existing.current_reading - existing.previous_reading, 2) if existing else None,
                     # The price in effect ON selected_date, not necessarily
                     # today's current price - so paging back to an earlier
                     # date shows what fuel cost then, and a price change
@@ -1695,6 +1706,21 @@ def ledger():
         p.id: (*resolve_product_rate(p, selected_date), stock_by_product_id.get(p.id, 0.0))
         for p in products
     }
+    # One JSON blob for BOTH product pickers (Non-Fuel Sale, Product
+    # Purchase) - the catalogue runs to ~95 SKUs, so a search-as-you-type
+    # combobox reads this client-side instead of rendering ~95 <option>
+    # nodes into the DOM twice.
+    products_json = [
+        {
+            "id": p.id,
+            "label": p.label,
+            "category": p.category,
+            "purchase": product_info[p.id][0],
+            "retail": product_info[p.id][1],
+            "stock": product_info[p.id][2],
+        }
+        for p in products
+    ]
 
     breakdown = sales_breakdown_for_date(selected_date)
     total_sales = breakdown["total"]
@@ -1760,6 +1786,7 @@ def ledger():
         bank_accounts=bank_accounts,
         products=products,
         product_info=product_info,
+        products_json=products_json,
         feed=feed,
         total_sales=total_sales,
         fuel_sales=fuel_sales,
@@ -1837,6 +1864,107 @@ def resolve_supplier(form):
 
 def resolve_employee(form):
     return resolve_account(form, "employee_id", "new_employee_name", "employee", "employee")
+
+
+def resolve_product(form, entry_date, fallback_purchase_rate=None):
+    """Shared lookup/quick-create for the Non-Fuel Sale and Product
+    Purchase product pickers - same __new__ convention as resolve_account(),
+    but a product isn't a bare name like a customer/supplier/employee, so
+    quick-creating one reuses settings_add_product()'s full validation
+    (including its "retail can't undercut purchase" guard) rather than
+    resolve_account()'s couple of lines. Returns (product_or_None,
+    error_or_None).
+
+    fallback_purchase_rate lets ledger_product_purchase() hand in the
+    purchase's own unit_cost when the inline fieldset (deliberately, see
+    that form in ledger.html) doesn't ask for a separate purchase rate -
+    the purchase being recorded IS the indent-rate delivery, so asking
+    twice would just let the two numbers disagree.
+
+    A product_id that isn't __new__ but doesn't resolve to an ACTIVE
+    product is treated as "none chosen" - same as the direct lookups
+    ledger_product_sale()/ledger_product_purchase() used to do inline
+    before this helper replaced them; a deactivated product can't be
+    picked going forward.
+    """
+    product_id = form.get("product_id", "")
+    if product_id != "__new__":
+        # Parsed defensively rather than with a bare int(): unlike the
+        # account pickers (whose <select> can only ever submit an id the
+        # server itself rendered), this arrives from a hidden input driven
+        # by the search combobox, so a stale back-button restore or a
+        # hand-rolled POST can put anything here - and an unhandled
+        # ValueError would be a 500 instead of a flash.
+        product = db.session.get(Product, int(product_id)) if product_id.isdigit() else None
+        if not product or not product.is_active:
+            return None, "Please choose a valid product."
+        return product, None
+
+    name = form.get("new_product_name", "").strip()
+    if not name:
+        return None, "Please enter a name for the new product."
+
+    existing = Product.query.filter(func.lower(Product.name) == name.lower()).first()
+    if existing:
+        return None, (
+            f"A product named \"{existing.name}\" already exists - search for it by "
+            "name instead of adding it again."
+        )
+
+    category = form.get("new_product_category", "lubricant").strip() or "lubricant"
+    if category not in PRODUCT_CATEGORIES:
+        category = "lubricant"
+    pack_size = form.get("new_product_pack_size", "").strip() or None
+    unit = form.get("new_product_unit", "piece").strip() or "piece"
+    if unit not in PRODUCT_UNITS:
+        unit = "piece"
+
+    purchase_rate = form.get("new_product_purchase_rate", type=float)
+    if purchase_rate is None:
+        purchase_rate = fallback_purchase_rate
+    retail_rate = form.get("new_product_retail_rate", type=float)
+    opening_stock = form.get("new_product_opening_stock", type=float)
+    if opening_stock is None:
+        # Omitted entirely on the Product Purchase form - that purchase
+        # itself IS the stock arriving, so there's nothing to set aside
+        # as an opening balance.
+        opening_stock = 0.0
+
+    if purchase_rate is None or purchase_rate < 0:
+        return None, "Please enter a valid purchase rate for the new product."
+    if retail_rate is None or retail_rate < 0:
+        return None, "Please enter a valid retail rate for the new product."
+    if retail_rate < purchase_rate:
+        return None, (
+            "Retail rate can't be less than the purchase rate - that's a guaranteed "
+            "loss and almost always a typo."
+        )
+    if opening_stock < 0:
+        return None, "Please enter a valid opening stock for the new product."
+
+    product = Product(
+        name=name,
+        category=category,
+        pack_size=pack_size,
+        unit=unit,
+        opening_stock=opening_stock,
+        # As-of entry_date, not today - unlike settings_add_product() (which
+        # has no entry date to anchor to and so defaults to today), a
+        # product quick-created while backfilling an old date has its
+        # opening stock dated to THAT date.
+        opening_stock_date=entry_date,
+        low_stock_threshold=0,
+    )
+    db.session.add(product)
+    db.session.flush()
+    # record_product_rates() flushes internally after adding the
+    # ProductRateHistory row (verified by reading its source - it needs
+    # product.id to resolve product_rates_on_date() against right after),
+    # so the caller's very next product_rates_on_date()/product_stock()
+    # call already sees this product and its new rate history row with no
+    # extra flush needed here.
+    record_product_rates(product, purchase_rate, retail_rate, entry_date)
+    return product, None
 
 
 def resolve_bank_account(form, field="bank_account_id", new_field="new_bank_account_name"):
@@ -1992,38 +2120,23 @@ def ledger_readings():
 
         gross = round(current_reading - previous, 2)
 
-        raw_testing = request.form.get(f"testing_{nozzle.id}", "").strip()
-        if not raw_testing:
-            testing = 0.0
-        else:
-            try:
-                testing = float(raw_testing)
-            except ValueError:
-                errors.append(f"{nozzle.label}: testing is not a valid number.")
-                continue
-        if testing < 0:
-            errors.append(f"{nozzle.label}: testing can't be negative.")
-            continue
-        if testing > gross:
-            errors.append(
-                f"{nozzle.label}: testing ({testing:g} L) can't exceed the meter "
-                f"difference ({gross:g} L)."
-            )
-            continue
-
-        # liters stays NET - the fuel that actually left the tank for
-        # good. Fuel run through the nozzle to test it drains back into
-        # the same tank and is never billed, so it's carved out here
-        # rather than folded into the sale (see Sale.testing_liters in
-        # models.py for the invariant this maintains).
-        liters = round(gross - testing, 2)
+        # liters is written provisionally as the full gross meter
+        # difference, testing_liters=0 - sync_sale_testing() below then
+        # carves out whatever's already on file in NozzleTesting for this
+        # slot (recorded via the Sales Return/Testing section, in either
+        # order relative to this reading) and overwrites
+        # liters/testing_liters/total_amount to match (see Sale's
+        # docstring in models.py and NozzleTesting's in the same file).
+        liters = gross
         existing = Sale.query.filter_by(
             nozzle_id=nozzle.id, entry_date=entry_date, shift_id=shift.id
         ).first()
-        # A day that was pure testing (gross > 0 but net liters == 0) is
-        # still a real record - only the true no-op (nothing typed, no
-        # existing row, no gap to backfill) gets skipped.
-        if liters == 0 and testing == 0 and not existing and not backfill_prior:
+        # A day that's pure testing nets to liters == 0 once synced, but
+        # is still a real record - only the true no-op (nothing typed, no
+        # existing row, no gap to backfill) gets skipped. liters == gross
+        # here (testing hasn't been subtracted yet), so "liters == 0 and
+        # testing == 0" reduces to exactly "gross == 0".
+        if gross == 0 and not existing and not backfill_prior:
             continue
 
         # Price as of entry_date, not today's current price - so backfilling
@@ -2045,9 +2158,11 @@ def ledger_readings():
                     previous_reading=backfill_prior["previous_reading"],
                     current_reading=backfill_prior["current_reading"],
                     liters=bf_liters,
-                    # No testing figure exists for a day being inferred
-                    # from a later entry's typed "previous" reading - the
-                    # user never saw this slot to report one for it.
+                    # Provisional, same as the main slot below - a testing
+                    # entry could already exist for this earlier slot (it
+                    # can be recorded in either order), and the
+                    # sync_sale_testing() call after the flush will fold
+                    # it in if so.
                     testing_liters=0,
                     price_per_liter=bf_price,
                     total_amount=round(bf_liters * bf_price, 2),
@@ -2059,7 +2174,7 @@ def ledger_readings():
             existing.previous_reading = previous
             existing.current_reading = current_reading
             existing.liters = liters
-            existing.testing_liters = testing
+            existing.testing_liters = 0
             existing.price_per_liter = price
             existing.total_amount = total_amount
             existing.user_id = current_user.id
@@ -2072,13 +2187,35 @@ def ledger_readings():
                     previous_reading=previous,
                     current_reading=current_reading,
                     liters=liters,
-                    testing_liters=testing,
+                    testing_liters=0,
                     price_per_liter=price,
                     total_amount=total_amount,
                     user_id=current_user.id,
                 )
             )
         saved += 1
+
+        # Flush so both Sale rows just added/updated above are visible to
+        # sync_sale_testing()'s own queries, then reconcile each slot
+        # against whatever NozzleTesting rows already exist for it -
+        # re-saving a reading must never wipe testing already on file.
+        db.session.flush()
+        if backfill_prior:
+            _, bf_over_by = sync_sale_testing(
+                nozzle.id, backfill_prior["entry_date"], backfill_prior["shift_id"]
+            )
+            if bf_over_by:
+                errors.append(
+                    f"{nozzle.label}: testing already recorded for {backfill_prior['entry_date']} "
+                    f"exceeds that slot's meter difference by {bf_over_by:g} L - clamped so the "
+                    f"sale doesn't go negative."
+                )
+        _, over_by = sync_sale_testing(nozzle.id, entry_date, shift.id)
+        if over_by:
+            errors.append(
+                f"{nozzle.label}: testing already recorded for this slot exceeds the meter "
+                f"difference by {over_by:g} L - clamped so the sale doesn't go negative."
+            )
 
     if saved:
         try:
@@ -2454,9 +2591,10 @@ def ledger_credit():
 @login_required
 def ledger_sales_return():
     """Fuel a customer physically brings back into a tank, refunded to
-    them - distinct from Testing (Sale.testing_liters in models.py),
-    which never involved a customer at all. Not owner-only: staff take
-    these at the forecourt the same as any other sale-side entry."""
+    them - distinct from Testing (NozzleTesting in models.py), which
+    never involved a customer at all and moves no money. Not owner-only:
+    staff take these at the forecourt the same as any other sale-side
+    entry."""
     entry_date = parse_date_param(request.form.get("entry_date"))
     shift = resolve_shift(request.form)
     fuel_type_id = request.form.get("fuel_type_id", type=int)
@@ -2509,6 +2647,64 @@ def ledger_sales_return():
             flash(
                 f"Recorded return of {liters:g} L {fuel.name} into {tank.label} (Rs {amount:,.2f}).",
                 "success",
+            )
+
+    return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+
+
+@app.route("/ledger/testing", methods=["POST"])
+@login_required
+def ledger_testing():
+    """Fuel run through a nozzle to test it - its own NozzleTesting row
+    rather than a field on the meter reading itself, so it can be entered
+    in either order relative to that reading and deleted on its own (see
+    NozzleTesting's docstring in models.py). Not owner-only: staff do this
+    the same as they record readings and sales returns.
+
+    No would_overdraw_cash() guard, deliberately: testing moves no money
+    at all - it only reduces revenue the exact same way typing in a
+    smaller meter reading would, and ledger_readings() has no cash guard
+    either."""
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    shift = resolve_shift(request.form)
+    nozzle_id = request.form.get("nozzle_id", type=int)
+    liters = request.form.get("liters", type=float)
+    note = request.form.get("note", "").strip()
+    nozzle = db.session.get(Nozzle, nozzle_id) if nozzle_id else None
+
+    if not nozzle:
+        db.session.rollback()
+        flash("Please choose a valid nozzle.", "error")
+    elif not liters or liters <= 0:
+        db.session.rollback()
+        flash("Liters must be a positive number.", "error")
+    else:
+        db.session.add(
+            NozzleTesting(
+                nozzle_id=nozzle.id,
+                shift_id=shift.id,
+                entry_date=entry_date,
+                liters=liters,
+                note=note or None,
+                user_id=current_user.id,
+            )
+        )
+        db.session.flush()
+        sale, over_by = sync_sale_testing(nozzle.id, entry_date, shift.id)
+        db.session.commit()
+        flash(f"Recorded {liters:g} L testing on {nozzle.label}.", "success")
+        if sale is None:
+            flash(
+                f"No meter reading has been saved yet for {nozzle.label} on {entry_date} "
+                f"({shift.name}) - this testing will be carved out of the sale automatically "
+                f"as soon as that reading is saved.",
+                "info",
+            )
+        elif over_by:
+            flash(
+                f"{nozzle.label}: total testing on this slot now exceeds the meter difference "
+                f"by {over_by:g} L - clamped so the sale doesn't go negative.",
+                "error",
             )
 
     return redirect(url_for("ledger", date=entry_date, shift=shift.id))
@@ -2625,7 +2821,6 @@ def ledger_product_sale():
     would_overdraw_cash() call on this route."""
     entry_date = parse_date_param(request.form.get("entry_date"))
     shift = resolve_shift(request.form)
-    product_id = request.form.get("product_id", type=int)
     quantity = request.form.get("quantity", type=float)
     note = request.form.get("note", "").strip()
     # Same cash/bank/credit shape a Sales Return refund uses - "on
@@ -2633,16 +2828,11 @@ def ledger_product_sale():
     # but the resolution (cash, a specific bank, or a customer picker) is
     # identical, so this reuses that resolver rather than duplicating it.
     method, bank_account, account, method_error = resolve_return_method(request.form)
+    product, product_error = resolve_product(request.form, entry_date)
 
-    product = db.session.get(Product, product_id) if product_id else None
-    if product and not product.is_active:
-        # A deactivated product can't be sold going forward - treated the
-        # same as if none had been chosen at all.
-        product = None
-
-    if not product:
+    if product_error:
         db.session.rollback()
-        flash("Please choose a valid product.", "error")
+        flash(product_error, "error")
     elif not quantity or quantity <= 0:
         db.session.rollback()
         flash("Quantity must be a positive number.", "error")
@@ -2701,16 +2891,20 @@ def ledger_product_purchase():
     of total_cost always comes from quantity, never from unit_cost, which
     is why unit_cost itself must always be a positive per-unit price."""
     entry_date = parse_date_param(request.form.get("entry_date"))
-    product_id = request.form.get("product_id", type=int)
     quantity = request.form.get("quantity", type=float)
     unit_cost = request.form.get("unit_cost", type=float)
     payment_type = request.form.get("payment_type", "cash")
     payment_type = payment_type if payment_type in ("cash", "credit") else "cash"
     note = request.form.get("note", "").strip()
 
-    product = db.session.get(Product, product_id) if product_id else None
-    if product and not product.is_active:
-        product = None
+    # A quick-created product's purchase rate falls back to this purchase's
+    # own unit_cost (see resolve_product()'s docstring) - only when
+    # unit_cost is itself a valid positive number; an invalid unit_cost
+    # must surface AS an invalid-unit-cost error below, not get laundered
+    # into a confusing "invalid purchase rate" one.
+    product, product_error = resolve_product(
+        request.form, entry_date, fallback_purchase_rate=unit_cost if unit_cost and unit_cost > 0 else None
+    )
 
     supplier = None
     supplier_error = None
@@ -2720,10 +2914,13 @@ def ledger_product_purchase():
     else:
         method, bank_account, method_error = resolve_payment_method(request.form)
 
-    if not product:
-        db.session.rollback()
-        flash("Please choose a valid product.", "error")
-    elif quantity is None or quantity == 0:
+    # quantity/unit_cost are checked BEFORE product_error so a bad unit
+    # cost is always reported as exactly that - if product_error were
+    # checked first, a __new__ product whose purchase rate falls back to
+    # this same bad unit_cost would fail there instead, naming the wrong
+    # field. Either way, the rollback below discards any Product
+    # resolve_product() already flushed above.
+    if quantity is None or quantity == 0:
         db.session.rollback()
         flash("Quantity can't be zero - use a negative quantity for a return or correction.", "error")
     elif not unit_cost or unit_cost <= 0:
@@ -2733,6 +2930,9 @@ def ledger_product_purchase():
             "quantity, never from the cost.",
             "error",
         )
+    elif product_error:
+        db.session.rollback()
+        flash(product_error, "error")
     elif payment_type == "credit" and supplier_error:
         db.session.rollback()
         flash(supplier_error, "error")
@@ -2943,6 +3143,7 @@ DELETABLE_ENTRIES = {
     "expense": (Expense, "expense"),
     "product-sale": (ProductSale, "product sale"),
     "product-purchase": (ProductPurchase, "product purchase"),
+    "nozzle-testing": (NozzleTesting, "testing entry"),
 }
 
 
@@ -2974,8 +3175,14 @@ def entry_delete(kind, entry_id):
     # is committed as deleted, the ORM instance's attributes are no longer
     # safe to read (SQLAlchemy expires them on commit).
     sale_gap_info = (entry.entry_date, entry.nozzle.label) if kind == "sale" else None
+    # Same reasoning: read the slot a deleted testing row belonged to
+    # before it's gone, so its Sale (if any) can be re-synced without it.
+    testing_slot = (entry.nozzle_id, entry.entry_date, entry.shift_id) if kind == "nozzle-testing" else None
 
     db.session.delete(entry)
+    if testing_slot:
+        db.session.flush()
+        sync_sale_testing(*testing_slot)
     db.session.commit()
     flash(f"Deleted {label}.", "success")
 

@@ -23,6 +23,7 @@ from models import (
     FuelType,
     Nozzle,
     NozzleReset,
+    NozzleTesting,
     Product,
     ProductPurchase,
     ProductRateHistory,
@@ -268,6 +269,66 @@ def next_sale_on_or_after(nozzle_id, entry_date, shift=None):
     if next_reset:
         query = query.filter(Sale.entry_date < next_reset.reset_date)
     return query.order_by(Sale.entry_date.asc(), Shift.sort_order.asc(), Sale.id.asc()).first()
+
+
+def sync_sale_testing(nozzle_id, entry_date, shift_id):
+    """Reconcile the Sale at (nozzle_id, entry_date, shift_id) with its
+    NozzleTesting rows - the single writer of Sale.testing_liters (see
+    NozzleTesting's docstring in models.py; nothing else may assign that
+    column). Every route that adds or deletes a NozzleTesting row must
+    call this afterward for the slot(s) it touched.
+
+    If no Sale exists yet for this slot, there's nothing to reconcile -
+    a testing entry recorded before its meter reading just sits there
+    unmatched until a reading is eventually saved for the same slot
+    (ledger_readings() calls this again once it creates/updates that Sale,
+    which is what folds it in). Returns (None, 0.0) in that case.
+
+    Otherwise: sums this slot's NozzleTesting rows, then re-derives
+    Sale.liters/testing_liters/total_amount from the meter's own gross
+    difference (current_reading - previous_reading) minus that sum -
+    exactly the split Sale's docstring in models.py describes. The sum is
+    CLAMPED to the gross difference - testing can never exceed what the
+    meter actually moved, or Sale.liters would go negative and produce
+    negative revenue - and the amount clamped off is returned as
+    `over_by` so the CALLER can surface it (this function only clamps and
+    reports; it never silently swallows the discrepancy).
+
+    Callers that just added or deleted a NozzleTesting row in the current
+    session MUST db.session.flush() first, so the SUM query below sees
+    it - autoflush would normally cover this, but the caller may be about
+    to read `sale` (which this function returns) rather than issue
+    another query, so relying on an implicit flush elsewhere isn't safe.
+
+    Returns (sale_or_None, over_by).
+    """
+    sale = Sale.query.filter_by(nozzle_id=nozzle_id, entry_date=entry_date, shift_id=shift_id).first()
+    if not sale:
+        return None, 0.0
+
+    testing = (
+        db.session.query(func.coalesce(func.sum(NozzleTesting.liters), 0))
+        .filter(
+            NozzleTesting.nozzle_id == nozzle_id,
+            NozzleTesting.entry_date == entry_date,
+            NozzleTesting.shift_id == shift_id,
+        )
+        .scalar()
+    )
+    testing = round(testing, 2)
+    gross = round(sale.current_reading - sale.previous_reading, 2)
+
+    if testing > gross:
+        over_by = round(testing - gross, 2)
+        testing = gross
+    else:
+        over_by = 0.0
+
+    sale.testing_liters = testing
+    sale.liters = round(gross - testing, 2)
+    sale.total_amount = round(sale.liters * sale.price_per_liter, 2)
+
+    return sale, over_by
 
 
 def price_on_date(fuel_type, entry_date):

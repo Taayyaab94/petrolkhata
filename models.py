@@ -245,6 +245,13 @@ class Sale(db.Model):
     fuel_sales_for_date(), COGS, trends, exports) already means "the sale"
     by it, and net-sold really is the quantity that permanently left the
     tank, so none of them need to change to account for testing.
+
+    testing_liters is NOT independently editable - it's a cached mirror of
+    the SUM of NozzleTesting rows recorded against this same (nozzle,
+    entry_date, shift), kept in sync purely so every consumer above can go
+    on reading it directly with zero changes. NozzleTesting is the source
+    of truth; sync_sale_testing() in ledger_logic.py is its one and only
+    writer. Nothing else may assign this column directly.
     """
 
     __table_args__ = (
@@ -335,6 +342,45 @@ class SalesReturn(db.Model):
     tank = db.relationship("Tank", backref="sales_returns")
     bank_account = db.relationship("BankAccount", backref="sales_returns")
     account = db.relationship("Account", backref="sales_returns")
+    user = db.relationship("User")
+
+
+class NozzleTesting(db.Model):
+    """Fuel run through a nozzle to test it (e.g. after maintenance),
+    recorded as its own row - unlike a SalesReturn, this moves NO money at
+    all: no customer was involved, nothing is refunded, and the fuel drains
+    straight back into the same tank it came from, so book_stock() is
+    already correct without this table ever being consulted - it reads
+    Sale.liters, which sync_sale_testing() keeps net of testing.
+
+    It exists as its own table - rather than just typing a "Testing (L)"
+    figure directly onto the Sale row - purely so it behaves like every
+    other ledger entry: it can be recorded in any order relative to the
+    meter reading it belongs to (a nozzle can be tested before that
+    slot's reading is ever saved), and it can be deleted on its own
+    without touching the reading itself.
+
+    Sale.testing_liters is a CACHED MIRROR of the SUM of these rows for
+    the same (nozzle_id, entry_date, shift_id) - never edited directly.
+    sync_sale_testing() in ledger_logic.py is the single function that
+    reconciles a Sale against its NozzleTesting rows (recomputing
+    Sale.liters/testing_liters/total_amount); every route that adds or
+    removes a row here must call it afterward. If no Sale exists yet for
+    that slot, a NozzleTesting row simply sits unmatched until one is
+    saved - see sync_sale_testing()'s docstring for how that reconciles.
+    """
+
+    id = db.Column(db.Integer, primary_key=True)
+    nozzle_id = db.Column(db.Integer, db.ForeignKey("nozzle.id"), nullable=False)
+    shift_id = db.Column(db.Integer, db.ForeignKey("shift.id"), nullable=False)
+    entry_date = db.Column(db.Date, nullable=False)
+    liters = db.Column(db.Float, nullable=False)
+    note = db.Column(db.String(200))
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    nozzle = db.relationship("Nozzle", backref="testing_entries")
+    shift = db.relationship("Shift")
     user = db.relationship("User")
 
 

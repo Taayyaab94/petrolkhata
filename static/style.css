@@ -671,7 +671,7 @@ button { cursor: pointer; font-weight: 600; border: none; }
 
 .nozzle-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1.1fr) minmax(100px, 130px) 110px 90px 1.3fr;
+  grid-template-columns: minmax(120px, 1.1fr) minmax(100px, 130px) 110px 1.3fr;
   gap: var(--s3);
   align-items: center;
   padding: var(--s2) var(--s3);
@@ -697,7 +697,6 @@ button { cursor: pointer; font-weight: 600; border: none; }
   border-color: var(--warn-border);
   background: var(--warn-soft);
 }
-.nozzle-row .nz-testing { font-size: 0.78rem; color: var(--muted); gap: 3px; }
 
 .calc-preview {
   font-size: 0.78rem;
@@ -716,6 +715,73 @@ button { cursor: pointer; font-weight: 600; border: none; }
 .calc-preview.has-value { border-style: solid; border-color: var(--pos-border); background: var(--pos-soft); color: var(--pos); }
 .calc-preview.has-error { border-style: solid; border-color: var(--neg-border); background: var(--neg-soft); color: var(--neg); }
 .calc-preview.has-warn { border-style: solid; border-color: var(--warn-border); background: var(--warn-soft); color: var(--warn); }
+
+/* ---------- product picker ---------- */
+/* Searchable combobox replacing the ~95-option <select> on the Non-Fuel
+   Sale and Product Purchase forms (see PRODUCTS/initProductPicker() in
+   ledger.html) - position:relative anchors the absolutely-positioned
+   results panel to this grid item, even though .form-grid itself uses
+   align-items:end. */
+
+.product-picker {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.product-search { width: 100%; }
+
+.product-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-card);
+  padding: 4px;
+}
+
+.product-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.product-result:hover,
+.product-result.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.product-result-meta {
+  color: var(--muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.product-result.is-active .product-result-meta { color: var(--accent); }
+
+.product-result-add { font-weight: 600; color: var(--accent); }
+
+.new-product-fields {
+  margin-top: var(--s3);
+  padding: var(--s3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
 
 /* ---------- feed ---------- */
 
