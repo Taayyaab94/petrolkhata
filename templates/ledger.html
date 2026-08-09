@@ -463,8 +463,17 @@
               {% endfor %}
             </select>
           </label>
-          <label>Liters
+          <label>Enter by <span class="hint-sm">use Amount when giving a discount that doesn't cleanly equal litres &times; price</span>
+            <select id="credit_entry_mode" name="entry_mode">
+              <option value="liters">By Litres</option>
+              <option value="amount">By Amount</option>
+            </select>
+          </label>
+          <label id="credit_liters_label">Liters
             <input type="number" step="0.01" min="0.01" name="liters" id="credit_liters" required>
+          </label>
+          <label id="credit_amount_label" style="display:none;">Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" id="credit_amount">
           </label>
           <label>Vehicle number (optional)
             <input type="text" name="vehicle_number" placeholder="e.g. LEA-1234">
@@ -742,10 +751,21 @@
     {% endif %}
 
     <div class="ledger-section">
-      <h3>Loan / Advance to Employee</h3>
+      <h3>Loan / Advance / Owner Drawing</h3>
+      <p class="hint-sm">A loan/advance to an employee increases what they owe the pump - the usual advance-recovered-later flow. An owner drawing is money the owner personally takes out of the business for their own use - tracked the same way, as a running balance on an "owner" account, but never treated as revenue lost or as a business expense.</p>
+      <label>Type
+        <select id="loan_entry_type">
+          <option value="loan">Employee Loan / Advance</option>
+          {% if current_user.is_owner %}
+          <option value="drawing">Owner Drawing</option>
+          {% endif %}
+        </select>
+      </label>
+      <div id="loan-type-loan">
       <form method="post" action="{{ url_for('ledger_employee_loan') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <input type="hidden" name="kind" value="loan">
         <div class="form-grid">
           <label>Employee
             <select name="employee_id" class="employee-select" data-scope="loan" required>
@@ -782,6 +802,51 @@
           <button type="submit" class="btn btn-sm">Record Loan</button>
         </div>
       </form>
+      </div>
+      {% if current_user.is_owner %}
+      <div id="loan-type-drawing" style="display:none;">
+      <form method="post" action="{{ url_for('ledger_employee_loan') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <input type="hidden" name="kind" value="drawing">
+        <div class="form-grid">
+          <label>Owner
+            <select name="owner_id" class="owner-select" data-scope="drawing" required>
+              <option value="">Select...</option>
+              <option value="__new__">+ Add new owner</option>
+              {% for a in accounts_owner_first %}
+              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-owner-field" data-scope="drawing" style="display:none;">New owner name
+            <input type="text" name="new_owner_name">
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" required>
+          </label>
+          <label>Paid via
+            <select name="paid_via" class="paidvia-select" data-scope="drawing">
+              <option value="cash">Cash</option>
+              <option value="__new__">+ Add new bank account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-paidvia-field" data-scope="drawing" style="display:none;">New bank account name
+            <input type="text" name="new_bank_account_name">
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note">
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Drawing</button>
+        </div>
+      </form>
+      </div>
+      {% endif %}
     </div>
 
     {% if current_user.is_owner %}
@@ -1025,8 +1090,13 @@
       <span class="feed-tag feed-tag-credit">Cash Deposit</span>
       <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
       {% elif e.kind == "employee_loan" %}
+      {% if e.obj.kind == "drawing" %}
+      <div class="feed-desc"><strong>Drawing by {{ e.obj.account.name }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-credit">Owner Drawing</span>
+      {% else %}
       <div class="feed-desc"><strong>Loan to {{ e.obj.account.name }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Employee Loan</span>
+      {% endif %}
       <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
       {% elif e.kind == "dip" %}
       <div class="feed-desc"><strong>{{ e.obj.tank.label }} dip</strong><span>{% if e.obj.dip_cm is not none %}{{ "%.1f"|format(e.obj.dip_cm) }} cm = {% endif %}{{ "%.2f"|format(e.obj.dip_liters) }} L{% if e.obj.water_cm %} &middot; Water {{ "%.1f"|format(e.obj.water_cm) }} cm{% endif %} &middot; {{ e.obj.user.username }}</span></div>
@@ -1182,13 +1252,37 @@ document.querySelectorAll('[id^="dip_"]').forEach(function (input) {
   update();
 });
 
-// --- Credit-to-customer live calculation ---
+// --- Credit-to-customer live calculation - By Litres computes the amount
+// (unchanged from before entry_mode existed); By Amount computes the
+// derived litres instead, previewed as a division rather than made to
+// look like litres * price = amount (that mismatch is the whole point of
+// amount-mode, e.g. a discount, not an error state) ---
 const creditFuelSelect = document.getElementById('credit_fuel_type');
+const creditEntryMode = document.getElementById('credit_entry_mode');
+const creditLitersLabel = document.getElementById('credit_liters_label');
+const creditAmountLabel = document.getElementById('credit_amount_label');
 const creditLiters = document.getElementById('credit_liters');
+const creditAmount = document.getElementById('credit_amount');
 const creditCalc = document.getElementById('credit_calc');
 function updateCreditCalc() {
   const opt = creditFuelSelect.options[creditFuelSelect.selectedIndex];
   const price = opt ? parseFloat(opt.dataset.price) : NaN;
+  const isAmountMode = creditEntryMode && creditEntryMode.value === 'amount';
+
+  if (isAmountMode) {
+    const amount = parseFloat(creditAmount.value);
+    if (isNaN(price) || price <= 0 || isNaN(amount)) {
+      creditCalc.textContent = 'Litres (equivalent) will be calculated automatically';
+      creditCalc.className = 'calc-preview';
+      return;
+    }
+    const liters = amount / price;
+    creditCalc.innerHTML = 'Rs ' + fmtMoney(amount) + ' &divide; Rs ' + price.toFixed(2) + '/L = <strong>' +
+      liters.toFixed(2) + ' L equivalent</strong>';
+    creditCalc.className = 'calc-preview has-value';
+    return;
+  }
+
   const liters = parseFloat(creditLiters.value);
   if (isNaN(price) || isNaN(liters)) {
     creditCalc.textContent = 'Amount will be calculated automatically';
@@ -1202,6 +1296,26 @@ function updateCreditCalc() {
 if (creditFuelSelect) {
   creditFuelSelect.addEventListener('change', updateCreditCalc);
   creditLiters.addEventListener('input', updateCreditCalc);
+  if (creditAmount) creditAmount.addEventListener('input', updateCreditCalc);
+}
+if (creditEntryMode) {
+  creditEntryMode.addEventListener('change', function () {
+    const isAmountMode = creditEntryMode.value === 'amount';
+    creditLitersLabel.style.display = isAmountMode ? 'none' : '';
+    creditAmountLabel.style.display = isAmountMode ? '' : 'none';
+    creditLiters.required = !isAmountMode;
+    creditAmount.required = isAmountMode;
+    // Clear whichever field just became hidden so a stale value from the
+    // other mode is never submitted alongside the active one - same
+    // problem the product picker's search input solves by clearing its
+    // hidden id on every edit (see initProductPicker above).
+    if (isAmountMode) {
+      creditLiters.value = '';
+    } else {
+      creditAmount.value = '';
+    }
+    updateCreditCalc();
+  });
 }
 
 // --- Sales Return: live refund-amount calculation, same shape as the
@@ -1250,6 +1364,22 @@ if (returnEntryType && returnTypeReturn && returnTypeTesting) {
     const isTesting = returnEntryType.value === 'testing';
     returnTypeReturn.style.display = isTesting ? 'none' : '';
     returnTypeTesting.style.display = isTesting ? '' : 'none';
+  });
+}
+
+// --- Loan / Advance / Owner Drawing: same type-selector-swaps-two-forms
+// pattern as Sales Return / Testing above. The "drawing" option/form only
+// exist in the DOM at all for the owner (see app.py's ledger_employee_loan()
+// route, which rejects a drawing from anyone else), so loanTypeDrawing is
+// null for staff and this block simply never wires up a toggle for them. ---
+const loanEntryType = document.getElementById('loan_entry_type');
+const loanTypeLoan = document.getElementById('loan-type-loan');
+const loanTypeDrawing = document.getElementById('loan-type-drawing');
+if (loanEntryType && loanTypeLoan && loanTypeDrawing) {
+  loanEntryType.addEventListener('change', function () {
+    const isDrawing = loanEntryType.value === 'drawing';
+    loanTypeLoan.style.display = isDrawing ? 'none' : '';
+    loanTypeDrawing.style.display = isDrawing ? '' : 'none';
   });
 }
 
@@ -1597,6 +1727,7 @@ function wireAddNewToggle(selectClass, fieldClass) {
 wireAddNewToggle('.customer-select', '.new-customer-field');
 wireAddNewToggle('.supplier-select', '.new-supplier-field');
 wireAddNewToggle('.employee-select', '.new-employee-field');
+wireAddNewToggle('.owner-select', '.new-owner-field');
 wireAddNewToggle('.bank-select', '.new-bank-field');
 wireAddNewToggle('.account-select', '.new-account-field');
 wireAddNewToggle('.paidvia-select', '.new-paidvia-field');

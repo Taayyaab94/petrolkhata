@@ -94,6 +94,24 @@ class Tank(db.Model):
     and exactly the behaviour this column didn't used to have a choice
     about, so existing installations (every tank created before this
     column existed) are unaffected.
+
+    starting_stock_cost_per_liter is what the starting stock actually cost
+    to buy - folded into weighted_avg_cost() (ledger_logic.py) as one more
+    (cost, liters) pair alongside real StockPurchase rows, so that stock
+    doesn't get sold at a zero cost basis (which would overstate profit).
+    It is deliberately NULLABLE WITH NO DEFAULT: every tank that already
+    exists in production has starting stock with a genuinely unknown
+    historical cost (nobody recorded it), and there is no honest value to
+    backfill - NULL means "cost basis unknown", and weighted_avg_cost()
+    treats a NULL-cost tank's starting stock as contributing nothing to
+    either side of the average, i.e. functionally invisible, exactly
+    matching the function's behaviour before this column existed (back
+    then it stayed invisible because the function didn't look at Tank at
+    all; now it stays invisible only because the value is NULL). Required
+    going forward on the Settings "Add a Tank" form and the setup wizard
+    (both create brand-new tanks, whose cost the owner setting them up
+    right now actually knows) but optional on an edit of an existing tank
+    (forcing a historically-unknowable value there would be dishonest).
     """
 
     id = db.Column(db.Integer, primary_key=True)
@@ -102,6 +120,7 @@ class Tank(db.Model):
     capacity_liters = db.Column(db.Float, nullable=False)
     starting_stock_liters = db.Column(db.Float, nullable=False, default=0)
     starting_stock_date = db.Column(db.Date, nullable=True)
+    starting_stock_cost_per_liter = db.Column(db.Float, nullable=True)
     low_stock_threshold = db.Column(db.Float, nullable=False, default=0)
 
     fuel_type = db.relationship("FuelType")
@@ -157,19 +176,24 @@ class NozzleReset(db.Model):
 
 class Account(db.Model):
     """A single ledger shared by any party the pump does business with -
-    customer, supplier, employee, or any combination (e.g. another pump
-    that sometimes buys fuel and sometimes sells it back). account_type is
-    a plain label for organizing/searching; it never restricts which kind
+    customer, supplier, employee, owner, or any combination (e.g. another
+    pump that sometimes buys fuel and sometimes sells it back). account_type
+    is a plain label for organizing/searching; it never restricts which kind
     of entry (CreditGiven, StockPurchase, EmployeeLoan, etc.) can be
     posted against this account - all six entry tables point at the same
     Account row via account_id, so one account can accumulate both
     "customer" and "supplier" style entries in one running balance.
+
+    "owner" accounts hold the owner's personal drawings (see EmployeeLoan.kind)
+    - structurally identical to an "employee" account (same EmployeeLoan
+    rows, same balance/aging mechanics), just a different label so a
+    drawing doesn't get confused with money owed back by staff.
     """
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
     phone = db.Column(db.String(30))
-    account_type = db.Column(db.String(20), nullable=False, default="customer")  # customer | supplier | employee
+    account_type = db.Column(db.String(20), nullable=False, default="customer")  # customer | supplier | employee | owner
     opening_balance = db.Column(db.Float, nullable=False, default=0)
     opening_balance_date = db.Column(db.Date, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
@@ -459,15 +483,31 @@ class Receipt(db.Model):
 
 
 class EmployeeLoan(db.Model):
-    """A credit-side ledger entry: a loan or advance given to an account,
-    the same way CreditGiven works for customers - it increases what the
-    account owes the pump. Paid out as cash (reduces cash-in-hand) or from
-    a specific bank account (reduces that bank's balance)."""
+    """A credit-side ledger entry: a loan/advance to an employee OR an
+    owner drawing - it increases what the account owes the pump, the same
+    way CreditGiven works for customers. Paid out as cash (reduces
+    cash-in-hand) or from a specific bank account (reduces that bank's
+    balance).
+
+    kind is the ONLY thing that distinguishes the two: "loan" (default) is
+    a loan/advance to an employee, expected to be paid back or deducted
+    from salary; "drawing" is money the owner personally withdraws from
+    the business for their own use. Everything else about the row -
+    how it affects Account.balance, credit_aging(), and cash/bank balances
+    - is identical regardless of kind, because structurally an owner
+    drawing behaves exactly like a loan (money leaves cash/bank, the
+    account's balance goes up by the same amount); it's simply
+    conceptually a drawing, not a loan, and posted against an "owner"
+    account instead of an "employee" one (see Account.account_type). This
+    is why no new code was needed in Account.balance, credit_aging(), or
+    the *_ledger_events() functions - they already iterate every
+    EmployeeLoan row unconditionally, regardless of kind."""
 
     id = db.Column(db.Integer, primary_key=True)
     account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=False)
     entry_date = db.Column(db.Date, nullable=False)
     amount = db.Column(db.Float, nullable=False)
+    kind = db.Column(db.String(10), nullable=False, default="loan")  # loan | drawing
     method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank
     bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
     note = db.Column(db.String(200))

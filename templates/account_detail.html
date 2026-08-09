@@ -166,6 +166,16 @@
       <tr class="edit-row" style="display:none;">
         <td colspan="7">
           {% if e.kind == "credit" %}
+          {# Default the toggle to whichever mode the stored row actually
+             looks like it was entered in - amount != liters * price means
+             this was almost certainly an amount-mode (discounted) entry,
+             so the edit form must not silently recompute and overwrite
+             that amount just because Liters was the visible field. Both
+             fields are always rendered with the row's real current
+             values regardless of which is shown, so toggling before
+             saving never submits a stale/mismatched figure. #}
+          {% set recomputed_amount = (e.obj.liters * e.obj.price_per_liter) | round(2) %}
+          {% set default_mode = "amount" if e.obj.amount != recomputed_amount else "liters" %}
           <form method="post" action="{{ url_for('account_entry_credit_edit', entry_id=e.obj.id) }}" class="form-grid">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <label>Date
@@ -178,8 +188,17 @@
                 {% endfor %}
               </select>
             </label>
-            <label>Liters
-              <input type="number" step="0.01" min="0.01" name="liters" value="{{ e.obj.liters }}" required>
+            <label>Enter by
+              <select name="entry_mode" class="credit-edit-mode">
+                <option value="liters" {{ "selected" if default_mode == "liters" }}>By Litres</option>
+                <option value="amount" {{ "selected" if default_mode == "amount" }}>By Amount</option>
+              </select>
+            </label>
+            <label class="credit-edit-liters-field" style="{{ 'display:none;' if default_mode == 'amount' else '' }}">Liters
+              <input type="number" step="0.01" min="0.01" name="liters" value="{{ e.obj.liters }}" class="credit-edit-liters" {{ "required" if default_mode == "liters" }}>
+            </label>
+            <label class="credit-edit-amount-field" style="{{ 'display:none;' if default_mode == 'liters' else '' }}">Amount (Rs)
+              <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" class="credit-edit-amount" {{ "required" if default_mode == "amount" }}>
             </label>
             <label>Vehicle number (optional)
               <input type="text" name="vehicle_number" value="{{ e.obj.vehicle_number or '' }}">
@@ -305,6 +324,25 @@ document.querySelectorAll('.edit-toggle').forEach(function (link) {
 function fmtMoney(v) {
   return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+// Credit entry edit: same By Litres / By Amount toggle as the Ledger's
+// Credit-to-a-Customer form - each row's own form is looked up via
+// .closest('form') since several credit rows can each have their own
+// edit-row open on the page at once.
+document.querySelectorAll('.credit-edit-mode').forEach(function (sel) {
+  const form = sel.closest('form');
+  const litersField = form.querySelector('.credit-edit-liters-field');
+  const amountField = form.querySelector('.credit-edit-amount-field');
+  const litersInput = form.querySelector('.credit-edit-liters');
+  const amountInput = form.querySelector('.credit-edit-amount');
+  sel.addEventListener('change', function () {
+    const isAmount = sel.value === 'amount';
+    litersField.style.display = isAmount ? 'none' : '';
+    amountField.style.display = isAmount ? '' : 'none';
+    litersInput.required = !isAmount;
+    amountInput.required = isAmount;
+  });
+});
+
 document.querySelectorAll('.purchase-edit-liters').forEach(function (litersInput) {
   const form = litersInput.closest('form');
   const costInput = form.querySelector('.purchase-edit-cost');

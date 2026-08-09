@@ -30,6 +30,7 @@ function addTankRow() {
       '<label>Fuel type<input type="text" name="fuel_name_' + tankIndex + '" placeholder="e.g. Diesel" required></label>' +
       '<label>Capacity (L)<input type="number" step="0.01" min="0.01" name="capacity_' + tankIndex + '" placeholder="e.g. 48000" required></label>' +
       '<label>Current stock (L)<input type="number" step="0.01" min="0" name="stock_' + tankIndex + '" placeholder="e.g. 22000" required></label>' +
+      '<label>Cost per liter (Rs) <span class="hint-sm">what this stock cost to buy</span><input type="number" step="0.01" min="0" name="cost_per_liter_' + tankIndex + '" placeholder="e.g. 265.00" required></label>' +
       '<label>Stock as of<input type="date" name="stock_date_' + tankIndex + '" value="' + todayStr + '" max="' + todayStr + '" required>' +
         '<span class="hint-sm">the date this stock level was measured</span></label>' +
     '</div>';

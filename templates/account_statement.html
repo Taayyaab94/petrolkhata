@@ -64,7 +64,7 @@
           {% elif e.kind == "receipt" %}Payment Received
           {% elif e.kind == "purchase" %}Purchase (Credit)
           {% elif e.kind == "supplier_payment" %}Payment Made
-          {% elif e.kind == "employee_loan" %}Loan / Advance
+          {% elif e.kind == "employee_loan" %}{% if e.obj.kind == "drawing" %}Owner Drawing{% else %}Loan / Advance{% endif %}
           {% elif e.kind == "salary" %}Salary
           {% elif e.kind == "sales_return" %}Sales Return
           {% elif e.kind == "product_sale" %}Non-Fuel Sale

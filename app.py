@@ -383,6 +383,7 @@ def setup_tanks():
             fuel_name = request.form.get(f"fuel_name_{i}", "").strip()
             capacity = request.form.get(f"capacity_{i}", type=float)
             stock = request.form.get(f"stock_{i}", type=float)
+            cost_per_liter = request.form.get(f"cost_per_liter_{i}", type=float)
             raw_stock_date = request.form.get(f"stock_date_{i}", "").strip()
             if not fuel_name:
                 error = f"Tank {i + 1}: please enter a fuel name."
@@ -396,6 +397,9 @@ def setup_tanks():
             if stock > capacity:
                 error = f"Tank {i + 1}: current stock can't exceed capacity."
                 break
+            if cost_per_liter is None or cost_per_liter < 0:
+                error = f"Tank {i + 1}: please enter a valid cost per liter."
+                break
             stock_date, date_error = parse_stock_date(raw_stock_date)
             if date_error == "invalid":
                 error = f"Tank {i + 1}: please enter a valid stock date."
@@ -406,11 +410,14 @@ def setup_tanks():
             stock_date = stock_date or date.today()
             # Stored as an ISO string, not a date - the session is JSON-serialised
             # into a cookie between setup steps, and a date object won't survive that.
+            # cost_per_liter is a plain float - JSON-serializes fine as-is,
+            # unlike stock_date it needs no string round-trip.
             tanks.append(
                 {
                     "fuel_name": fuel_name,
                     "capacity": capacity,
                     "stock": stock,
+                    "cost_per_liter": cost_per_liter,
                     "stock_date": stock_date.isoformat(),
                 }
             )
@@ -533,6 +540,7 @@ def setup_dispensers():
                     capacity_liters=t["capacity"],
                     starting_stock_liters=t["stock"],
                     starting_stock_date=stock_date,
+                    starting_stock_cost_per_liter=t["cost_per_liter"],
                     low_stock_threshold=round(t["capacity"] * 0.1, 2),
                 )
                 db.session.add(tank)
@@ -688,6 +696,7 @@ def settings_add_tank():
     fuel_name = request.form.get("fuel_name", "").strip()
     capacity = request.form.get("capacity", type=float)
     stock = request.form.get("stock", type=float)
+    cost_per_liter = request.form.get("cost_per_liter", type=float)
     stock_date, date_error = parse_stock_date(request.form.get("stock_date", ""))
 
     if not fuel_name:
@@ -696,6 +705,8 @@ def settings_add_tank():
         flash("Please enter a valid capacity.", "error")
     elif stock is None or stock < 0 or stock > capacity:
         flash("Please enter a valid starting stock (not more than capacity).", "error")
+    elif cost_per_liter is None or cost_per_liter < 0:
+        flash("Please enter a valid cost per liter for the starting stock.", "error")
     elif date_error == "invalid":
         flash("Please enter a valid stock date.", "error")
     elif date_error == "future":
@@ -718,6 +729,7 @@ def settings_add_tank():
                 capacity_liters=capacity,
                 starting_stock_liters=stock,
                 starting_stock_date=stock_date or date.today(),
+                starting_stock_cost_per_liter=cost_per_liter,
                 low_stock_threshold=round(capacity * 0.1, 2),
             )
         )
@@ -735,6 +747,13 @@ def settings_edit_tank(tank_id):
     capacity = request.form.get("capacity", type=float)
     threshold = request.form.get("threshold", type=float)
     stock = request.form.get("stock", type=float)
+    # Unlike stock_date below, blank here means "no change" rather than
+    # "clear it" - a historically-unknowable cost can't be force-typed on
+    # every edit (e.g. just bumping capacity), so leaving the field blank
+    # must not silently erase an already-recorded value. Only a non-blank,
+    # non-negative number ever touches the column.
+    raw_cost_per_liter = request.form.get("cost_per_liter", "").strip()
+    cost_per_liter = request.form.get("cost_per_liter", type=float) if raw_cost_per_liter else None
     stock_date, date_error = parse_stock_date(request.form.get("stock_date", ""))
 
     if not capacity or capacity <= 0:
@@ -743,6 +762,8 @@ def settings_edit_tank(tank_id):
         flash("Please enter a valid low-stock alert level.", "error")
     elif stock is None or stock < 0 or stock > capacity:
         flash("Please enter a valid starting stock (not more than capacity).", "error")
+    elif raw_cost_per_liter and (cost_per_liter is None or cost_per_liter < 0):
+        flash("Please enter a valid cost per liter for the starting stock.", "error")
     elif date_error == "invalid":
         flash("Please enter a valid stock date.", "error")
     elif date_error == "future":
@@ -751,6 +772,8 @@ def settings_edit_tank(tank_id):
         tank.capacity_liters = capacity
         tank.low_stock_threshold = threshold
         tank.starting_stock_liters = stock
+        if raw_cost_per_liter:
+            tank.starting_stock_cost_per_liter = cost_per_liter
         # A blank date clears the baseline to NULL, i.e. "beginning of
         # time" - the same fallback every tank had before this column
         # existed, and the escape hatch for "I don't actually know when
@@ -1684,6 +1707,7 @@ def ledger():
     accounts_customer_first = prioritize_accounts(accounts, "customer")
     accounts_supplier_first = prioritize_accounts(accounts, "supplier")
     accounts_employee_first = prioritize_accounts(accounts, "employee")
+    accounts_owner_first = prioritize_accounts(accounts, "owner")
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
 
     # Sorted by category first so the Non-Fuel Sale/Product Purchase
@@ -1783,6 +1807,7 @@ def ledger():
         accounts_customer_first=accounts_customer_first,
         accounts_supplier_first=accounts_supplier_first,
         accounts_employee_first=accounts_employee_first,
+        accounts_owner_first=accounts_owner_first,
         bank_accounts=bank_accounts,
         products=products,
         product_info=product_info,
@@ -1864,6 +1889,10 @@ def resolve_supplier(form):
 
 def resolve_employee(form):
     return resolve_account(form, "employee_id", "new_employee_name", "employee", "employee")
+
+
+def resolve_owner(form):
+    return resolve_account(form, "owner_id", "new_owner_name", "owner", "owner")
 
 
 def resolve_product(form, entry_date, fallback_purchase_rate=None):
@@ -2542,10 +2571,31 @@ def ledger_receipt():
 @app.route("/ledger/credit", methods=["POST"])
 @login_required
 def ledger_credit():
+    """Fuel already sold (see CreditGiven's docstring in models.py) handed
+    to a customer on account instead of collected as cash. entry_mode
+    decides which of liters/amount is what the user actually typed and
+    which is derived from it via this date's price:
+
+    - "liters" (default): liters is entered, amount = liters * price -
+      unchanged from this route's original behaviour.
+    - "amount": amount is entered EXACTLY as typed (never recomputed), and
+      liters is derived from it purely for record-keeping (it doesn't
+      touch stock either way - the Sale already did). This is how a
+      discount that doesn't cleanly equal liters * price gets recorded:
+      the discount lives entirely in the gap between amount and
+      liters * price_per_liter.
+
+    Fuel type is required in both modes - price_on_date() needs it
+    regardless of which direction the calculation runs.
+    """
     entry_date = parse_date_param(request.form.get("entry_date"))
     customer, error = resolve_customer(request.form)
     fuel_type_id = request.form.get("fuel_type_id", type=int)
-    liters = request.form.get("liters", type=float)
+    entry_mode = request.form.get("entry_mode", "liters")
+    if entry_mode not in ("liters", "amount"):
+        entry_mode = "liters"
+    liters_in = request.form.get("liters", type=float)
+    amount_in = request.form.get("amount", type=float)
     vehicle_number = request.form.get("vehicle_number", "").strip()
     note = request.form.get("note", "").strip()
     shift = resolve_shift(request.form)
@@ -2558,12 +2608,23 @@ def ledger_credit():
     elif not fuel:
         db.session.rollback()
         flash("Please choose a valid fuel type.", "error")
-    elif not liters or liters <= 0:
+    elif entry_mode == "liters" and (not liters_in or liters_in <= 0):
         db.session.rollback()
         flash("Liters must be a positive number.", "error")
+    elif entry_mode == "amount" and (not amount_in or amount_in <= 0):
+        db.session.rollback()
+        flash("Amount must be a positive number.", "error")
+    elif entry_mode == "amount" and price_on_date(fuel, entry_date) <= 0:
+        db.session.rollback()
+        flash("This fuel has no price set yet - please set a price before recording credit by amount.", "error")
     else:
         price = price_on_date(fuel, entry_date)
-        amount = round(liters * price, 2)
+        if entry_mode == "amount":
+            amount = amount_in
+            liters = round(amount_in / price, 2)
+        else:
+            liters = liters_in
+            amount = round(liters * price, 2)
         db.session.add(
             CreditGiven(
                 account_id=customer.id,
@@ -2579,10 +2640,16 @@ def ledger_credit():
             )
         )
         db.session.commit()
-        flash(
-            f"Recorded {liters:g} L {fuel.name} (Rs {amount:,.2f}) on credit for {customer.name}.",
-            "success",
-        )
+        if entry_mode == "amount":
+            flash(
+                f"Recorded Rs {amount:,.2f} ({liters:g} L equiv.) {fuel.name} on credit for {customer.name}.",
+                "success",
+            )
+        else:
+            flash(
+                f"Recorded {liters:g} L {fuel.name} (Rs {amount:,.2f}) on credit for {customer.name}.",
+                "success",
+            )
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -3088,8 +3155,25 @@ def ledger_cash_deposit():
 @app.route("/ledger/employee-loan", methods=["POST"])
 @login_required
 def ledger_employee_loan():
+    """Records either a loan/advance to an employee (kind == "loan", the
+    default) or an owner drawing (kind == "drawing") - see EmployeeLoan's
+    docstring in models.py for why these share one table/route. Not
+    @owner_required overall (staff legitimately record employee loans
+    every day) - a drawing specifically is gated by hand below, since it's
+    the owner's own money leaving the business."""
     entry_date = parse_date_param(request.form.get("entry_date"))
-    employee, error = resolve_employee(request.form)
+    kind = request.form.get("kind", "loan")
+    if kind not in ("loan", "drawing"):
+        kind = "loan"
+
+    if kind == "drawing" and not current_user.is_owner:
+        flash("Only the owner can record an owner drawing.", "error")
+        return redirect(url_for("ledger", date=entry_date))
+
+    if kind == "drawing":
+        account, error = resolve_owner(request.form)
+    else:
+        account, error = resolve_employee(request.form)
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
     method, bank_account, method_error = resolve_payment_method(request.form)
@@ -3109,9 +3193,10 @@ def ledger_employee_loan():
     else:
         db.session.add(
             EmployeeLoan(
-                account_id=employee.id,
+                account_id=account.id,
                 entry_date=entry_date,
                 amount=amount,
+                kind=kind,
                 method=method,
                 bank_account_id=bank_account.id if bank_account else None,
                 note=note or None,
@@ -3119,7 +3204,10 @@ def ledger_employee_loan():
             )
         )
         db.session.commit()
-        flash(f"Recorded loan/advance of Rs {amount:,.2f} to {employee.name}.", "success")
+        if kind == "drawing":
+            flash(f"Recorded drawing of Rs {amount:,.2f} for {account.name}.", "success")
+        else:
+            flash(f"Recorded loan/advance of Rs {amount:,.2f} to {account.name}.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -3324,7 +3412,7 @@ def inventory():
 
 # ------------------------------------------------------------ accounts ---
 
-ACCOUNT_TYPES = ("customer", "supplier", "employee")
+ACCOUNT_TYPES = ("customer", "supplier", "employee", "owner")
 
 
 def _accounts_context(kind, type_filter):
@@ -3630,25 +3718,42 @@ def account_delete(account_id):
 @login_required
 @owner_required
 def account_entry_credit_edit(entry_id):
+    """Same entry_mode toggle as ledger_credit() (see its docstring) - lets
+    an existing credit-given entry be switched between liters-mode and
+    amount-mode, or stay in either, on save."""
     entry = db.session.get(CreditGiven, entry_id) or abort(404)
     entry_date = parse_date_param(request.form.get("entry_date"))
     fuel_type_id = request.form.get("fuel_type_id", type=int)
-    liters = request.form.get("liters", type=float)
+    entry_mode = request.form.get("entry_mode", "liters")
+    if entry_mode not in ("liters", "amount"):
+        entry_mode = "liters"
+    liters_in = request.form.get("liters", type=float)
+    amount_in = request.form.get("amount", type=float)
     vehicle_number = request.form.get("vehicle_number", "").strip()
     note = request.form.get("note", "").strip()
     fuel = db.session.get(FuelType, fuel_type_id) if fuel_type_id else None
 
     if not fuel:
         flash("Please choose a valid fuel type.", "error")
-    elif not liters or liters <= 0:
+    elif entry_mode == "liters" and (not liters_in or liters_in <= 0):
         flash("Liters must be a positive number.", "error")
+    elif entry_mode == "amount" and (not amount_in or amount_in <= 0):
+        flash("Amount must be a positive number.", "error")
+    elif entry_mode == "amount" and price_on_date(fuel, entry_date) <= 0:
+        flash("This fuel has no price set yet - please set a price before recording credit by amount.", "error")
     else:
         price = price_on_date(fuel, entry_date)
+        if entry_mode == "amount":
+            amount = amount_in
+            liters = round(amount_in / price, 2)
+        else:
+            liters = liters_in
+            amount = round(liters * price, 2)
         entry.entry_date = entry_date
         entry.fuel_type_id = fuel.id
         entry.liters = liters
         entry.price_per_liter = price
-        entry.amount = round(liters * price, 2)
+        entry.amount = amount
         entry.vehicle_number = vehicle_number or None
         entry.note = note or None
         db.session.commit()
@@ -3880,6 +3985,18 @@ _STATEMENT_KIND_LABELS = {
 }
 
 
+def _statement_kind_label(e):
+    """Same "Type" column text account_statement.html shows for one event
+    (see its kind if/elif chain), reused so the export doesn't drift from
+    the page - mirrors _statement_event_details() below for the Details
+    column. employee_loan is the one kind whose label isn't a static
+    per-kind string: it reads "Owner Drawing" or "Loan / Advance"
+    depending on the row's own EmployeeLoan.kind (see models.py)."""
+    if e["kind"] == "employee_loan":
+        return "Owner Drawing" if e["obj"].kind == "drawing" else "Loan / Advance"
+    return _STATEMENT_KIND_LABELS.get(e["kind"], e["kind"])
+
+
 def _statement_event_details(e):
     """Same "Details" column text the account_statement.html table shows
     for one event, reused so the export doesn't drift from the page."""
@@ -3938,7 +4055,7 @@ def account_statement_export(account_id):
         statement_rows.append(
             [
                 e["entry_date"].isoformat(),
-                _STATEMENT_KIND_LABELS.get(e["kind"], e["kind"]),
+                _statement_kind_label(e),
                 _statement_event_details(e),
                 e["delta"] if e["delta"] > 0 else "",
                 -e["delta"] if e["delta"] < 0 else "",

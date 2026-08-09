@@ -598,7 +598,22 @@ def weighted_avg_cost(fuel_type, as_of_date):
 
     A moving average over all history is a deliberate simplification over
     strict FIFO/LIFO lot tracking - it's stable, explainable, and doesn't
-    require tracking which specific delivery each liter came from."""
+    require tracking which specific delivery each liter came from.
+
+    Each tank's OWN starting stock is folded in as one more (cost, liters)
+    pair alongside real StockPurchase rows - effectively an implicit first
+    "purchase" for that tank, dated starting_stock_date. Without this, a
+    tank's opening stock would be sold with a zero cost basis (it's never
+    a StockPurchase row), overstating profit. A tank only contributes when
+    starting_stock_cost_per_liter is set - NULL means the historical cost
+    is genuinely unknown (see Tank's docstring in models.py) and that
+    tank's starting stock is treated as functionally invisible here,
+    exactly as it always has been (this function never looked at Tank at
+    all before this column existed). The date condition mirrors
+    StockPurchase's own (entry_date <= as_of_date): starting_stock_date is
+    None means "beginning of time" (same meaning it carries everywhere
+    else in this codebase), so it always qualifies; otherwise it only
+    counts once as_of_date has reached it."""
     row = (
         db.session.query(
             func.coalesce(func.sum(StockPurchase.cost), 0),
@@ -609,6 +624,22 @@ def weighted_avg_cost(fuel_type, as_of_date):
         .first()
     )
     total_cost, total_liters = row[0] or 0, row[1] or 0
+
+    starting_row = (
+        db.session.query(
+            func.coalesce(func.sum(Tank.starting_stock_liters * Tank.starting_stock_cost_per_liter), 0),
+            func.coalesce(func.sum(Tank.starting_stock_liters), 0),
+        )
+        .filter(
+            Tank.fuel_type_id == fuel_type.id,
+            Tank.starting_stock_cost_per_liter.isnot(None),
+            db.or_(Tank.starting_stock_date.is_(None), Tank.starting_stock_date <= as_of_date),
+        )
+        .first()
+    )
+    total_cost += starting_row[0] or 0
+    total_liters += starting_row[1] or 0
+
     if not total_liters:
         return 0.0
     return round(total_cost / total_liters, 4)
