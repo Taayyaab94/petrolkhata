@@ -32,6 +32,18 @@
 {% if shifts|length > 1 and selected_shift %}
 <div class="flash flash-info">Nozzle readings, credit sales and bank sales below are being recorded against the <strong>{{ selected_shift.name }}</strong> shift.</div>
 {% endif %}
+{% if fuels_without_price %}
+<div class="flash flash-error">
+  <strong>No price is recorded for
+  {% for f in fuels_without_price %}{{ f.name }}{% if not loop.last %} and {% endif %}{% endfor %}
+  on or before {{ selected_date.strftime("%d %B %Y") }}.</strong>
+  Anything entered for this date will fall back to today's rate
+  ({% for f in fuels_without_price %}{{ f.name }} Rs {{ "%.2f"|format(fuel_prices_by_id.get(f.id) or 0) }}{% if not loop.last %}, {% endif %}{% endfor %}),
+  which is almost certainly wrong for an older date. Set the correct price for this date first
+  {%- if current_user.is_owner %} using the Fuel Price panel further down this page{% else %} - ask the owner to set it{% endif %},
+  because every entry stores its own price at the moment you save it: correcting the price afterwards will <em>not</em> repair entries already made.
+</div>
+{% endif %}
 
 <div class="ledger-summary">
   <div class="stat-card accent-brand">

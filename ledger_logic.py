@@ -347,6 +347,38 @@ def price_on_date(fuel_type, entry_date):
     return row.price_per_liter if row else fuel_type.price_per_liter
 
 
+def fuels_missing_price_on(entry_date, fuel_types=None):
+    """Fuel types with NO FuelPriceHistory row effective on or before
+    entry_date, i.e. the ones price_on_date() can only answer by falling
+    back to FuelType.price_per_liter - today's price.
+
+    That fallback exists so a lookup never crashes, but for a date EARLIER
+    than any recorded price it's silently wrong in the most expensive
+    possible way: backfilling May's readings in August prices every litre
+    at August's rate, and because Sale.total_amount is snapshotted at save
+    time, correcting the price history afterwards does NOT repair those
+    rows. Callers use this to warn BEFORE anything is entered for such a
+    date, rather than leaving the guess invisible.
+
+    One query for the whole catalogue, not one per fuel - this runs on
+    every Ledger page load.
+    """
+    types = fuel_types if fuel_types is not None else FuelType.query.all()
+    if not types:
+        return []
+    priced_ids = {
+        row[0]
+        for row in db.session.query(FuelPriceHistory.fuel_type_id)
+        .filter(
+            FuelPriceHistory.fuel_type_id.in_([f.id for f in types]),
+            FuelPriceHistory.effective_date <= entry_date,
+        )
+        .distinct()
+        .all()
+    }
+    return [f for f in types if f.id not in priced_ids]
+
+
 def record_fuel_price(fuel_type, price, effective_date):
     """Log a price change effective as of effective_date, and keep
     FuelType.price_per_liter (the "current price" cache read everywhere

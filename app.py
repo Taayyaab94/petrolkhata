@@ -55,6 +55,7 @@ from ledger_logic import (
     next_sale_on_or_after,
     previous_reading_for,
     previous_slot,
+    fuels_missing_price_on,
     price_on_date,
     price_resolver,
     product_margin_for_period,
@@ -789,15 +790,33 @@ def settings_edit_tank(tank_id):
 @login_required
 @owner_required
 def settings_edit_price(fuel_type_id):
+    """Record what a fuel costs, effective from a given date.
+
+    The effective date is required rather than assumed to be today: this
+    form used to hardcode date.today(), which meant backfilling old
+    records was impossible from here - typing May's price in August filed
+    it as an August price, so every May entry still resolved to the
+    August rate (see price_on_date()) and was billed at the wrong price.
+    A price is a historical fact with a date, not a single current value.
+    """
     fuel = db.session.get(FuelType, fuel_type_id) or abort(404)
     price = request.form.get("price", type=float)
+    effective_date, date_error = parse_stock_date(request.form.get("effective_date", ""))
 
     if not price or price <= 0:
         flash("Please enter a valid price.", "error")
+    elif date_error == "invalid":
+        flash("Please enter a valid date for when this price took effect.", "error")
+    elif date_error == "future":
+        flash("A price can't take effect in the future.", "error")
     else:
-        record_fuel_price(fuel, price, date.today())
+        # Blank means today, matching what this form did before the date
+        # field existed - so the common "price changed today" case still
+        # works without touching the date.
+        effective = effective_date or date.today()
+        record_fuel_price(fuel, price, effective)
         db.session.commit()
-        flash(f"Updated price for {fuel.name}.", "success")
+        flash(f"Set {fuel.name} to Rs {price:,.2f}/L, effective {effective}.", "success")
 
     return redirect(url_for("settings"))
 
@@ -1697,6 +1716,11 @@ def ledger():
     # Price shown/used for selected_date, not necessarily today's current
     # price - see the "price" key on nozzle_rows above for why.
     fuel_prices_by_id = {f.id: price_on_date(f, selected_date) for f in fuel_types}
+    # Fuels with no recorded price on/before this date resolve to today's
+    # price instead - a silently wrong figure when backfilling an older
+    # date, and one that can't be repaired after the fact because each
+    # Sale snapshots its own price. Surfaced as a warning on the page.
+    fuels_without_price = fuels_missing_price_on(selected_date, fuel_types)
     # Every picker on this page (customer, supplier, employee) lists every
     # account - an account's type label is just a default/hint, not a
     # restriction, so any account can receive any kind of entry (e.g. an
@@ -1803,6 +1827,7 @@ def ledger():
         handover_rows=handover_rows,
         fuel_types=fuel_types,
         fuel_prices_by_id=fuel_prices_by_id,
+        fuels_without_price=fuels_without_price,
         accounts=accounts,
         accounts_customer_first=accounts_customer_first,
         accounts_supplier_first=accounts_supplier_first,
