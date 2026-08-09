@@ -57,6 +57,7 @@ from ledger_logic import (
     previous_slot,
     fuels_missing_price_on,
     price_on_date,
+    reprice_entries,
     price_resolver,
     product_margin_for_period,
     product_rate_resolver,
@@ -818,6 +819,87 @@ def settings_edit_price(fuel_type_id):
         db.session.commit()
         flash(f"Set {fuel.name} to Rs {price:,.2f}/L, effective {effective}.", "success")
 
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/reprice", methods=["POST"])
+@login_required
+@owner_required
+def settings_reprice():
+    """Re-price existing entries in a date range against the corrected
+    price history - see reprice_entries() in ledger_logic.py for what is
+    and isn't touched.
+
+    Two-step by design: the first submit only PREVIEWS (nothing is
+    written, the session is rolled back), and the owner has to confirm
+    before any money figure is rewritten. Rewriting historical figures in
+    bulk is exactly the kind of thing that should never happen on one
+    click - the preview shows every affected row's old and new total, so
+    what's about to change is visible before it changes.
+    """
+    start, start_error = parse_stock_date(request.form.get("start_date", ""))
+    end, end_error = parse_stock_date(request.form.get("end_date", ""))
+    confirmed = request.form.get("confirm") == "yes"
+
+    if start_error or end_error or not start or not end:
+        flash("Please choose a valid start and end date for the re-price.", "error")
+        return redirect(url_for("settings"))
+    if start > end:
+        flash("The start date must be on or before the end date.", "error")
+        return redirect(url_for("settings"))
+
+    if not confirmed:
+        preview = reprice_entries(start, end, apply_changes=False)
+        # Nothing was written, but the ORM may have loaded rows - roll back
+        # so a preview can never leave anything half-applied.
+        db.session.rollback()
+        # Skipped (deliberate-discount) credits alone are not something to
+        # confirm - there'd be nothing to apply - so say so plainly rather
+        # than showing a preview page with an empty Apply panel.
+        if not preview["count"]:
+            msg = (
+                f"Nothing to re-price between {start} and {end} - every entry there already "
+                "matches the recorded price history."
+            )
+            if preview["skipped_credits"]:
+                msg += (
+                    f" ({len(preview['skipped_credits'])} credit entr"
+                    f"{'y' if len(preview['skipped_credits']) == 1 else 'ies'} looked like a "
+                    "deliberate discount and would be left alone in any case.)"
+                )
+            flash(msg, "info")
+            return redirect(url_for("settings"))
+        return render_template(
+            "reprice_preview.html",
+            start=start,
+            end=end,
+            preview=preview,
+            today=date.today(),
+        )
+
+    result = reprice_entries(start, end, apply_changes=True)
+    db.session.commit()
+    flash(
+        f"Re-priced {result['count']} entr{'y' if result['count'] == 1 else 'ies'} between "
+        f"{start} and {end}. Total changed from Rs {result['old_total']:,.2f} to "
+        f"Rs {result['new_total']:,.2f} ({result['difference']:+,.2f}).",
+        "success",
+    )
+    if result["skipped_credits"]:
+        flash(
+            f"{len(result['skipped_credits'])} credit entr"
+            f"{'y was' if len(result['skipped_credits']) == 1 else 'ies were'} left alone because "
+            "the amount doesn't match litres x price - those look like deliberate discounts, so "
+            "they were not overwritten. Review them by hand if that's not right.",
+            "info",
+        )
+    bad_date = first_negative_cash_date()
+    if bad_date:
+        flash(
+            f"Heads up: cash in hand is now negative on {bad_date} - re-pricing changed how much "
+            "cash each day brought in, so you may need to correct entries on or after that date.",
+            "error",
+        )
     return redirect(url_for("settings"))
 
 

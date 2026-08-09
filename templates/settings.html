@@ -360,7 +360,27 @@
   </table>
   </div>
   <p class="hint">A price is a historical fact with a date, not one current number - each entry is billed at whichever price was in effect on <em>its own</em> date. So when backfilling older records, set that period's price here first (e.g. "Rs 402.10 from 1 May"), then enter those days. Setting a past price does not disturb today's price; the most recent one still applies now.</p>
-  <p class="hint">If a date has no price recorded on or before it, entries for that date fall back to today's price - which is why the Ledger warns you when that's the case. Each entry stores its own price at the moment it's saved, so correcting a price later will not repair entries already made; those need re-saving on the Ledger.</p>
+  <p class="hint">If a date has no price recorded on or before it, entries for that date fall back to today's price - which is why the Ledger warns you when that's the case. Each entry stores its own price at the moment it's saved, so correcting a price later will not repair entries already made; use the re-pricing tool below for those.</p>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Re-price Past Entries <span class="owner-tag">Owner</span></h3></div>
+  <p class="hint">Corrected a price <em>after</em> already entering some days? Those entries kept the price they were
+  saved at - this recalculates them against the corrected price history, for a whole date range at once, instead of
+  re-saving each day on the Ledger by hand.</p>
+  <p class="hint">You'll see exactly what would change - every entry's old and new amount, side by side - and nothing
+  is written until you confirm on that screen. Litres are never altered, only the price and the money that follows
+  from it. Credit entries recorded as a deliberate discount ("By Amount") are left alone.</p>
+  <form method="post" action="{{ url_for('settings_reprice') }}" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>From date
+      <input type="date" name="start_date" max="{{ today.isoformat() }}" required>
+    </label>
+    <label>To date
+      <input type="date" name="end_date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" required>
+    </label>
+    <button type="submit" class="btn btn-sm">Preview changes</button>
+  </form>
 </div>
 
 <div class="panel">

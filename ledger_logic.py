@@ -347,6 +347,113 @@ def price_on_date(fuel_type, entry_date):
     return row.price_per_liter if row else fuel_type.price_per_liter
 
 
+def reprice_entries(start, end, apply_changes=False):
+    """Re-derive every date-priced entry between start and end from the
+    CURRENT FuelPriceHistory, so a price recorded after the fact can be
+    applied to entries that were saved before it existed.
+
+    This is the repair path for the one thing correcting a price can't fix
+    on its own: Sale/CreditGiven/SalesReturn each snapshot price_per_liter
+    and their money figure at save time (deliberately - an entry must not
+    silently change under you), so fixing the price history afterwards
+    leaves those rows priced at whatever was in effect when they were
+    typed. Re-saving each reading by hand does the same job one date at a
+    time; this does it for a whole range at once.
+
+    LITRES ARE NEVER TOUCHED - they come from meter readings and physical
+    fact, not from price. Only price_per_liter and the money derived from
+    it are recomputed.
+
+    Deliberately SKIPS a CreditGiven whose amount doesn't equal
+    liters * its own stored price: that mismatch is the signature of an
+    amount-mode entry (see ledger_credit()), i.e. a deliberate discount
+    where the amount is the number the customer actually agreed to.
+    Re-pricing those would silently overwrite the discount, so they're
+    reported as skipped instead and left for the owner to review by hand.
+
+    apply_changes=False (the default) computes the changes WITHOUT writing
+    anything, so a caller can show a before/after preview and let the
+    owner confirm before any money figure is rewritten. Nothing here
+    commits - the caller owns the transaction.
+
+    Returns a dict of change lists; each change carries the row, its fuel,
+    the old and new price, and the old and new money figure.
+    """
+    fuel_types = FuelType.query.all()
+    resolve = price_resolver(fuel_types)
+
+    changes = {"sales": [], "credits": [], "returns": [], "skipped_credits": []}
+
+    sales = (
+        Sale.query.filter(Sale.entry_date >= start, Sale.entry_date <= end)
+        .join(Nozzle, Sale.nozzle_id == Nozzle.id)
+        .join(Tank, Nozzle.tank_id == Tank.id)
+        .all()
+    )
+    for s in sales:
+        fuel = s.nozzle.tank.fuel_type
+        new_price = resolve(fuel, s.entry_date)
+        new_total = round(s.liters * new_price, 2)
+        if abs(new_price - s.price_per_liter) < 0.0001 and abs(new_total - s.total_amount) < 0.01:
+            continue
+        changes["sales"].append({
+            "obj": s, "fuel": fuel.name, "label": s.nozzle.label,
+            "liters": s.liters,
+            "old_price": s.price_per_liter, "new_price": new_price,
+            "old_amount": s.total_amount, "new_amount": new_total,
+        })
+        if apply_changes:
+            s.price_per_liter = new_price
+            s.total_amount = new_total
+
+    for c in CreditGiven.query.filter(CreditGiven.entry_date >= start, CreditGiven.entry_date <= end).all():
+        looks_amount_mode = abs(c.amount - round(c.liters * c.price_per_liter, 2)) > 0.01
+        new_price = resolve(c.fuel_type, c.entry_date)
+        if looks_amount_mode:
+            # Keep the agreed amount; only note it so the owner can see it
+            # was left alone rather than silently re-priced.
+            changes["skipped_credits"].append({
+                "obj": c, "fuel": c.fuel_type.name, "label": c.account.name,
+                "liters": c.liters, "old_price": c.price_per_liter,
+                "new_price": new_price, "old_amount": c.amount, "new_amount": c.amount,
+            })
+            continue
+        new_amount = round(c.liters * new_price, 2)
+        if abs(new_price - c.price_per_liter) < 0.0001 and abs(new_amount - c.amount) < 0.01:
+            continue
+        changes["credits"].append({
+            "obj": c, "fuel": c.fuel_type.name, "label": c.account.name,
+            "liters": c.liters,
+            "old_price": c.price_per_liter, "new_price": new_price,
+            "old_amount": c.amount, "new_amount": new_amount,
+        })
+        if apply_changes:
+            c.price_per_liter = new_price
+            c.amount = new_amount
+
+    for sr in SalesReturn.query.filter(SalesReturn.entry_date >= start, SalesReturn.entry_date <= end).all():
+        new_price = resolve(sr.fuel_type, sr.entry_date)
+        new_amount = round(sr.liters * new_price, 2)
+        if abs(new_price - sr.price_per_liter) < 0.0001 and abs(new_amount - sr.amount) < 0.01:
+            continue
+        changes["returns"].append({
+            "obj": sr, "fuel": sr.fuel_type.name, "label": sr.tank.label,
+            "liters": sr.liters,
+            "old_price": sr.price_per_liter, "new_price": new_price,
+            "old_amount": sr.amount, "new_amount": new_amount,
+        })
+        if apply_changes:
+            sr.price_per_liter = new_price
+            sr.amount = new_amount
+
+    changed = changes["sales"] + changes["credits"] + changes["returns"]
+    changes["count"] = len(changed)
+    changes["old_total"] = round(sum(c["old_amount"] for c in changed), 2)
+    changes["new_total"] = round(sum(c["new_amount"] for c in changed), 2)
+    changes["difference"] = round(changes["new_total"] - changes["old_total"], 2)
+    return changes
+
+
 def fuels_missing_price_on(entry_date, fuel_types=None):
     """Fuel types with NO FuelPriceHistory row effective on or before
     entry_date, i.e. the ones price_on_date() can only answer by falling
