@@ -1,4 +1,6 @@
 import csv
+import hashlib
+import hmac
 import io
 import os
 import re
@@ -29,10 +31,13 @@ from flask_migrate import upgrade as migrate_upgrade
 from flask_wtf import CSRFProtect
 from sqlalchemy import func, inspect
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload
 
 import charts
+import email_service
 from exports import build_pdf, build_xlsx
 from extensions import db, login_manager, migrate
+from tenancy import current_pump_id, register_tenancy_events, unscoped
 from ledger_logic import (
     account_ledger_events,
     active_shifts,
@@ -87,10 +92,12 @@ from models import (
     Nozzle,
     NozzleReset,
     NozzleTesting,
+    PasswordResetToken,
     Product,
     ProductPurchase,
     ProductRateHistory,
     ProductSale,
+    Pump,
     Receipt,
     SalaryPayment,
     Sale,
@@ -145,6 +152,12 @@ else:
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db.init_app(app)
+# Wires the tenant-scoping enforcement (see tenancy.py) into every session
+# created through db.session from here on: a do_orm_execute event filters
+# every read down to the current pump, and a before_flush event stamps
+# pump_id onto every new row. Must run after db.init_app(app) so the
+# Flask-SQLAlchemy session machinery already exists.
+register_tenancy_events(db)
 # Batch mode rewrites the whole table for an ALTER on SQLite (which can't
 # ALTER a column/constraint in place) - only needed there; Postgres in
 # production applies migrations directly. directory is explicit (rather
@@ -162,7 +175,16 @@ csrf = CSRFProtect(app)
 
 @login_manager.user_loader
 def load_user(user_id):
-    return db.session.get(User, int(user_id))
+    # unscoped(): this runs before current_user is resolved for the
+    # request (Flask-Login calls this to resolve it in the first place),
+    # so current_pump_id() has no pump_id to filter on yet - filtering
+    # here would either recurse (current_pump_id() reading current_user
+    # while current_user is still being resolved) or, worse, silently
+    # fail every login by scoping to the unauthenticated sentinel. This
+    # is one of the two legitimate unscoped() uses (see its docstring):
+    # you don't know a user's pump until you've found the user.
+    with unscoped():
+        return db.session.get(User, int(user_id))
 
 
 def owner_required(f):
@@ -213,11 +235,23 @@ def setup_is_complete():
 
 
 def get_cash_account():
-    """Cash-in-hand is a singleton - there's only one register. Lazily
-    create it on first access rather than requiring a setup step."""
-    cash_account = CashAccount.query.first()
+    """Cash-in-hand is a singleton PER PUMP - one register per pump, not
+    one register for the whole app. Lazily creates that pump's register on
+    first access rather than requiring a setup step.
+
+    Resolves/creates explicitly against current_pump_id() rather than
+    relying only on the implicit read-side tenant filter, because this
+    function also WRITES (creates a row) when none exists yet - and a
+    write has to know exactly which pump it's for. Returns None if there
+    is no usable pump context (no request, or an unauthenticated request)
+    rather than ever creating or returning a register that isn't
+    unambiguously this pump's."""
+    pump_id = current_pump_id()
+    if not pump_id or pump_id < 0:
+        return None
+    cash_account = CashAccount.query.filter_by(pump_id=pump_id).first()
     if not cash_account:
-        cash_account = CashAccount(opening_balance=0)
+        cash_account = CashAccount(opening_balance=0, pump_id=pump_id)
         db.session.add(cash_account)
         db.session.commit()
     return cash_account
@@ -288,9 +322,182 @@ def slugify(text):
     return slug or "account"
 
 
+# ------------------------------------------------------- auth: helpers ----
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+MIN_PASSWORD_LENGTH = 10  # financial app - length beats complexity rules
+RESET_TOKEN_TTL_HOURS = 1
+VERIFY_TOKEN_TTL_HOURS = 24
+
+
+def _password_errors(password, confirm, username, email):
+    """Shared password rules for EVERY way a password can be set: signup,
+    self-service reset, self-service change, the owner creating a staff
+    login, and the owner resetting someone's password.
+
+    Deliberately one bar everywhere. These used to split - 10 characters
+    on the self-service paths, 6 on the two owner-driven ones - which set
+    the app's real password floor at 6, since an attacker only has to
+    find the weakest way in. A staff login opens the same books as the
+    owner's own.
+
+    Length over complexity rules on purpose: this is a financial app, so
+    length is what actually matters, and character-class requirements
+    just push people toward predictable substitutions.
+
+    confirm=None skips the match check, for the owner-driven forms that
+    only have a single password box."""
+    errors = []
+    if len(password) < MIN_PASSWORD_LENGTH:
+        errors.append(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+    if username and password.lower() == username.lower():
+        errors.append("Password can't be the same as your username.")
+    if email and password.lower() == email.lower():
+        errors.append("Password can't be the same as your email.")
+    if confirm is not None and password != confirm:
+        errors.append("The two passwords don't match.")
+    return errors
+
+
+def _hash_token(raw_token):
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _issue_auth_token(user, purpose, ttl_hours):
+    """Creates a new PasswordResetToken for `user` (purpose "reset" or
+    "verify"), first invalidating any outstanding unused token of the
+    same purpose for that user, and returns the RAW token - only its
+    hash is ever stored (see PasswordResetToken's docstring in
+    models.py). Caller is responsible for emailing the raw value; it is
+    never retrievable again after this call returns.
+
+    unscoped(): PasswordResetToken is TenantScoped, but this runs from
+    both a fully unauthenticated context (forgot-password, where
+    current_pump_id() would otherwise resolve to the unauthenticated
+    sentinel and silently find zero outstanding tokens to invalidate)
+    and an authenticated one (verification email right after signup/
+    login, "resend verification" - both of those work fine without this,
+    but sharing one function keeps the invalidate-then-issue logic in
+    one place). Narrowed to just this function's query + write; pump_id
+    is set explicitly from user.pump_id on the new row rather than
+    relying on before_flush's auto-stamp (which refuses to guess one
+    with no pump context - see tenancy.py). Every statement here is
+    already scoped by this one already-resolved user's own id, so this
+    can't reach or invalidate another user's tokens."""
+    with unscoped():
+        stale = PasswordResetToken.query.filter_by(
+            user_id=user.id, purpose=purpose, used_at=None
+        ).all()
+        now = datetime.now()
+        for t in stale:
+            t.used_at = now
+
+        raw_token = secrets.token_urlsafe(32)
+        db.session.add(
+            PasswordResetToken(
+                user_id=user.id,
+                pump_id=user.pump_id,
+                purpose=purpose,
+                token_hash=_hash_token(raw_token),
+                expires_at=now + timedelta(hours=ttl_hours),
+            )
+        )
+        db.session.commit()
+    return raw_token
+
+
+def _find_valid_token(raw_token, purpose):
+    """Read-only: returns the matching PasswordResetToken row if raw_token
+    exists, is unused, unexpired, and of the right purpose - else None.
+    Does NOT mark it used (see the "used_at = ..." calls at each call
+    site) - split out so a route can finish validating the REST of a
+    submission (e.g. password rules) before spending the token; a
+    rejected password on attempt 1 must not burn the user's only link.
+
+    The final comparison uses hmac.compare_digest rather than relying on
+    the filter_by(token_hash=...) equality alone, to make the actual
+    accept/reject decision constant-time against the stored hash as
+    required by the Stage 2 spec.
+
+    unscoped(): reached from /reset-password/<token> and
+    /verify-email/<token>, both fully unauthenticated - same reasoning as
+    _issue_auth_token. The lookup key is the token's own sha256 hash: a
+    32-byte cryptographically random value, unguessable and unique to
+    one row, so resolving it can only ever land on that one token's own
+    user - nothing here is influenced by any pump/session state, because
+    there isn't any yet.
+
+    joinedload(.user): candidate.user is a lazy relationship - without
+    eager-loading it HERE, inside unscoped(), the caller's later
+    `candidate.user` access would issue its OWN fresh SELECT outside
+    this function, back in the caller's (unauthenticated) request
+    context, which the tenant filter would then scope to the
+    unauthenticated sentinel and silently resolve to None (confirmed
+    empirically: this was a real 500 in this app's own verification run,
+    not a hypothetical). Fetching the user in the SAME statement, while
+    still unscoped, is what makes candidate.user safe to read anywhere
+    after this function returns."""
+    token_hash = _hash_token(raw_token)
+    with unscoped():
+        candidate = PasswordResetToken.query.options(joinedload(PasswordResetToken.user)).filter_by(
+            token_hash=token_hash, purpose=purpose
+        ).first()
+    if candidate is None or not hmac.compare_digest(candidate.token_hash, token_hash):
+        return None
+    if candidate.used_at is not None or candidate.expires_at < datetime.now():
+        return None
+    return candidate
+
+
+def _send_reset_email(user, reset_url):
+    html = (
+        f"<p>Hello {user.label},</p>"
+        f"<p>Someone asked to reset the password for your Petrol Khata account "
+        f"({user.email}). If this was you, click the link below - it expires in "
+        f"{RESET_TOKEN_TTL_HOURS} hour(s) and can only be used once:</p>"
+        f'<p><a href="{reset_url}">{reset_url}</a></p>'
+        f"<p>If you didn't request this, you can safely ignore this email - "
+        f"your password hasn't been changed.</p>"
+    )
+    email_service.send_email(user.email, "Reset your Petrol Khata password", html)
+
+
+def _send_verification_email(user):
+    if not user.email:
+        return
+    raw_token = _issue_auth_token(user, "verify", VERIFY_TOKEN_TTL_HOURS)
+    verify_url = url_for("verify_email", token=raw_token, _external=True)
+    html = (
+        f"<p>Hello {user.label},</p>"
+        f"<p>Please confirm this is your email address for your Petrol Khata "
+        f"account by clicking the link below. It expires in "
+        f"{VERIFY_TOKEN_TTL_HOURS} hours:</p>"
+        f'<p><a href="{verify_url}">{verify_url}</a></p>'
+    )
+    email_service.send_email(user.email, "Verify your Petrol Khata email", html)
+
+
 @app.before_request
 def enforce_setup_flow():
-    if request.endpoint in (None, "static", "login", "logout", "change_password"):
+    if request.endpoint in (
+        None,
+        "static",
+        "login",
+        "logout",
+        "change_password",
+        # Stage 2: every one of these must work for a visitor who either
+        # isn't authenticated yet (signup, forgot/reset password - the
+        # whole point) or is authenticated but whose brand-new pump has
+        # no setup yet (a freshly-signed-up owner's own verification
+        # link would otherwise get redirected into the setup wizard
+        # before ever reaching verify_email). None of them expose
+        # another pump's data - see each route's own unscoped() comments.
+        "signup",
+        "forgot_password",
+        "reset_password",
+        "verify_email",
+        "resend_verification",
+    ):
         return
     if not current_user.is_authenticated:
         return
@@ -318,16 +525,61 @@ def login():
         return redirect(url_for("ledger"))
 
     if request.method == "POST":
-        username = request.form.get("username", "").strip()
+        identifier = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        user = User.query.filter_by(username=username).first()
+        # Deliberately the SAME message for "no such user", "wrong
+        # password", and "deactivated" (see the two flash() call sites
+        # below) - a login form that answers differently for any of
+        # those is a way to discover which emails/usernames are
+        # registered, which this app must not offer.
+        generic_error = "Incorrect username/email or password."
+
+        # unscoped(): the request isn't authenticated yet, so
+        # current_pump_id() would scope every lookup below to the
+        # unauthenticated sentinel (matching no one) - there is no pump
+        # to filter by until a user has actually been resolved. This is
+        # the same established pattern as Stage 1's login lookup (see
+        # tenancy.py's unscoped() docstring) and Flask-Login's
+        # user_loader just below.
+        #
+        # An "@" in the input means email - globally unique (see
+        # User.email in models.py) - so that branch always resolves to
+        # at most one user, unambiguously. A bare username is only
+        # unique PER PUMP (User.__table_args__), so once two pumps
+        # happen to share one, matching it alone is ambiguous; that's
+        # refused outright below rather than guessed at.
+        with unscoped():
+            if "@" in identifier:
+                user = User.query.filter_by(email=identifier.lower()).first()
+            else:
+                matches = User.query.filter(
+                    func.lower(User.username) == identifier.lower(),
+                    User.is_active_user.is_(True),
+                ).all()
+                if len(matches) > 1:
+                    user = "ambiguous"
+                else:
+                    user = matches[0] if matches else None
+
+        if user == "ambiguous":
+            # Two or more active users share this username across
+            # different pumps - do NOT log anyone in, and do not reveal
+            # how many pumps matched, or anything about them (that alone
+            # would confirm another business's username/existence).
+            flash(
+                "That username is used on more than one account. "
+                "Please sign in with your email address instead.",
+                "error",
+            )
+            return render_template("login.html")
+
         if user and user.check_password(password):
             if not user.is_active_user:
-                flash("That account has been deactivated. Ask the owner to re-enable it.", "error")
+                flash(generic_error, "error")
                 return render_template("login.html")
             login_user(user)
             return redirect(url_for("ledger"))
-        flash("Incorrect username or password.", "error")
+        flash(generic_error, "error")
 
     return render_template("login.html")
 
@@ -343,12 +595,12 @@ def change_password():
         new = request.form.get("new_password", "")
         confirm = request.form.get("confirm_password", "")
 
+        errors = _password_errors(new, confirm, current_user.username, current_user.email)
         if not current_user.check_password(current):
             flash("Your current password is incorrect.", "error")
-        elif len(new) < 6:
-            flash("New password must be at least 6 characters.", "error")
-        elif new != confirm:
-            flash("The two new passwords don't match.", "error")
+        elif errors:
+            for e in errors:
+                flash(e, "error")
         else:
             current_user.set_password(new)
             db.session.commit()
@@ -363,6 +615,258 @@ def change_password():
 def logout():
     logout_user()
     return redirect(url_for("login"))
+
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    """Public: creates a brand-new Pump plus its owner User, in one
+    atomic transaction, then logs the owner in and sends them to the
+    setup wizard. See models.py/tenancy.py for why every row created
+    here needs an EXPLICIT pump_id: this whole request runs before
+    login_user() is called, so current_pump_id() is the unauthenticated
+    sentinel and before_flush would otherwise (correctly) refuse to
+    stamp any of these rows.
+
+    No client-supplied pump id is ever read from the request - the pump
+    is always a fresh row created right here, so there is no field an
+    attacker could set to attach themselves to an existing pump."""
+    if current_user.is_authenticated:
+        return redirect(url_for("ledger"))
+
+    form_values = {"pump_name": "", "email": "", "username": ""}
+
+    if request.method == "POST":
+        pump_name = request.form.get("pump_name", "").strip()
+        email = request.form.get("email", "").strip().lower()
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        confirm = request.form.get("confirm_password", "")
+        form_values = {"pump_name": pump_name, "email": email, "username": username}
+
+        errors = []
+        if not pump_name:
+            errors.append("Please enter your pump/business name.")
+
+        if not email:
+            errors.append("Please enter an email address.")
+        elif not EMAIL_RE.match(email):
+            errors.append("That doesn't look like a valid email address.")
+        else:
+            # unscoped(): nobody is authenticated yet (this IS signup) -
+            # there is no pump to scope this to, and email uniqueness is
+            # GLOBAL across every pump by design (see User.email in
+            # models.py), so this has to search every pump regardless.
+            # Only used to decide whether to reject the signup with a
+            # validation message - never returns another pump's row (or
+            # any of its fields) to the caller.
+            with unscoped():
+                email_taken = User.query.filter_by(email=email).first() is not None
+            if email_taken:
+                errors.append("An account with that email already exists. Try logging in instead.")
+
+        if not username:
+            errors.append("Please enter a username.")
+        elif len(username) > 80:
+            errors.append("Username is too long (80 characters max).")
+
+        errors.extend(_password_errors(password, confirm, username, email))
+
+        if errors:
+            for e in errors:
+                flash(e, "error")
+            return render_template("signup.html", **form_values)
+
+        pump = Pump(name=pump_name)
+        db.session.add(pump)
+        # Pump isn't TenantScoped (see its docstring) so this flush isn't
+        # about tenancy at all - it just assigns pump.id so the rows
+        # below can be stamped with it. Still inside the same DB
+        # transaction as the commit() further down, so a failure there
+        # rolls this insert back too - see that commit's comment.
+        db.session.flush()
+
+        owner = User(
+            username=username,
+            email=email,
+            role="owner",
+            is_active_user=True,
+            pump_id=pump.id,
+        )
+        owner.set_password(password)
+        db.session.add(owner)
+        # Every pump needs its default shift (default_shift() /
+        # book_stock() / every reading-credit-bank-sale route assumes
+        # one exists) and its cash-in-hand register - see
+        # ensure_seed_users() in this file for the exact same pattern
+        # used to seed the first, bootstrap pump.
+        db.session.add(Shift(name="Full Day", sort_order=0, pump_id=pump.id))
+        db.session.add(CashAccount(opening_balance=0, pump_id=pump.id))
+
+        try:
+            # One commit for all four rows (pump already flushed into
+            # the same open transaction above) - all-or-nothing. A
+            # duplicate email slipping in between the check above and
+            # here (a race between two concurrent signups) is the
+            # realistic way this fails; the rollback below undoes the
+            # pump/shift/cash-account too, leaving no orphan behind.
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            flash(
+                "Something went wrong creating your account (that email or "
+                "username may already be taken). Please try again.",
+                "error",
+            )
+            return render_template("signup.html", **form_values)
+
+        login_user(owner)
+
+        # Verification email - best-effort, must never block signup
+        # (Stage 2 spec: email verification is non-blocking). Runs AFTER
+        # commit()+login_user() so current_user is now authenticated and
+        # the ordinary before_flush auto-stamp in tenancy.py handles
+        # this new token row's pump_id on its own - no unscoped()/
+        # explicit pump_id needed for this particular call.
+        try:
+            _send_verification_email(owner)
+        except Exception:
+            app.logger.exception(
+                "signup: failed to send verification email for user %s", owner.id
+            )
+
+        flash(f'Welcome! "{pump.name}" is set up - let\'s add your tanks.', "success")
+        return redirect(url_for("setup_tanks"))
+
+    return render_template("signup.html", **form_values)
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    """Public. Always shows the same response whether or not the address
+    is registered - see the flash() call at the end, reached from every
+    path through this POST handler."""
+    if current_user.is_authenticated:
+        return redirect(url_for("ledger"))
+
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        if not email:
+            flash("Please enter your email address.", "error")
+            return render_template("forgot_password.html")
+
+        # unscoped(): unauthenticated by definition - there is no pump to
+        # scope this to, and email is globally unique anyway (see
+        # User.email in models.py). Only used to decide whether to issue
+        # a token; existence/non-existence is never revealed in the
+        # response (see the identical flash() below).
+        with unscoped():
+            user = User.query.filter_by(email=email, is_active_user=True).first()
+
+        if user:
+            try:
+                raw_token = _issue_auth_token(user, "reset", RESET_TOKEN_TTL_HOURS)
+                reset_url = url_for("reset_password", token=raw_token, _external=True)
+                _send_reset_email(user, reset_url)
+            except Exception:
+                # A broken/slow email provider must never surface as an
+                # error here - the response is identical either way.
+                app.logger.exception("forgot-password: failed to issue/send reset token")
+
+        flash(
+            "If that email address has an account, we've sent a link to reset "
+            f"the password. It expires in {RESET_TOKEN_TTL_HOURS} hour.",
+            "info",
+        )
+        return redirect(url_for("login"))
+
+    return render_template("forgot_password.html")
+
+
+@app.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    """Public. `token` is the raw, unhashed value from the emailed link -
+    see _find_valid_token()/PasswordResetToken in models.py for how it's
+    verified against the stored hash."""
+    if current_user.is_authenticated:
+        return redirect(url_for("ledger"))
+
+    candidate = _find_valid_token(token, "reset")
+    if not candidate:
+        flash("That reset link is invalid or has expired. Request a new one below.", "error")
+        return redirect(url_for("forgot_password"))
+
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        confirm = request.form.get("confirm_password", "")
+        user = candidate.user
+        errors = _password_errors(password, confirm, user.username, user.email)
+
+        if errors:
+            for e in errors:
+                flash(e, "error")
+            return render_template("reset_password.html", token=token)
+
+        # Re-validate right before writing (defends against the token
+        # expiring, or being used from a second tab, between the GET
+        # above and this POST) - only marked used once we know the new
+        # password itself is acceptable, so a bad password on the first
+        # try doesn't cost the user their only link.
+        candidate = _find_valid_token(token, "reset")
+        if not candidate:
+            flash("That reset link is invalid or has expired. Request a new one below.", "error")
+            return redirect(url_for("forgot_password"))
+
+        user = candidate.user
+        user.set_password(password)
+        candidate.used_at = datetime.now()
+        db.session.commit()
+        flash("Password reset. You can log in with your new password now.", "success")
+        return redirect(url_for("login"))
+
+    return render_template("reset_password.html", token=token)
+
+
+@app.route("/verify-email/<token>")
+def verify_email(token):
+    """Public (reachable whether or not the clicker happens to be logged
+    in - the link is mailed out and may be opened in any browser/tab).
+    Never blocks anything; see the banner in base.html for the only
+    place verification status is surfaced."""
+    candidate = _find_valid_token(token, "verify")
+    if not candidate:
+        flash("That verification link is invalid or has expired.", "error")
+        return redirect(url_for("ledger") if current_user.is_authenticated else url_for("login"))
+
+    user = candidate.user
+    user.email_verified_at = datetime.now()
+    candidate.used_at = datetime.now()
+    db.session.commit()
+    flash("Email verified - thanks!", "success")
+    return redirect(url_for("ledger") if current_user.is_authenticated else url_for("login"))
+
+
+@app.route("/resend-verification", methods=["POST"])
+@login_required
+def resend_verification():
+    """Self-service, mirrors change_password()'s spirit: the logged-in
+    user can always ask for a fresh link for their OWN account. Never
+    resends/verifies anyone else's."""
+    if current_user.email_verified_at:
+        flash("Your email is already verified.", "info")
+    elif not current_user.email:
+        flash("Your account has no email on file - ask the owner to add one in Settings.", "error")
+    else:
+        try:
+            _send_verification_email(current_user)
+            flash(
+                "Verification email sent - please check your inbox.",
+                "success",
+            )
+        except Exception:
+            app.logger.exception("resend-verification: failed to send for user %s", current_user.id)
+            flash("Couldn't send the verification email right now - please try again shortly.", "error")
+
+    return redirect(request.referrer or url_for("ledger"))
 
 
 @app.route("/")
@@ -1471,25 +1975,73 @@ def settings_add_bank_account():
 @login_required
 @owner_required
 def settings_add_user():
+    """Owner-scoped user creation. The new row lands on the OWNER's OWN
+    pump automatically - current_user is authenticated here, so
+    tenancy.py's before_flush auto-stamp handles pump_id without this
+    route setting it explicitly (verified: no pump_id= is passed to
+    User() below). Username uniqueness is enforced PER PUMP, exactly
+    like the check this replaced - User.query is itself tenant-filtered
+    for an authenticated request, so this only ever matches a collision
+    within the owner's own pump, never another pump's user."""
     username = request.form.get("username", "").strip()
     display_name = request.form.get("display_name", "").strip()
+    email = request.form.get("email", "").strip().lower()
     password = request.form.get("password", "")
     role = request.form.get("role", "")
 
+    errors = []
     if not username:
-        flash("Please enter a username.", "error")
+        errors.append("Please enter a username.")
+    elif len(username) > 80:
+        errors.append("Username is too long (80 characters max).")
     elif User.query.filter(func.lower(User.username) == username.lower()).first():
-        flash(f'A user named "{username}" already exists.', "error")
-    elif role not in ("owner", "staff"):
-        flash("Please choose a role.", "error")
-    elif len(password) < 6:
-        flash("Password must be at least 6 characters.", "error")
-    else:
-        user = User(username=username, display_name=display_name or None, role=role)
-        user.set_password(password)
-        db.session.add(user)
+        errors.append(f'A user named "{username}" already exists on this pump.')
+
+    if email:
+        if not EMAIL_RE.match(email):
+            errors.append("That doesn't look like a valid email address.")
+        else:
+            # unscoped(): email is GLOBALLY unique (User.email), not per
+            # pump - checking it has to look across every pump. This
+            # only ever produces a yes/no "is it taken" answer; it never
+            # returns or reveals which pump/account holds it.
+            with unscoped():
+                email_taken = User.query.filter_by(email=email).first() is not None
+            if email_taken:
+                errors.append(f'"{email}" is already registered to another account.')
+
+    if role not in ("owner", "staff"):
+        errors.append("Please choose a role.")
+    # Same bar as signup/reset - a staff login opens the same books the
+    # owner's own does, so it can't be the weak way in (see
+    # _password_errors). confirm=None: this form has one password box.
+    errors.extend(_password_errors(password, None, username, email))
+
+    if errors:
+        for e in errors:
+            flash(e, "error")
+        return redirect(url_for("settings"))
+
+    user = User(
+        username=username,
+        display_name=display_name or None,
+        email=email or None,
+        role=role,
+    )
+    user.set_password(password)
+    db.session.add(user)
+    try:
         db.session.commit()
         flash(f'Added {role} "{username}".', "success")
+    except IntegrityError:
+        # Pre-checks above are best-effort against a race (two
+        # near-simultaneous adds); the DB's own unique constraints are
+        # the real backstop. Fail with a clear message, not a raw 500.
+        db.session.rollback()
+        flash(
+            f'Could not add "{username}" - that username or email is already in use.',
+            "error",
+        )
 
     return redirect(url_for("settings"))
 
@@ -1525,8 +2077,12 @@ def settings_reset_user_password(user_id):
     user = db.session.get(User, user_id) or abort(404)
     password = request.form.get("password", "")
 
-    if len(password) < 6:
-        flash("Password must be at least 6 characters.", "error")
+    # Same bar as every other password path (see _password_errors).
+    # confirm=None: this inline form has a single password box.
+    errors = _password_errors(password, None, user.username, user.email)
+    if errors:
+        for e in errors:
+            flash(e, "error")
     else:
         user.set_password(password)
         db.session.commit()
@@ -5331,17 +5887,36 @@ def ensure_seed_users():
     # brand-new empty database (replaces the old db.create_all()).
     migrate_upgrade()
 
+    # This whole function runs with no request context (see the module
+    # docstring in tenancy.py) - current_pump_id() is None here, so every
+    # query below is naturally unscoped already. But the two writes further
+    # down (Shift, User) need an explicit pump_id: the before_flush
+    # auto-stamp (tenancy.py) refuses to guess one with no pump context,
+    # by design, so it has to be set by hand here instead. The Stage 1
+    # migration always creates exactly one pump before this runs, so
+    # there's always exactly one to seed against.
+    with unscoped():
+        pump = Pump.query.first()
+    if not pump:
+        pump = Pump(name="My Pump")
+        db.session.add(pump)
+        db.session.commit()
+
     # Every reading/credit/bank-sale row needs a shift, so one always has
     # to exist. A pump that doesn't split its day just leaves this single
     # shift in place and never sees a shift selector anywhere.
-    if Shift.query.count() == 0:
-        db.session.add(Shift(name="Full Day", sort_order=0))
+    with unscoped():
+        has_shift = Shift.query.filter_by(pump_id=pump.id).count() > 0
+    if not has_shift:
+        db.session.add(Shift(name="Full Day", sort_order=0, pump_id=pump.id))
         db.session.commit()
 
-    if User.query.count() == 0:
-        owner = User(username="owner", role="owner")
+    with unscoped():
+        has_user = User.query.filter_by(pump_id=pump.id).count() > 0
+    if not has_user:
+        owner = User(username="owner", role="owner", pump_id=pump.id)
         owner.set_password("owner123")
-        staff = User(username="staff", role="staff")
+        staff = User(username="staff", role="staff", pump_id=pump.id)
         staff.set_password("staff123")
         db.session.add_all([owner, staff])
         print("=" * 60)
