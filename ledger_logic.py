@@ -646,9 +646,19 @@ def sales_breakdown_for_date(entry_date, shift_id=None):
 
 
 def default_shift():
-    """The shift new entries fall into when the pump hasn't set up its own -
-    lowest sort_order among active shifts. There's always at least one
-    (seeded at startup), so this never returns None in practice."""
+    """The CURRENT PUMP's shift that new entries fall into when it hasn't
+    set up its own - lowest sort_order among that pump's active shifts.
+    Scoped implicitly by the tenant filter in tenancy.py (Shift.query is
+    filtered to current_pump_id() the same as every other query), so this
+    can only ever return a shift belonging to the pump making the request.
+
+    Every pump gets exactly one "Full Day" shift seeded for it (see
+    ensure_seed_users() in app.py for the very first pump, and Stage 2's
+    pump-provisioning flow for every pump after that) - not "seeded once
+    at startup" as this used to claim back when there was only ever one
+    pump in the whole database. Returns None if called with no pump
+    context (see tenancy.current_pump_id) rather than another pump's
+    shift."""
     return Shift.query.filter_by(is_active=True).order_by(Shift.sort_order, Shift.id).first()
 
 
