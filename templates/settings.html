@@ -13,26 +13,18 @@
   <p class="hint">Staff can log readings, receipts, credit, bank sales, loans and dips. Owners can do everything. Users are deactivated rather than deleted, because every entry records who made it and that history has to stay readable. <a href="{{ url_for('change_password') }}">Change your own password &rarr;</a></p>
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Reset password</th><th></th></tr></thead>
+    <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Status</th><th>Reset password</th><th></th></tr></thead>
     <tbody>
       {% for u in users %}
       <tr class="{{ '' if u.is_active_user else 'row-low' }}">
         <td>{{ u.username }}{% if u.id == current_user.id %} <span class="hint-sm">(you)</span>{% endif %}</td>
         <td>{{ u.display_name or "-" }}</td>
-        <td>
-          {% if u.email %}
-            {{ u.email }}
-            {% if u.email_verified_at %}<span class="badge badge-ok">Verified</span>{% else %}<span class="badge badge-low">Unverified</span>{% endif %}
-          {% else %}
-            <span class="hint-sm">-</span>
-          {% endif %}
-        </td>
         <td><span class="badge">{{ u.role|capitalize }}</span></td>
         <td>{% if u.is_active_user %}<span class="badge badge-ok">Active</span>{% else %}<span class="badge badge-low">Deactivated</span>{% endif %}</td>
         <td>
           <form method="post" action="{{ url_for('settings_reset_user_password', user_id=u.id) }}" class="inline-edit-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="password" name="password" placeholder="New password" required minlength="10">
+            <input type="password" name="password" placeholder="New password" required minlength="6">
             <button type="submit" class="btn btn-sm">Set</button>
           </form>
         </td>
@@ -59,17 +51,14 @@
     <label>Full name (optional)
       <input type="text" name="display_name">
     </label>
-    <label>Email (optional)
-      <input type="email" name="email">
-    </label>
     <label>Role
       <select name="role" required>
         <option value="staff">Staff</option>
         <option value="owner">Owner</option>
       </select>
     </label>
-    <label>Password <span class="hint-sm">at least 10 characters</span>
-      <input type="password" name="password" required minlength="10">
+    <label>Password <span class="hint-sm">at least 6 characters</span>
+      <input type="password" name="password" required minlength="6">
     </label>
     <button type="submit" class="btn">Add User</button>
   </form>

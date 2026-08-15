@@ -56,32 +56,6 @@
 
   <main class="main">
     <div class="content-max">
-      {% if current_user.is_authenticated and current_user.email and not current_user.email_verified_at %}
-      <div class="flash flash-info" id="verify-banner" style="display:none; margin-bottom:var(--s4); align-items:center; gap:var(--s3); justify-content:space-between; flex-wrap:wrap;">
-        <span>Your email ({{ current_user.email }}) hasn't been verified yet. This doesn't limit anything - it's just so we can reach you if you ever need a password reset.</span>
-        <span style="display:flex; gap:var(--s2); flex-shrink:0;">
-          <form method="post" action="{{ url_for('resend_verification') }}" style="display:inline;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm btn-ghost">Resend verification email</button>
-          </form>
-          <button type="button" class="btn btn-sm btn-ghost" onclick="dismissVerifyBanner()">Dismiss</button>
-        </span>
-      </div>
-      <script>
-        (function () {
-          var key = "verify-banner-dismissed-{{ current_user.id }}";
-          var banner = document.getElementById("verify-banner");
-          if (banner && !localStorage.getItem(key)) {
-            banner.style.display = "flex";
-          }
-          window.dismissVerifyBanner = function () {
-            localStorage.setItem(key, "1");
-            if (banner) banner.style.display = "none";
-          };
-        })();
-      </script>
-      {% endif %}
-
       {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
           <div class="flash-list">

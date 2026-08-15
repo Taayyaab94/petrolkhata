@@ -1,95 +1,20 @@
 from datetime import datetime
 
 from flask_login import UserMixin
-from sqlalchemy.orm import declared_attr
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from extensions import db
 
 
-class Pump(db.Model):
-    """The tenant root. Every business table in this app (see
-    TenantScoped below) belongs to exactly one Pump via a pump_id column;
-    Pump itself is deliberately NOT TenantScoped - it IS the thing
-    everything else is scoped to, not a thing that itself belongs to a
-    pump.
-
-    Stage 1 only: this table exists purely so every other table has
-    something to hang a pump_id off of, enforced by tenancy.py. Signup,
-    email, billing, and any other per-pump account-management fields are
-    Stage 2's responsibility, not this one's.
-    """
-
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.now)
-
-
-class TenantScoped:
-    """Mixin: marks a model as belonging to exactly one pump.
-
-    Every table that carries real business data gets its own pump_id
-    column via this mixin - including tables that could, in principle,
-    derive their pump through a join instead (e.g. FuelPriceHistory could
-    reach it via fuel_type_id -> FuelType -> ... ). That denormalisation
-    is deliberate: it keeps the single enforcement rule in tenancy.py
-    uniform and total. Every tenant-scoped query is filtered the exact
-    same way (a `pump_id == current pump` clause added to the model
-    itself), rather than the correctness of a leak depending on whether a
-    particular query happens to join all the way back to a scoped parent.
-
-    See tenancy.py for how this column is actually enforced: a
-    SQLAlchemy `do_orm_execute` session event applies `pump_id ==
-    current_pump_id()` to every SELECT (including db.session.get(),
-    aggregates, and relationship loads), and a `before_flush` event
-    stamps this column on every new row so individual call sites don't
-    each have to remember to set it.
-
-    Uses @declared_attr so every subclass gets its OWN pump_id
-    column/foreign key, rather than one shared column defined once on
-    this mixin (which would not work correctly across multiple mapped
-    subclasses).
-    """
-
-    @declared_attr
-    def pump_id(cls):
-        return db.Column(db.Integer, db.ForeignKey("pump.id"), nullable=False, index=True)
-
-
-class User(UserMixin, TenantScoped, db.Model):
+class User(UserMixin, db.Model):
     """A login. Deactivating rather than deleting is deliberate: every
     ledger row records which user entered it (user_id), so a user who has
     ever recorded anything has to stay resolvable for that history to
-    still read correctly.
-
-    username is unique per pump (see __table_args__), not globally - so
-    once a second pump exists, looking a user up by username ALONE is
-    ambiguous (two pumps could each have a "staff" user). Stage 2 solves
-    this at the login route rather than here: email (see below) is
-    globally unique and is the unambiguous path; a bare username is only
-    accepted when it happens to resolve to exactly one active user across
-    every pump (see login() in app.py for the exact rule).
-
-    email is nullable (staff created by an owner don't need one; every
-    owner who signed up through /signup always has one) but GLOBALLY
-    unique when present - it's the identifier that has to keep working
-    even after a second, third, ... pump exists, which username alone
-    can't promise. Always stored lowercased+stripped (both at signup and
-    on any later edit) so "Ali@x.com" and "ali@x.com" can't become two
-    accounts. A plain column-level unique=True is correct for this on
-    both SQLite and Postgres - neither treats NULL as colliding with
-    another NULL (or with anything else) under a UNIQUE constraint, so
-    any number of users with no email at all is fine."""
-
-    __table_args__ = (
-        db.UniqueConstraint("pump_id", "username", name="uq_user_pump_username"),
-    )
+    still read correctly."""
 
     id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), nullable=False)
+    username = db.Column(db.String(80), unique=True, nullable=False)
     display_name = db.Column(db.String(120))
-    email = db.Column(db.String(255), nullable=True, unique=True)
-    email_verified_at = db.Column(db.DateTime, nullable=True)
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(20), nullable=False)  # "owner" or "staff"
     is_active_user = db.Column(db.Boolean, nullable=False, default=True)
@@ -110,48 +35,35 @@ class User(UserMixin, TenantScoped, db.Model):
         return self.display_name or self.username
 
 
-class Shift(TenantScoped, db.Model):
+class Shift(db.Model):
     """A named working period within a day (e.g. Morning/Evening/Night).
 
     A single "Full Day" shift is seeded automatically so a pump that
     doesn't split its day never has to think about shifts at all - every
     reading, credit sale, and bank sale just lands in that one shift, and
     the Ledger hides the selector entirely while only one active shift
-    exists. Adding more shifts later doesn't disturb existing rows.
-
-    name is unique per pump (see __table_args__), not globally."""
-
-    __table_args__ = (
-        db.UniqueConstraint("pump_id", "name", name="uq_shift_pump_name"),
-    )
+    exists. Adding more shifts later doesn't disturb existing rows."""
 
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(60), nullable=False)
+    name = db.Column(db.String(60), nullable=False, unique=True)
     sort_order = db.Column(db.Integer, nullable=False, default=0)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class FuelType(TenantScoped, db.Model):
-    __table_args__ = (
-        db.UniqueConstraint("pump_id", "name", name="uq_fueltype_pump_name"),
-    )
-
+class FuelType(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(50), nullable=False)
+    name = db.Column(db.String(50), unique=True, nullable=False)
     price_per_liter = db.Column(db.Float, nullable=False, default=0)
 
 
-class FuelPriceHistory(TenantScoped, db.Model):
+class FuelPriceHistory(db.Model):
     """One row per price change, effective from effective_date onward until
     the next row for the same fuel type. FuelType.price_per_liter is kept
     as a denormalized "current price" cache; this table is the source of
     truth for what a fuel cost on any given past date, so correcting an
     old Sale/CreditGiven entry can re-price at the rate that was actually
-    in effect then instead of today's rate (see ledger_logic.price_on_date).
-
-    Carries its own pump_id even though it could be derived through
-    fuel_type_id -> FuelType - see TenantScoped's docstring for why."""
+    in effect then instead of today's rate (see ledger_logic.price_on_date)."""
 
     id = db.Column(db.Integer, primary_key=True)
     fuel_type_id = db.Column(db.Integer, db.ForeignKey("fuel_type.id"), nullable=False)
@@ -162,7 +74,7 @@ class FuelPriceHistory(TenantScoped, db.Model):
     fuel_type = db.relationship("FuelType", backref="price_history")
 
 
-class Tank(TenantScoped, db.Model):
+class Tank(db.Model):
     """A physical storage tank. Several tanks can share a fuel type.
 
     Stock is never stored as a mutable counter here - it's always
@@ -202,12 +114,8 @@ class Tank(TenantScoped, db.Model):
     (forcing a historically-unknowable value there would be dishonest).
     """
 
-    __table_args__ = (
-        db.UniqueConstraint("pump_id", "number", name="uq_tank_pump_number"),
-    )
-
     id = db.Column(db.Integer, primary_key=True)
-    number = db.Column(db.Integer, nullable=False)
+    number = db.Column(db.Integer, nullable=False, unique=True)
     fuel_type_id = db.Column(db.Integer, db.ForeignKey("fuel_type.id"), nullable=False)
     capacity_liters = db.Column(db.Float, nullable=False)
     starting_stock_liters = db.Column(db.Float, nullable=False, default=0)
@@ -222,20 +130,16 @@ class Tank(TenantScoped, db.Model):
         return f"Tank {self.number} - {self.fuel_type.name}"
 
 
-class Dispenser(TenantScoped, db.Model):
-    __table_args__ = (
-        db.UniqueConstraint("pump_id", "number", name="uq_dispenser_pump_number"),
-    )
-
+class Dispenser(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    number = db.Column(db.Integer, nullable=False)
+    number = db.Column(db.Integer, nullable=False, unique=True)
 
     nozzles = db.relationship(
         "Nozzle", backref="dispenser", order_by="Nozzle.nozzle_number"
     )
 
 
-class Nozzle(TenantScoped, db.Model):
+class Nozzle(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     dispenser_id = db.Column(db.Integer, db.ForeignKey("dispenser.id"), nullable=False)
     nozzle_number = db.Column(db.Integer, nullable=False)
@@ -252,7 +156,7 @@ class Nozzle(TenantScoped, db.Model):
         return f"Dispenser {self.dispenser.number} - Nozzle {self.nozzle_number}"
 
 
-class NozzleReset(TenantScoped, db.Model):
+class NozzleReset(db.Model):
     """Marks that a nozzle's physical meter was replaced/rolled over as of
     reset_date - readings from that date onward start a fresh counting era.
     previous_reading_for/nearest_earlier_reading/next_sale_on_or_after in
@@ -270,7 +174,7 @@ class NozzleReset(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class Account(TenantScoped, db.Model):
+class Account(db.Model):
     """A single ledger shared by any party the pump does business with -
     customer, supplier, employee, owner, or any combination (e.g. another
     pump that sometimes buys fuel and sometimes sells it back). account_type
@@ -340,7 +244,7 @@ class Account(TenantScoped, db.Model):
         )
 
 
-class Sale(TenantScoped, db.Model):
+class Sale(db.Model):
     """A debit-side ledger entry: one nozzle's meter reading on one date,
     within one shift.
 
@@ -396,7 +300,7 @@ class Sale(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class CreditGiven(TenantScoped, db.Model):
+class CreditGiven(db.Model):
     """A credit-side ledger entry: fuel already counted in a nozzle's Sale
     that was handed to a customer on account instead of collected as cash.
 
@@ -424,7 +328,7 @@ class CreditGiven(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class SalesReturn(TenantScoped, db.Model):
+class SalesReturn(db.Model):
     """A debit-side reversal: fuel a customer physically brings back into
     a tank, refunded to them - distinct from Sale.testing_liters, which
     never involved a customer at all. Stock comes back IN, the same
@@ -465,7 +369,7 @@ class SalesReturn(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class NozzleTesting(TenantScoped, db.Model):
+class NozzleTesting(db.Model):
     """Fuel run through a nozzle to test it (e.g. after maintenance),
     recorded as its own row - unlike a SalesReturn, this moves NO money at
     all: no customer was involved, nothing is refunded, and the fuel drains
@@ -504,7 +408,7 @@ class NozzleTesting(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class StockPurchase(TenantScoped, db.Model):
+class StockPurchase(db.Model):
     """payment_type decides whether this purchase touches an account at
     all: "credit" ties it to a supplier account (via account_id) and
     never touches cash/bank at purchase time; "cash" means it was paid
@@ -532,7 +436,7 @@ class StockPurchase(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class SupplierPayment(TenantScoped, db.Model):
+class SupplierPayment(db.Model):
     """A credit-side ledger entry: money we paid an account against fuel
     we previously took on credit. Mirrors Receipt - reduces what we owe
     the account the same way a receipt reduces what a customer owes us.
@@ -555,7 +459,7 @@ class SupplierPayment(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class Receipt(TenantScoped, db.Model):
+class Receipt(db.Model):
     """A debit-side ledger entry: money received from any account, whether
     that's a customer paying down what they owe or an employee repaying a
     loan - account_type doesn't matter, this is one merged entry kind
@@ -578,7 +482,7 @@ class Receipt(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class EmployeeLoan(TenantScoped, db.Model):
+class EmployeeLoan(db.Model):
     """A credit-side ledger entry: a loan/advance to an employee OR an
     owner drawing - it increases what the account owes the pump, the same
     way CreditGiven works for customers. Paid out as cash (reduces
@@ -615,7 +519,7 @@ class EmployeeLoan(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class Expense(TenantScoped, db.Model):
+class Expense(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     entry_date = db.Column(db.Date, nullable=False)
     category = db.Column(db.String(80), nullable=False)
@@ -630,13 +534,9 @@ class Expense(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class BankAccount(TenantScoped, db.Model):
-    __table_args__ = (
-        db.UniqueConstraint("pump_id", "name", name="uq_bankaccount_pump_name"),
-    )
-
+class BankAccount(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), nullable=False)
+    name = db.Column(db.String(120), nullable=False, unique=True)
     opening_balance = db.Column(db.Float, nullable=False, default=0)
     opening_balance_date = db.Column(db.Date, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
@@ -687,7 +587,7 @@ class BankAccount(TenantScoped, db.Model):
         )
 
 
-class BankSale(TenantScoped, db.Model):
+class BankSale(db.Model):
     """A debit-side ledger entry: the portion of a date's nozzle sales that
     was actually collected via card/bank rather than cash, reconciled
     against a specific bank account's statement. Doesn't touch tank stock
@@ -709,7 +609,7 @@ class BankSale(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class CashDeposit(TenantScoped, db.Model):
+class CashDeposit(db.Model):
     """A credit-side ledger entry: cash physically deposited into a bank
     account - increases that bank account's balance, decreases cash in
     hand."""
@@ -726,7 +626,7 @@ class CashDeposit(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class CashAccount(TenantScoped, db.Model):
+class CashAccount(db.Model):
     """Singleton row representing cash-in-hand. Its balance is computed in
     ledger_logic.cash_account_balance() since it depends on Sale,
     CreditGiven and BankSale totals rather than a simple backref sum."""
@@ -737,7 +637,7 @@ class CashAccount(TenantScoped, db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
 
 
-class TankDip(TenantScoped, db.Model):
+class TankDip(db.Model):
     """A physical dip measurement for one tank on one date, compared
     against calculated book stock. At most one dip per (tank_id, entry_date).
 
@@ -769,7 +669,7 @@ class TankDip(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class TankDipChart(TenantScoped, db.Model):
+class TankDipChart(db.Model):
     """One row of a tank's calibration table: at depth_cm of fuel, the tank
     holds liters. Tank-specific because it depends on physical shape.
     ledger_logic.liters_from_dip_cm() linearly interpolates between the two
@@ -787,7 +687,7 @@ class TankDipChart(TenantScoped, db.Model):
     tank = db.relationship("Tank", backref="dip_chart_rows")
 
 
-class CashHandover(TenantScoped, db.Model):
+class CashHandover(db.Model):
     """What was physically counted at the end of a shift, against what the
     ledger says should have been collected in cash for that shift.
 
@@ -817,7 +717,7 @@ class CashHandover(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class SalaryPayment(TenantScoped, db.Model):
+class SalaryPayment(db.Model):
     """Salary paid to an account for a period, optionally settling part of
     what that account already owes the pump (an earlier advance/loan).
 
@@ -850,7 +750,7 @@ class SalaryPayment(TenantScoped, db.Model):
         return round(self.gross_amount - self.deduction_amount, 2)
 
 
-class Product(TenantScoped, db.Model):
+class Product(db.Model):
     """A non-fuel item sold at the pump - lubricants, filters, and shop
     items. The pump's real catalogue runs to ~95 SKUs (Shell Helix/Rimula/
     Ultra grades in 1/3/4/10/20 L packs, dozens of vehicle-specific
@@ -886,12 +786,8 @@ class Product(TenantScoped, db.Model):
     names has to stay resolvable.
     """
 
-    __table_args__ = (
-        db.UniqueConstraint("pump_id", "name", name="uq_product_pump_name"),
-    )
-
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), nullable=False)
+    name = db.Column(db.String(120), nullable=False, unique=True)
     # lubricant | filter | shop | other - see class docstring; a case-
     # insensitive unique index isn't portable across SQLite/Postgres, so
     # duplicate matching on name is done in application code instead.
@@ -917,7 +813,7 @@ class Product(TenantScoped, db.Model):
         return f"{self.name} ({self.pack_size})" if self.pack_size else self.name
 
 
-class ProductRateHistory(TenantScoped, db.Model):
+class ProductRateHistory(db.Model):
     """One row per rate change for a product - mirrors FuelPriceHistory,
     except it carries BOTH the purchase (indent) and retail rate in the
     same row, because in practice an indent-rate change almost always
@@ -937,7 +833,7 @@ class ProductRateHistory(TenantScoped, db.Model):
     product = db.relationship("Product", backref="rate_history")
 
 
-class ProductSale(TenantScoped, db.Model):
+class ProductSale(db.Model):
     """A non-fuel sale line: one product, one shift, one date. Defined now
     so the whole catalogue lands in one migration; the Ledger entry form
     and the cash/bank/account balance wiring for this table are built in
@@ -975,7 +871,7 @@ class ProductSale(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
-class ProductPurchase(TenantScoped, db.Model):
+class ProductPurchase(db.Model):
     """Stock received for a product. payment_type/method/bank_account_id/
     account_id follow StockPurchase's split exactly (see StockPurchase's
     docstring) - defined now for the same one-migration reason as
@@ -1007,46 +903,3 @@ class ProductPurchase(TenantScoped, db.Model):
     bank_account = db.relationship("BankAccount", backref="product_purchases")
     account = db.relationship("Account", backref="product_purchases")
     user = db.relationship("User")
-
-
-class PasswordResetToken(TenantScoped, db.Model):
-    """A single-use, revocable, expiring token proving control of a
-    user's email address - used for both the "forgot password" flow and
-    (with purpose="verify") email verification, rather than two
-    near-identical tables. A stateless signed token (e.g. itsdangerous)
-    was deliberately NOT used here: a stateless token can't be revoked or
-    marked used before its expiry, and a password-reset link in
-    particular has to become dead the instant it's used (or the instant a
-    newer one is issued) - that requires a database row to flip.
-
-    Only the HASH of the token is stored (token_hash = sha256(token)),
-    never the token itself - a leaked database must not hand out working
-    reset/verify links. The raw token only ever exists in the URL emailed
-    to the user and in memory for the length of one request; app.py
-    compares it against token_hash with hmac.compare_digest (constant
-    time), not `==`.
-
-    TenantScoped like everything else - a token belongs to a user, who
-    belongs to a pump - but its entire lifecycle (issuing on signup or
-    forgot-password, and redeeming on reset-password/verify-email) runs
-    UNAUTHENTICATED, before current_pump_id() has anything to resolve.
-    Every read/write against this table therefore happens inside a
-    narrow unscoped() block in app.py, with pump_id set explicitly from
-    the target user's own pump_id - see each call site's comment for why
-    that's safe. Nothing here ever lets a token issued for one pump's
-    user resolve to, or act on, a different pump's user: every lookup by
-    token_hash loads the row's own user_id and operates on exactly that
-    user, never on anything scoped by the caller's (nonexistent) session.
-    """
-
-    __table_args__ = (db.Index("ix_password_reset_token_hash", "token_hash", unique=True),)
-
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    purpose = db.Column(db.String(10), nullable=False, default="reset")  # "reset" | "verify"
-    token_hash = db.Column(db.String(64), nullable=False)
-    expires_at = db.Column(db.DateTime, nullable=False)
-    used_at = db.Column(db.DateTime, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.now)
-
-    user = db.relationship("User", backref="auth_tokens")
