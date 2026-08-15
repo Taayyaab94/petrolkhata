@@ -6,3 +6,6 @@ instance/
 venv/
 .venv/
 .claude/
+
+# Throwaway Neon test-branch connection string - never commit
+.neon-test-url
