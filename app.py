@@ -42,9 +42,11 @@ from ledger_logic import (
     account_ledger_events,
     active_shifts,
     attendant_variance_summary,
+    bank_account_balance_as_of,
     bank_account_ledger_events,
     book_stock,
     cash_account_balance,
+    cash_account_balance_as_of,
     cash_account_ledger_events,
     cash_would_go_negative,
     cogs_for_period,
@@ -72,6 +74,7 @@ from ledger_logic import (
     record_fuel_price,
     record_product_rates,
     sales_breakdown_for_date,
+    split_combined_direct_sale,
     stock_series,
     sync_sale_testing,
     weighted_avg_cost,
@@ -84,6 +87,7 @@ from models import (
     CashDeposit,
     CashHandover,
     CreditGiven,
+    DirectSale,
     Dispenser,
     EmployeeLoan,
     Expense,
@@ -1131,6 +1135,7 @@ BACKUP_MODELS = [
     NozzleReset,
     Account,
     Sale,
+    DirectSale,
     CreditGiven,
     SalesReturn,
     NozzleTesting,
@@ -1553,10 +1558,11 @@ def settings_delete_tank(tank_id):
     nozzles = Nozzle.query.filter_by(tank_id=tank.id).all()
     nozzle_ids = [n.id for n in nozzles]
     has_sales = nozzle_ids and Sale.query.filter(Sale.nozzle_id.in_(nozzle_ids)).count() > 0
+    has_direct_sales = DirectSale.query.filter_by(tank_id=tank.id).count() > 0
     has_purchases = StockPurchase.query.filter_by(tank_id=tank.id).count() > 0
     has_dips = TankDip.query.filter_by(tank_id=tank.id).count() > 0
 
-    if has_sales or has_purchases or has_dips:
+    if has_sales or has_direct_sales or has_purchases or has_dips:
         flash(f"Can't delete {tank.label} - it already has purchase, sale, or dip history.", "error")
     else:
         for n in nozzles:
@@ -2232,6 +2238,8 @@ def get_feed_for_date(entry_date, full_visibility):
     events = []
     for s in Sale.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "sale", "sort": s.recorded_at, "obj": s})
+    for ds in DirectSale.query.filter_by(entry_date=entry_date).all():
+        events.append({"kind": "direct_sale", "sort": ds.recorded_at, "obj": ds})
     for r in Receipt.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "receipt", "sort": r.recorded_at, "obj": r})
     for c in CreditGiven.query.filter_by(entry_date=entry_date).all():
@@ -2359,6 +2367,103 @@ def ledger():
     # date, and one that can't be repaired after the fact because each
     # Sale snapshots its own price. Surfaced as a warning on the page.
     fuels_without_price = fuels_missing_price_on(selected_date, fuel_types)
+
+    # Nozzle Meter Readings, grouped by fuel type - see FuelType.entry_mode's
+    # docstring in models.py. HISTORICAL-ACCURACY RULE: for a given (fuel
+    # type, selected_date), whatever was actually recorded for that date
+    # wins over today's setting - if this fuel type's tanks already have
+    # Sale rows for selected_date, render meter rows regardless of the
+    # fuel type's CURRENT entry_mode; if they have DirectSale rows
+    # instead, render direct fields; only a genuinely blank date falls
+    # back to entry_mode. This mirrors price_on_date() never using
+    # today's price for an old date - a date's own recorded reality
+    # always wins over today's settings.
+    tanks_by_fuel_id = {}
+    for t in tanks:
+        tanks_by_fuel_id.setdefault(t.fuel_type_id, []).append(t)
+    nozzle_rows_by_fuel_id = {}
+    for row in nozzle_rows:
+        nozzle_rows_by_fuel_id.setdefault(row["nozzle"].tank.fuel_type_id, []).append(row)
+
+    fuel_groups = []
+    for ft in fuel_types:
+        ft_tanks = tanks_by_fuel_id.get(ft.id, [])
+        if not ft_tanks:
+            # A fuel type with no tanks at all has nothing to show either
+            # way - skip it rather than rendering an empty, actionless group.
+            continue
+        ft_tank_ids = [t.id for t in ft_tanks]
+        ft_nozzle_rows = nozzle_rows_by_fuel_id.get(ft.id, [])
+
+        has_sale = any(row["existing_reading"] is not None for row in ft_nozzle_rows)
+        direct_rows_for_ft = (
+            DirectSale.query.filter(
+                DirectSale.tank_id.in_(ft_tank_ids),
+                DirectSale.entry_date == selected_date,
+                DirectSale.shift_id == selected_shift.id,
+            ).all()
+            if selected_shift
+            else []
+        )
+        if has_sale:
+            effective_mode = "meter"
+        elif direct_rows_for_ft:
+            effective_mode = "direct"
+        else:
+            effective_mode = ft.entry_mode
+
+        direct_by_tank_id = {d.tank_id: d for d in direct_rows_for_ft}
+        # Historical-accuracy rule extended to the combined/per-tank
+        # sub-choice, not just meter-vs-direct: once real DirectSale rows
+        # exist for this date, ALWAYS show them broken out per tank - never
+        # summed into a combined box - regardless of the fuel type's
+        # CURRENT direct_entry_combined setting. A combined row is never
+        # stored unattributed (see DirectSale's docstring); the per-tank
+        # figures on file for this date are the actual ground truth. If
+        # this instead showed a combined box pre-filled with their sum,
+        # re-submitting that same total would ask
+        # split_combined_direct_sale() to re-split it against TODAY's
+        # stock - which can differ from what it was when this date was
+        # first entered, e.g. if a purchase was backfilled to an earlier
+        # date since - silently rewriting how litres were attributed
+        # between tanks for an already-reconciled day. The combined
+        # convenience only ever applies to a genuinely blank date.
+        combined = (
+            bool(ft.direct_entry_combined) and len(ft_tanks) > 1 and not direct_rows_for_ft
+        )
+        direct_tank_rows = [
+            {
+                "tank": t,
+                "existing_liters": direct_by_tank_id[t.id].liters if t.id in direct_by_tank_id else None,
+            }
+            for t in ft_tanks
+        ]
+        # Prefill for the combined field: the sum of whatever per-tank
+        # DirectSale rows already exist for this date/shift - so revisiting
+        # a date to correct it shows what's already there, the same as
+        # existing_reading prefills a nozzle row.
+        existing_combined_total = (
+            round(sum(d.liters for d in direct_rows_for_ft), 2) if direct_rows_for_ft else None
+        )
+
+        fuel_groups.append(
+            {
+                "fuel_type": ft,
+                "tanks": ft_tanks,
+                "nozzle_rows": ft_nozzle_rows,
+                "effective_mode": effective_mode,
+                # The toggle control always reflects/acts on the fuel type's
+                # CURRENT mode regardless of which date is being viewed -
+                # flipping it always affects going forward from the
+                # currently-viewed date (see settings_reset_nozzle_meter()'s
+                # equivalent reasoning for the meter-reset side of this).
+                "current_mode": ft.entry_mode,
+                "combined": combined,
+                "direct_tank_rows": direct_tank_rows,
+                "existing_combined_total": existing_combined_total,
+            }
+        )
+
     # Every picker on this page (customer, supplier, employee) lists every
     # account - an account's type label is just a default/hint, not a
     # restriction, so any account can receive any kind of entry (e.g. an
@@ -2416,6 +2521,7 @@ def ledger():
 
     summary = None
     cash_balance = None
+    bank_balances_by_id = None
     if current_user.is_owner:
         credit_total = breakdown["credit"]
         receipts_total = (
@@ -2452,7 +2558,13 @@ def ledger():
             + supplier_payments_total
             + salaries_total,
         )
-        cash_balance = cash_account_balance(get_cash_account())
+        # Date-aware closing balances for selected_date, not the all-time
+        # figure cash_account_balance()/BankAccount.balance return - see
+        # cash_account_balance_as_of()/bank_account_balance_as_of() in
+        # ledger_logic.py. Used ONLY here and on the Daily Report; every
+        # other page keeps showing the current/all-time figure.
+        cash_balance = cash_account_balance_as_of(get_cash_account(), selected_date)
+        bank_balances_by_id = {b.id: bank_account_balance_as_of(b, selected_date) for b in bank_accounts}
 
     return render_template(
         "ledger.html",
@@ -2461,6 +2573,7 @@ def ledger():
         shifts=shifts,
         selected_shift=selected_shift,
         nozzle_rows=nozzle_rows,
+        fuel_groups=fuel_groups,
         tank_rows=tank_rows,
         handover_rows=handover_rows,
         fuel_types=fuel_types,
@@ -2472,6 +2585,7 @@ def ledger():
         accounts_employee_first=accounts_employee_first,
         accounts_owner_first=accounts_owner_first,
         bank_accounts=bank_accounts,
+        bank_balances_by_id=bank_balances_by_id,
         products=products,
         product_info=product_info,
         products_json=products_json,
@@ -2940,6 +3054,201 @@ def resolve_shift(form, field="shift_id"):
     shift_id = form.get(field, type=int)
     shift = db.session.get(Shift, shift_id) if shift_id else None
     return shift or default_shift()
+
+
+@app.route("/ledger/direct-sale", methods=["POST"])
+@login_required
+def ledger_direct_sale():
+    """Total-liters-per-tank alternative to nozzle meter readings - see
+    DirectSale's docstring in models.py. NOT owner-only: staff already
+    enter nozzle readings today, so direct entry has to be just as
+    available to them.
+
+    Accepts either one liters_<tank_id> field per tank (the default,
+    fuel_type.direct_entry_combined == False, or a single-tank fuel type
+    where the flag is never consulted at all), or one combined_liters
+    field for the whole fuel type (fuel_type.direct_entry_combined ==
+    True on a multi-tank fuel type), which split_combined_direct_sale()
+    then splits into real per-tank rows before anything is saved - so
+    every downstream consumer only ever sees ordinary per-tank DirectSale
+    rows, never an unattributed fuel-type-level figure."""
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    shift = resolve_shift(request.form)
+    fuel_type_id = request.form.get("fuel_type_id", type=int)
+    fuel_type = db.session.get(FuelType, fuel_type_id) if fuel_type_id else None
+
+    if not fuel_type:
+        flash("Please choose a valid fuel type.", "error")
+        return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+
+    tanks = Tank.query.filter_by(fuel_type_id=fuel_type.id).order_by(Tank.number).all()
+    if not tanks:
+        flash(f"{fuel_type.name} has no tanks configured.", "error")
+        return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+
+    # Price as of entry_date, not today's current price - so backfilling
+    # or correcting an old date re-prices at the rate that was actually in
+    # effect then, exactly like nozzle readings already do.
+    price = price_on_date(fuel_type, entry_date)
+    combine = fuel_type.direct_entry_combined and len(tanks) > 1
+
+    liters_by_tank_id = {}
+    errors = []
+    if combine:
+        raw = request.form.get("combined_liters", "").strip()
+        if not raw:
+            flash(f"Please enter total litres sold for {fuel_type.name}.", "error")
+            return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+        try:
+            total_liters = float(raw)
+        except ValueError:
+            flash(f"{fuel_type.name}: not a valid number.", "error")
+            return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+        if total_liters <= 0:
+            flash(f"{fuel_type.name}: litres must be a positive number.", "error")
+            return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+        liters_by_tank_id = split_combined_direct_sale(tanks, total_liters, entry_date)
+    else:
+        any_given = False
+        for t in tanks:
+            raw = request.form.get(f"liters_{t.id}", "").strip()
+            if not raw:
+                continue
+            try:
+                liters = float(raw)
+            except ValueError:
+                errors.append(f"{t.label}: not a valid number.")
+                continue
+            if liters <= 0:
+                errors.append(f"{t.label}: litres must be a positive number.")
+                continue
+            liters_by_tank_id[t.id] = liters
+            any_given = True
+        if not any_given and not errors:
+            flash("No litres entered.", "error")
+            return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+
+    saved = 0
+    for t in tanks:
+        liters = liters_by_tank_id.get(t.id)
+        if liters is None:
+            continue
+        total_amount = round(liters * price, 2)
+        existing = DirectSale.query.filter_by(
+            tank_id=t.id, entry_date=entry_date, shift_id=shift.id
+        ).first()
+        if existing:
+            existing.liters = liters
+            existing.price_per_liter = price
+            existing.total_amount = total_amount
+            existing.user_id = current_user.id
+        else:
+            db.session.add(
+                DirectSale(
+                    tank_id=t.id,
+                    shift_id=shift.id,
+                    entry_date=entry_date,
+                    liters=liters,
+                    price_per_liter=price,
+                    total_amount=total_amount,
+                    user_id=current_user.id,
+                )
+            )
+        saved += 1
+
+    if saved:
+        try:
+            db.session.commit()
+            flash(f"Saved direct sales entry for {fuel_type.name} ({entry_date}, {shift.name}).", "success")
+        except IntegrityError:
+            # Two near-simultaneous submits for the same tank/date/shift -
+            # the DB's own uniqueness constraint caught it. Fail safely
+            # instead of creating a duplicate DirectSale that would
+            # silently double-count the day, mirroring ledger_readings().
+            db.session.rollback()
+            flash(
+                "Someone else just saved this entry at the same time - "
+                "please check the entries below and try again.",
+                "error",
+            )
+    if errors:
+        for e in errors:
+            flash(e, "error")
+
+    return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+
+
+@app.route("/ledger/fuel-type/<int:fuel_type_id>/entry-mode", methods=["POST"])
+@login_required
+@owner_required
+def ledger_fuel_type_entry_mode(fuel_type_id):
+    """Flip a fuel type between Nozzle Meter Readings and Direct Sales
+    Entry - see FuelType.entry_mode's docstring in models.py. Owner-only:
+    this is a structural change to how the pump tracks fuel, not routine
+    data entry.
+
+    Meter -> Direct: no side effects. Existing Sale rows are untouched and
+    remain correct on whatever past dates they belong to.
+
+    Direct -> Meter: the meter-reading chain was broken while direct entry
+    was active (no nozzle readings were taken), so every nozzle on every
+    tank of this fuel type gets a NozzleReset dated to whichever Ledger
+    date the owner was viewing when they flipped it - reusing the exact
+    existing mechanism settings_reset_nozzle_meter() uses, which makes
+    previous_reading_for()/nearest_earlier_reading()/next_sale_on_or_after()
+    (ledger_logic.py) stop enforcing continuity across the boundary and
+    require a fresh manual previous+current entry, precisely the behaviour
+    wanted here."""
+    fuel_type = db.session.get(FuelType, fuel_type_id) or abort(404)
+    target_mode = request.form.get("target_mode")
+    selected_date = parse_date_param(request.form.get("selected_date"))
+    combined_raw = request.form.get("direct_entry_combined")
+
+    if target_mode not in ("meter", "direct"):
+        flash("Please choose a valid entry mode.", "error")
+        return redirect(url_for("ledger", date=selected_date))
+
+    changed = False
+    if target_mode != fuel_type.entry_mode:
+        if target_mode == "meter":
+            tanks = Tank.query.filter_by(fuel_type_id=fuel_type.id).all()
+            tank_ids = [t.id for t in tanks]
+            nozzles = Nozzle.query.filter(Nozzle.tank_id.in_(tank_ids)).all() if tank_ids else []
+            for n in nozzles:
+                db.session.add(
+                    NozzleReset(
+                        nozzle_id=n.id,
+                        reset_date=selected_date,
+                        note=f"Auto-reset: {fuel_type.name} switched back from Direct Sales Entry",
+                        user_id=current_user.id,
+                    )
+                )
+            fuel_type.entry_mode = "meter"
+        else:
+            fuel_type.entry_mode = "direct"
+        changed = True
+
+    # direct_entry_combined is only ever meaningful in direct mode - only
+    # relevant when turning direct mode ON for a multi-tank fuel type, or
+    # (as a small usability extension beyond that) when already in direct
+    # mode and the owner wants to change how it splits going forward.
+    if target_mode == "direct" and combined_raw is not None:
+        tank_count = Tank.query.filter_by(fuel_type_id=fuel_type.id).count()
+        if tank_count > 1:
+            new_combined = combined_raw in ("1", "true", "on")
+            if new_combined != fuel_type.direct_entry_combined:
+                fuel_type.direct_entry_combined = new_combined
+                changed = True
+
+    if changed:
+        db.session.commit()
+        mode_label = "Direct Sales Entry" if fuel_type.entry_mode == "direct" else "Nozzle Meter Readings"
+        flash(f"{fuel_type.name} is now tracked via {mode_label}.", "success")
+    else:
+        db.session.rollback()
+        flash("No change made.", "info")
+
+    return redirect(url_for("ledger", date=selected_date))
 
 
 @app.route("/ledger/dip", methods=["POST"])
@@ -3880,6 +4189,7 @@ def ledger_employee_loan():
 # ones. Adding a new deletable kind later is just one more line here.
 DELETABLE_ENTRIES = {
     "sale": (Sale, "nozzle reading"),
+    "direct-sale": (DirectSale, "direct sales entry"),
     "dip": (TankDip, "dip reading"),
     "handover": (CashHandover, "cash handover"),
     "credit": (CreditGiven, "credit entry"),
@@ -3973,12 +4283,24 @@ def dashboard():
         .filter(Sale.entry_date == today)
         .scalar()
     )
+    today_sales_total += (
+        db.session.query(func.coalesce(func.sum(DirectSale.total_amount), 0))
+        .filter(DirectSale.entry_date == today)
+        .scalar()
+    )
     today_liters = (
         db.session.query(func.coalesce(func.sum(Sale.liters), 0))
         .filter(Sale.entry_date == today)
         .scalar()
     )
-    today_sale_count = Sale.query.filter_by(entry_date=today).count()
+    today_liters += (
+        db.session.query(func.coalesce(func.sum(DirectSale.liters), 0))
+        .filter(DirectSale.entry_date == today)
+        .scalar()
+    )
+    today_sale_count = Sale.query.filter_by(entry_date=today).count() + DirectSale.query.filter_by(
+        entry_date=today
+    ).count()
 
     tanks = Tank.query.order_by(Tank.number).all()
     tank_rows = [{"tank": t, "stock": book_stock(t, today)} for t in tanks]
@@ -5042,14 +5364,22 @@ def _reports_context(selected_date):
         .order_by(Nozzle.dispenser_id, Nozzle.nozzle_number)
         .all()
     )
+    # Direct-entry tank-level sales for the same date - see DirectSale's
+    # docstring in models.py. There is no per-nozzle breakdown table for
+    # these (they're not in the returned context below, only folded into
+    # the same totals Sale contributes to), since DirectSale has no
+    # nozzle to break down by in the first place.
+    direct_sales = DirectSale.query.filter_by(entry_date=selected_date).all()
     # Every sum() below starts from 0.0 rather than the default 0 - on a
     # date with none of that kind, plain sum(empty) is an int, which the
     # HTML template's "%.2f" format papers over but the PDF export's
     # formatter (which has to tell a count apart from a money figure by
     # its Python type) would otherwise render as a bare "0" instead of
     # "0.00", inconsistent with every other row.
-    total_sales = sum((s.total_amount for s in sales), 0.0)
-    total_liters = sum((s.liters for s in sales), 0.0)
+    total_sales = sum((s.total_amount for s in sales), 0.0) + sum((d.total_amount for d in direct_sales), 0.0)
+    total_liters = sum((s.liters for s in sales), 0.0) + sum((d.liters for d in direct_sales), 0.0)
+    # Testing has no DirectSale equivalent at all (see models.py) - it
+    # only ever comes from metered Sale rows.
     total_testing_liters = sum((s.testing_liters for s in sales), 0.0)
     by_fuel = fuel_sales_for_date(selected_date)
     # Testing isn't part of by_fuel (fuel_sales_for_date() means net sold,
@@ -5143,8 +5473,17 @@ def _reports_context(selected_date):
         - cash_product_purchases_total
     )
     outstanding_credit = sum((b for a in Account.query.all() if (b := a.balance) > 0), 0.0)
-    cash_balance = cash_account_balance(get_cash_account())
+    # Date-aware closing balances for the SELECTED date, not the all-time
+    # figure cash_account_balance()/BankAccount.balance return - the
+    # Ledger/Daily Report pages are date-driven, so paging back to an
+    # older date must show cash-in-hand and each bank's balance as they
+    # stood at the END of that date (see cash_account_balance_as_of() and
+    # bank_account_balance_as_of() in ledger_logic.py). Every other page
+    # (dashboard, Accounts, bank account detail, Settings) keeps calling
+    # the plain all-time functions, unchanged.
+    cash_balance = cash_account_balance_as_of(get_cash_account(), selected_date)
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
+    bank_balances_by_id = {b.id: bank_account_balance_as_of(b, selected_date) for b in bank_accounts}
 
     return {
         "total_sales": total_sales,
@@ -5167,6 +5506,7 @@ def _reports_context(selected_date):
         "outstanding_credit": outstanding_credit,
         "cash_balance": cash_balance,
         "bank_accounts": bank_accounts,
+        "bank_balances_by_id": bank_balances_by_id,
         "salaries": salaries,
         "total_salaries_net": total_salaries_net,
         "sales_returns": sales_returns,
@@ -5223,7 +5563,7 @@ def reports_export():
         ("Cash in Hand (Rs)", ctx["cash_balance"]),
     ]
     for b in ctx["bank_accounts"]:
-        summary_rows.append((f"{b.name} (Rs)", b.balance))
+        summary_rows.append((f"{b.name} (Rs)", ctx["bank_balances_by_id"][b.id]))
 
     blocks = [
         {"type": "summary", "rows": summary_rows},
@@ -5414,14 +5754,30 @@ def _reports_monthly_context(start, end):
     # format hides that, but the PDF export's formatter tells a money
     # figure from a count by its Python type, so an unwrapped int here
     # would render as a bare "0" instead of "0.00".
+    # revenue/liters_sold include DirectSale (see models.py) as well as
+    # Sale - without this, gross_margin/net_profit below would silently
+    # undercount for any period with direct-entry days, even though
+    # cogs_for_period() (their COGS counterpart) already folds DirectSale
+    # into its own per-fuel gross figures. testing has no DirectSale
+    # equivalent at all (see Sale/DirectSale docstrings in models.py).
     revenue = float(
         db.session.query(func.coalesce(func.sum(Sale.total_amount), 0))
         .filter(Sale.entry_date >= start, Sale.entry_date <= end)
         .scalar()
     )
+    revenue += float(
+        db.session.query(func.coalesce(func.sum(DirectSale.total_amount), 0))
+        .filter(DirectSale.entry_date >= start, DirectSale.entry_date <= end)
+        .scalar()
+    )
     liters_sold = float(
         db.session.query(func.coalesce(func.sum(Sale.liters), 0))
         .filter(Sale.entry_date >= start, Sale.entry_date <= end)
+        .scalar()
+    )
+    liters_sold += float(
+        db.session.query(func.coalesce(func.sum(DirectSale.liters), 0))
+        .filter(DirectSale.entry_date >= start, DirectSale.entry_date <= end)
         .scalar()
     )
     testing_liters = float(
@@ -5685,6 +6041,13 @@ def reports_trends():
         return {r[0]: r[1] or 0 for r in rows}
 
     sales_by_day = group_sum(Sale, Sale.total_amount)
+    # Fold DirectSale (see models.py) into the same by-day revenue totals
+    # Sale contributes to - every series/total built from sales_by_day
+    # below (cash_series, profit_series, totals.total_sales, ...) must
+    # reflect BOTH entry methods, exactly like sales_breakdown_for_date()
+    # and cash_account_balance() already do.
+    for d, v in group_sum(DirectSale, DirectSale.total_amount).items():
+        sales_by_day[d] = sales_by_day.get(d, 0) + v
     credit_by_day = group_sum(CreditGiven, CreditGiven.amount)
     payments_by_day = group_sum(Receipt, Receipt.amount)
     expenses_by_day = group_sum(Expense, Expense.amount)
@@ -5732,6 +6095,16 @@ def reports_trends():
         .all()
     ):
         sold_liters_by_day_fuel[(entry_date_val, fuel_type_id)] = liters or 0
+    # DirectSale is already tank-keyed - no Nozzle join needed.
+    for entry_date_val, fuel_type_id, liters in (
+        db.session.query(DirectSale.entry_date, Tank.fuel_type_id, func.sum(DirectSale.liters))
+        .join(Tank, DirectSale.tank_id == Tank.id)
+        .filter(DirectSale.entry_date >= start, DirectSale.entry_date <= end)
+        .group_by(DirectSale.entry_date, Tank.fuel_type_id)
+        .all()
+    ):
+        key = (entry_date_val, fuel_type_id)
+        sold_liters_by_day_fuel[key] = sold_liters_by_day_fuel.get(key, 0) + (liters or 0)
     returned_liters_by_day_fuel = {}
     for entry_date_val, fuel_type_id, liters in (
         db.session.query(SalesReturn.entry_date, SalesReturn.fuel_type_id, func.sum(SalesReturn.liters))
@@ -5815,7 +6188,18 @@ def reports_trends():
             .group_by(Sale.entry_date)
             .all()
         )
-        fuel_sold_by_day[ft.name] = {r[0]: r[1] or 0 for r in rows}
+        by_day = {r[0]: r[1] or 0 for r in rows}
+        # DirectSale is already tank-keyed - no Nozzle join needed.
+        direct_rows = (
+            db.session.query(DirectSale.entry_date, func.sum(DirectSale.liters))
+            .join(Tank, DirectSale.tank_id == Tank.id)
+            .filter(Tank.fuel_type_id == ft.id, DirectSale.entry_date >= start, DirectSale.entry_date <= end)
+            .group_by(DirectSale.entry_date)
+            .all()
+        )
+        for d, liters in direct_rows:
+            by_day[d] = by_day.get(d, 0) + (liters or 0)
+        fuel_sold_by_day[ft.name] = by_day
     fuel_sold_series_list = [
         [round(fuel_sold_by_day[ft.name].get(d, 0), 2) for d in all_dates] for ft in fuel_types
     ]

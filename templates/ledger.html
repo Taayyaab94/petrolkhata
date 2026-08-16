@@ -93,11 +93,12 @@
   <div class="stat-card accent-green">
     <div class="label">Cash in Hand</div>
     <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
+    <div class="sub">As of {{ selected_date.strftime("%d %b %Y") }}</div>
   </div>
   {% for b in bank_accounts %}
   <div class="stat-card">
     <div class="label">{{ b.name }}</div>
-    <div class="value">Rs {{ "%.2f"|format(b.balance) }}</div>
+    <div class="value">Rs {{ "%.2f"|format(bank_balances_by_id[b.id]) }}</div>
   </div>
   {% endfor %}
 </div>
@@ -140,40 +141,122 @@
 
     <div class="ledger-section">
       <h3>Nozzle Meter Readings</h3>
-      {% if nozzle_rows %}
-      <form method="post" action="{{ url_for('ledger_readings') }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
-        <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
-        <div class="nozzle-list">
-          {% for row in nozzle_rows %}
-          <div class="nozzle-row" data-price="{{ row.price }}" {% if row.previous_is_auto %}data-last="{{ row.previous_reading }}"{% endif %}
-               data-testing="{{ row.existing_testing if row.existing_testing is not none else 0 }}"
-               data-gross="{{ row.existing_gross if row.existing_gross is not none else '' }}">
-            <div>
-              <div class="nz-label">D{{ row.dispenser.number }} &middot; Nozzle {{ row.nozzle.nozzle_number }}</div>
-              <div class="nz-fuel">{{ row.nozzle.tank.label }} &middot; Rs {{ "%.2f"|format(row.price) }}/L{% if selected_date != today %} (as of {{ selected_date.strftime("%d %b") }}){% endif %}</div>
-            </div>
-            {% if row.previous_is_auto %}
-            <div class="nz-last">Previous<strong>{{ "%.2f"|format(row.previous_reading) }}</strong></div>
+      {% if fuel_groups %}
+      {% for group in fuel_groups %}
+      <div class="fuel-group" style="{% if not loop.first %}margin-top:20px; padding-top:16px; border-top:1px solid var(--border, #e5e7eb);{% endif %}">
+        <div class="fuel-group-head" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px;">
+          <strong>{{ group.fuel_type.name }}</strong>
+          {% if current_user.is_owner %}
+          <span class="hint-sm">Currently: {{ "Direct Sales Entry" if group.current_mode == "direct" else "Nozzle Meter Readings" }}</span>
+          <form method="post" action="{{ url_for('ledger_fuel_type_entry_mode', fuel_type_id=group.fuel_type.id) }}" class="inline-edit-form" style="display:flex; gap:6px; align-items:center;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="selected_date" value="{{ selected_date.isoformat() }}">
+            {% if group.current_mode == "direct" %}
+            <input type="hidden" name="target_mode" value="meter">
+            <button type="submit" class="btn btn-sm btn-ghost"
+                    onclick="return confirm('Switch {{ group.fuel_type.name }} back to Nozzle Meter Readings? Every nozzle on its tank(s) will need a fresh previous + current reading from {{ selected_date.strftime('%d %b %Y') }} onward - the meter chain is treated as reset.');">
+              Switch back to Meter Readings
+            </button>
             {% else %}
-            <label class="nz-previous-manual">Previous
-              <input type="number" step="0.01" min="0" name="previous_{{ row.nozzle.id }}" class="nz-previous-input"
-                     value="{{ row.previous_reading if row.previous_reading is not none else '' }}" placeholder="e.g. 45230.50">
-            </label>
+            <input type="hidden" name="target_mode" value="direct">
+            {% if group.tanks|length > 1 %}
+            <select name="direct_entry_combined">
+              <option value="0" {{ "selected" if not group.combined }}>One figure per tank</option>
+              <option value="1" {{ "selected" if group.combined }}>One combined figure (auto-split by stock)</option>
+            </select>
             {% endif %}
-            <input type="number" step="0.01" min="0" id="reading_{{ row.nozzle.id }}" name="reading_{{ row.nozzle.id }}" class="nz-current-input"
-                   placeholder="This date's reading" value="{{ row.existing_reading if row.existing_reading is not none else '' }}">
-            <div class="calc-preview" id="calc_{{ row.nozzle.id }}">{% if row.previous_is_auto %}Enter this date's reading{% else %}No entry for the day before - enter both readings{% endif %}</div>
-          </div>
-          {% endfor %}
+            <button type="submit" class="btn btn-sm btn-ghost">Switch to Direct Sales Entry</button>
+            {% endif %}
+          </form>
+          {% if group.current_mode == "direct" and group.tanks|length > 1 %}
+          <form method="post" action="{{ url_for('ledger_fuel_type_entry_mode', fuel_type_id=group.fuel_type.id) }}" class="inline-edit-form" style="display:flex; gap:6px; align-items:center;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="selected_date" value="{{ selected_date.isoformat() }}">
+            <input type="hidden" name="target_mode" value="direct">
+            <label class="hint-sm">
+              <input type="checkbox" name="direct_entry_combined" value="1" {{ "checked" if group.combined }}>
+              <input type="hidden" name="direct_entry_combined" value="0">
+              Combine tanks into one entry
+            </label>
+            <button type="submit" class="btn btn-sm">Save</button>
+          </form>
+          {% endif %}
+          {% endif %}
         </div>
-        <div style="margin-top:14px;">
-          <button type="submit" class="btn">Save Readings</button>
-        </div>
-      </form>
+
+        {% if group.effective_mode == "meter" %}
+          {% if group.nozzle_rows %}
+          <form method="post" action="{{ url_for('ledger_readings') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+            <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
+            <div class="nozzle-list">
+              {% for row in group.nozzle_rows %}
+              <div class="nozzle-row" data-price="{{ row.price }}" {% if row.previous_is_auto %}data-last="{{ row.previous_reading }}"{% endif %}
+                   data-testing="{{ row.existing_testing if row.existing_testing is not none else 0 }}"
+                   data-gross="{{ row.existing_gross if row.existing_gross is not none else '' }}">
+                <div>
+                  <div class="nz-label">D{{ row.dispenser.number }} &middot; Nozzle {{ row.nozzle.nozzle_number }}</div>
+                  <div class="nz-fuel">{{ row.nozzle.tank.label }} &middot; Rs {{ "%.2f"|format(row.price) }}/L{% if selected_date != today %} (as of {{ selected_date.strftime("%d %b") }}){% endif %}</div>
+                </div>
+                {% if row.previous_is_auto %}
+                <div class="nz-last">Previous<strong>{{ "%.2f"|format(row.previous_reading) }}</strong></div>
+                {% else %}
+                <label class="nz-previous-manual">Previous
+                  <input type="number" step="0.01" min="0" name="previous_{{ row.nozzle.id }}" class="nz-previous-input"
+                         value="{{ row.previous_reading if row.previous_reading is not none else '' }}" placeholder="e.g. 45230.50">
+                </label>
+                {% endif %}
+                <input type="number" step="0.01" min="0" id="reading_{{ row.nozzle.id }}" name="reading_{{ row.nozzle.id }}" class="nz-current-input"
+                       placeholder="This date's reading" value="{{ row.existing_reading if row.existing_reading is not none else '' }}">
+                <div class="calc-preview" id="calc_{{ row.nozzle.id }}">{% if row.previous_is_auto %}Enter this date's reading{% else %}No entry for the day before - enter both readings{% endif %}</div>
+              </div>
+              {% endfor %}
+            </div>
+            <div style="margin-top:14px;">
+              <button type="submit" class="btn btn-sm">Save {{ group.fuel_type.name }} Readings</button>
+            </div>
+          </form>
+          {% else %}
+          <p class="hint">No nozzles configured for {{ group.fuel_type.name }}.</p>
+          {% endif %}
+        {% else %}
+          <form method="post" action="{{ url_for('ledger_direct_sale') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+            <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
+            <input type="hidden" name="fuel_type_id" value="{{ group.fuel_type.id }}">
+            <p class="hint-sm">Rs {{ "%.2f"|format(fuel_prices_by_id.get(group.fuel_type.id)) }}/L{% if selected_date != today %} (as of {{ selected_date.strftime("%d %b") }}){% endif %}</p>
+            <div class="fuel-group-body" data-price="{{ fuel_prices_by_id.get(group.fuel_type.id) }}">
+              {% if group.combined %}
+              <div class="form-grid">
+                <label>Total litres sold - all {{ group.tanks|length }} tanks combined
+                  <input type="number" step="0.01" min="0.01" class="direct-liters-input" name="combined_liters"
+                         value="{{ group.existing_combined_total if group.existing_combined_total is not none else '' }}">
+                </label>
+              </div>
+              <p class="hint-sm">Split proportionally across each tank's current stock - a periodic tank dip catches and corrects any drift over time.</p>
+              {% else %}
+              <div class="form-grid">
+                {% for tr in group.direct_tank_rows %}
+                <label>{{ tr.tank.label }} - Total litres sold
+                  <input type="number" step="0.01" min="0.01" class="direct-liters-input" name="liters_{{ tr.tank.id }}"
+                         value="{{ tr.existing_liters if tr.existing_liters is not none else '' }}">
+                </label>
+                {% endfor %}
+              </div>
+              {% endif %}
+              <div class="calc-preview">Amount will be calculated automatically</div>
+            </div>
+            <div style="margin-top:14px;">
+              <button type="submit" class="btn btn-sm">Save {{ group.fuel_type.name }} Sales</button>
+            </div>
+          </form>
+        {% endif %}
+      </div>
+      {% endfor %}
       {% else %}
-      <p class="hint">No nozzles configured.</p>
+      <p class="hint">No fuel types configured.</p>
       {% endif %}
     </div>
 
@@ -1047,6 +1130,7 @@
     {% for e in feed %}
     {% set delete_kind, delete_label = {
       "sale": ("sale", "this nozzle reading"),
+      "direct_sale": ("direct-sale", "this direct sales entry"),
       "receipt": ("receipt", "this receipt"),
       "credit": ("credit", "this credit entry"),
       "sales_return": ("sales-return", "this sales return"),
@@ -1068,6 +1152,10 @@
       {% if e.kind == "sale" %}
       <div class="feed-desc"><strong>{{ e.obj.nozzle.label }} &middot; {{ e.obj.nozzle.tank.fuel_type.name }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L{% if e.obj.testing_liters %} &middot; {{ "%.2f"|format(e.obj.testing_liters) }} L testing{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-debit">Sale</span>
+      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.total_amount) }}</div>
+      {% elif e.kind == "direct_sale" %}
+      <div class="feed-desc"><strong>{{ e.obj.tank.label }} &middot; Direct Sale</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-debit">Direct Sale</span>
       <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.total_amount) }}</div>
       {% elif e.kind == "sales_return" %}
       <div class="feed-desc"><strong>{{ e.obj.fuel_type.name }} returned to {{ e.obj.tank.label }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else ("On " + e.obj.account.name + "'s account" if e.obj.method == "credit" and e.obj.account else "Cash") }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
@@ -1205,6 +1293,39 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
   }
   input.addEventListener('input', update);
   if (manualPrev) manualPrev.addEventListener('input', update);
+  update();
+});
+
+// --- Direct Sales Entry live calculation ---
+// One preview per fuel-type group, summing whatever litres are typed
+// across that group's field(s) (one combined field, or one per tank) x
+// that fuel's price on the selected date.
+document.querySelectorAll('.fuel-group-body').forEach(function (body) {
+  const price = parseFloat(body.dataset.price) || 0;
+  const inputs = body.querySelectorAll('.direct-liters-input');
+  const preview = body.querySelector('.calc-preview');
+  if (!preview) return;
+
+  function update() {
+    let total = 0;
+    let any = false;
+    inputs.forEach(function (inp) {
+      const v = parseFloat(inp.value);
+      if (!isNaN(v) && v > 0) {
+        total += v;
+        any = true;
+      }
+    });
+    if (!any) {
+      preview.textContent = 'Amount will be calculated automatically';
+      preview.className = 'calc-preview';
+      return;
+    }
+    const amount = total * price;
+    preview.innerHTML = total.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+    preview.className = 'calc-preview has-value';
+  }
+  inputs.forEach(function (inp) { inp.addEventListener('input', update); });
   update();
 });
 

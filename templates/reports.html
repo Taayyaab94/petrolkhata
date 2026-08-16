@@ -92,12 +92,12 @@
   <div class="stat-card accent-green">
     <div class="label">Cash in Hand</div>
     <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
-    <div class="sub">Live balance, all transactions to date</div>
+    <div class="sub">As of {{ selected_date.strftime("%d %b %Y") }}</div>
   </div>
   {% for b in bank_accounts %}
   <div class="stat-card">
     <div class="label">{{ b.name }}</div>
-    <div class="value">Rs {{ "%.2f"|format(b.balance) }}</div>
+    <div class="value">Rs {{ "%.2f"|format(bank_balances_by_id[b.id]) }}</div>
   </div>
   {% endfor %}
 </div>

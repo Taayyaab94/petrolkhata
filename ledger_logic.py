@@ -17,6 +17,7 @@ from models import (
     CashDeposit,
     CashHandover,
     CreditGiven,
+    DirectSale,
     EmployeeLoan,
     Expense,
     FuelPriceHistory,
@@ -43,7 +44,12 @@ from models import (
 def book_stock(tank, as_of_date):
     """Book stock for `tank` at the END of as_of_date - starting stock
     plus every purchase and sales return into this tank, minus every sale
-    from a nozzle on this tank.
+    from a nozzle on this tank, minus every DirectSale recorded directly
+    against this tank (see DirectSale's docstring in models.py - the two
+    never overlap for the same tank/date/shift, since a fuel type's
+    entry_mode picks exactly one of them at a time, but both are summed
+    unconditionally here so a tank's history across a mode switch - some
+    dates metered, others direct - still adds up correctly).
 
     tank.starting_stock_liters is the level at the START of
     tank.starting_stock_date (equivalently, the END of the day before it -
@@ -88,7 +94,12 @@ def book_stock(tank, as_of_date):
             .filter(Nozzle.tank_id == tank.id, Sale.entry_date <= as_of_date)
             .scalar()
         )
-        return round(tank.starting_stock_liters + purchased + returned - sold, 2)
+        direct_sold = (
+            db.session.query(func.coalesce(func.sum(DirectSale.liters), 0))
+            .filter(DirectSale.tank_id == tank.id, DirectSale.entry_date <= as_of_date)
+            .scalar()
+        )
+        return round(tank.starting_stock_liters + purchased + returned - sold - direct_sold, 2)
 
     if as_of_date >= tank.starting_stock_date:
         purchased = (
@@ -119,7 +130,16 @@ def book_stock(tank, as_of_date):
             )
             .scalar()
         )
-        return round(tank.starting_stock_liters + purchased + returned - sold, 2)
+        direct_sold = (
+            db.session.query(func.coalesce(func.sum(DirectSale.liters), 0))
+            .filter(
+                DirectSale.tank_id == tank.id,
+                DirectSale.entry_date >= tank.starting_stock_date,
+                DirectSale.entry_date <= as_of_date,
+            )
+            .scalar()
+        )
+        return round(tank.starting_stock_liters + purchased + returned - sold - direct_sold, 2)
 
     # BACKWARD: as_of_date < starting_stock_date - undo the entries
     # strictly between the two dates instead of summing forward.
@@ -151,7 +171,72 @@ def book_stock(tank, as_of_date):
         )
         .scalar()
     )
-    return round(tank.starting_stock_liters - purchased - returned + sold, 2)
+    direct_sold = (
+        db.session.query(func.coalesce(func.sum(DirectSale.liters), 0))
+        .filter(
+            DirectSale.tank_id == tank.id,
+            DirectSale.entry_date > as_of_date,
+            DirectSale.entry_date < tank.starting_stock_date,
+        )
+        .scalar()
+    )
+    return round(tank.starting_stock_liters - purchased - returned + sold + direct_sold, 2)
+
+
+def split_combined_direct_sale(tanks, total_liters, as_of_date):
+    """Split one combined "Total litres sold" figure for a multi-tank fuel
+    type into a per-tank {tank_id: liters} dict, summing EXACTLY to
+    total_liters.
+
+    This is an ESTIMATE, not a measurement: there is no way to know from a
+    single combined number alone how much actually came out of each
+    physical tank, so the split is proportional to each tank's own
+    book_stock() as of the day BEFORE as_of_date (i.e. what it held going
+    into this sale) - the tank that had more fuel sitting in it absorbs
+    proportionally more of the sale. Nothing here corrects for that
+    estimate being wrong; the periodic tank dip (TankDip / variance) is
+    what actually catches and corrects any drift this introduces over
+    time, exactly the same safety net that already exists for every other
+    source of stock-tracking error in this app (meter drift, spillage,
+    theft, ...) - this is not a new or weaker guarantee than what
+    metered tanks already rely on.
+
+    If every tank's stock share is 0 (e.g. all empty, or none of them
+    have a starting baseline yet), split evenly instead of dividing by
+    zero.
+
+    Each tank's share is rounded to 2dp; any rounding remainder (positive
+    or negative) is given entirely to whichever tank got the LARGEST
+    share, so the parts always sum EXACTLY to total_liters - never
+    silently drop or invent a fraction of a litre. `tanks` must be
+    non-empty.
+    """
+    if not tanks:
+        return {}
+    if len(tanks) == 1:
+        return {tanks[0].id: round(total_liters, 2)}
+
+    yesterday = as_of_date - timedelta(days=1)
+    stocks = {t.id: max(book_stock(t, yesterday), 0.0) for t in tanks}
+    total_stock = sum(stocks.values())
+
+    if total_stock <= 0:
+        # Every tank is empty (or otherwise contributes nothing) - fall
+        # back to an even split rather than dividing by zero.
+        shares = {t.id: total_liters / len(tanks) for t in tanks}
+    else:
+        shares = {tid: total_liters * (stock / total_stock) for tid, stock in stocks.items()}
+
+    rounded = {tid: round(share, 2) for tid, share in shares.items()}
+    remainder = round(total_liters - sum(rounded.values()), 2)
+    if remainder:
+        # Give the whole remainder to whichever tank got the largest raw
+        # share (ties broken by tank id for determinism) so the parts
+        # always sum to EXACTLY total_liters, to the cent.
+        largest_tank_id = max(shares, key=lambda tid: (shares[tid], -tid))
+        rounded[largest_tank_id] = round(rounded[largest_tank_id] + remainder, 2)
+
+    return rounded
 
 
 def previous_slot(entry_date, shift):
@@ -353,16 +438,16 @@ def reprice_entries(start, end, apply_changes=False):
     applied to entries that were saved before it existed.
 
     This is the repair path for the one thing correcting a price can't fix
-    on its own: Sale/CreditGiven/SalesReturn each snapshot price_per_liter
-    and their money figure at save time (deliberately - an entry must not
-    silently change under you), so fixing the price history afterwards
-    leaves those rows priced at whatever was in effect when they were
-    typed. Re-saving each reading by hand does the same job one date at a
-    time; this does it for a whole range at once.
+    on its own: Sale/DirectSale/CreditGiven/SalesReturn each snapshot
+    price_per_liter and their money figure at save time (deliberately -
+    an entry must not silently change under you), so fixing the price
+    history afterwards leaves those rows priced at whatever was in effect
+    when they were typed. Re-saving each reading by hand does the same
+    job one date at a time; this does it for a whole range at once.
 
-    LITRES ARE NEVER TOUCHED - they come from meter readings and physical
-    fact, not from price. Only price_per_liter and the money derived from
-    it are recomputed.
+    LITRES ARE NEVER TOUCHED - they come from meter readings/physical
+    tank-gauge totals, not from price. Only price_per_liter and the money
+    derived from it are recomputed.
 
     Deliberately SKIPS a CreditGiven whose amount doesn't equal
     liters * its own stored price: that mismatch is the signature of an
@@ -382,7 +467,7 @@ def reprice_entries(start, end, apply_changes=False):
     fuel_types = FuelType.query.all()
     resolve = price_resolver(fuel_types)
 
-    changes = {"sales": [], "credits": [], "returns": [], "skipped_credits": []}
+    changes = {"sales": [], "direct_sales": [], "credits": [], "returns": [], "skipped_credits": []}
 
     sales = (
         Sale.query.filter(Sale.entry_date >= start, Sale.entry_date <= end)
@@ -405,6 +490,32 @@ def reprice_entries(start, end, apply_changes=False):
         if apply_changes:
             s.price_per_liter = new_price
             s.total_amount = new_total
+
+    # DirectSale snapshots price_per_liter/total_amount at save time
+    # exactly like Sale does (see DirectSale's docstring in models.py) -
+    # so it goes stale the same way once a price is corrected after the
+    # fact, and needs the same repair path. Tank-keyed already, so no
+    # Nozzle join is needed to reach the fuel type.
+    direct_sales = (
+        DirectSale.query.filter(DirectSale.entry_date >= start, DirectSale.entry_date <= end)
+        .join(Tank, DirectSale.tank_id == Tank.id)
+        .all()
+    )
+    for ds in direct_sales:
+        fuel = ds.tank.fuel_type
+        new_price = resolve(fuel, ds.entry_date)
+        new_total = round(ds.liters * new_price, 2)
+        if abs(new_price - ds.price_per_liter) < 0.0001 and abs(new_total - ds.total_amount) < 0.01:
+            continue
+        changes["direct_sales"].append({
+            "obj": ds, "fuel": fuel.name, "label": ds.tank.label,
+            "liters": ds.liters,
+            "old_price": ds.price_per_liter, "new_price": new_price,
+            "old_amount": ds.total_amount, "new_amount": new_total,
+        })
+        if apply_changes:
+            ds.price_per_liter = new_price
+            ds.total_amount = new_total
 
     for c in CreditGiven.query.filter(CreditGiven.entry_date >= start, CreditGiven.entry_date <= end).all():
         looks_amount_mode = abs(c.amount - round(c.liters * c.price_per_liter, 2)) > 0.01
@@ -446,7 +557,7 @@ def reprice_entries(start, end, apply_changes=False):
             sr.price_per_liter = new_price
             sr.amount = new_amount
 
-    changed = changes["sales"] + changes["credits"] + changes["returns"]
+    changed = changes["sales"] + changes["direct_sales"] + changes["credits"] + changes["returns"]
     changes["count"] = len(changed)
     changes["old_total"] = round(sum(c["old_amount"] for c in changed), 2)
     changes["new_total"] = round(sum(c["new_amount"] for c in changed), 2)
@@ -609,16 +720,31 @@ def stock_series(tank, dates):
         .group_by(Sale.entry_date)
         .all()
     )
+    direct_sales_by_day = dict(
+        db.session.query(DirectSale.entry_date, func.sum(DirectSale.liters))
+        .filter(
+            DirectSale.tank_id == tank.id,
+            DirectSale.entry_date >= start,
+            DirectSale.entry_date <= dates[-1],
+        )
+        .group_by(DirectSale.entry_date)
+        .all()
+    )
 
     series = []
     for d in dates:
-        running += purchases_by_day.get(d, 0) + returns_by_day.get(d, 0) - sales_by_day.get(d, 0)
+        running += (
+            purchases_by_day.get(d, 0)
+            + returns_by_day.get(d, 0)
+            - sales_by_day.get(d, 0)
+            - direct_sales_by_day.get(d, 0)
+        )
         series.append(round(running, 2))
     return series
 
 
 def sales_breakdown_for_date(entry_date, shift_id=None):
-    """Total nozzle sales for entry_date, split by how they were
+    """Total nozzle + direct sales for entry_date, split by how they were
     collected: credit (owed by a customer), bank (reconciled to a bank
     account), and cash (whatever's left over).
 
@@ -629,6 +755,9 @@ def sales_breakdown_for_date(entry_date, shift_id=None):
     sale_q = db.session.query(func.coalesce(func.sum(Sale.total_amount), 0)).filter(
         Sale.entry_date == entry_date
     )
+    direct_sale_q = db.session.query(func.coalesce(func.sum(DirectSale.total_amount), 0)).filter(
+        DirectSale.entry_date == entry_date
+    )
     credit_q = db.session.query(func.coalesce(func.sum(CreditGiven.amount), 0)).filter(
         CreditGiven.entry_date == entry_date
     )
@@ -637,10 +766,12 @@ def sales_breakdown_for_date(entry_date, shift_id=None):
     )
     if shift_id is not None:
         sale_q = sale_q.filter(Sale.shift_id == shift_id)
+        direct_sale_q = direct_sale_q.filter(DirectSale.shift_id == shift_id)
         credit_q = credit_q.filter(CreditGiven.shift_id == shift_id)
         bank_q = bank_q.filter(BankSale.shift_id == shift_id)
 
-    total, credit, bank = sale_q.scalar(), credit_q.scalar(), bank_q.scalar()
+    total = sale_q.scalar() + direct_sale_q.scalar()
+    credit, bank = credit_q.scalar(), bank_q.scalar()
     cash = round(total - credit - bank, 2)
     return {"total": total, "credit": credit, "bank": bank, "cash": cash}
 
@@ -831,6 +962,22 @@ def cogs_for_period(start, end):
             .filter(Tank.fuel_type_id == ft.id, Sale.entry_date >= start, Sale.entry_date <= end)
             .scalar()
         )
+        # DirectSale is already tank-keyed - no Nozzle join needed, just
+        # Tank -> fuel_type_id directly.
+        direct_gross_liters = (
+            db.session.query(func.coalesce(func.sum(DirectSale.liters), 0))
+            .join(Tank, DirectSale.tank_id == Tank.id)
+            .filter(Tank.fuel_type_id == ft.id, DirectSale.entry_date >= start, DirectSale.entry_date <= end)
+            .scalar()
+        )
+        direct_gross_revenue = (
+            db.session.query(func.coalesce(func.sum(DirectSale.total_amount), 0))
+            .join(Tank, DirectSale.tank_id == Tank.id)
+            .filter(Tank.fuel_type_id == ft.id, DirectSale.entry_date >= start, DirectSale.entry_date <= end)
+            .scalar()
+        )
+        gross_liters += direct_gross_liters
+        gross_revenue += direct_gross_revenue
         returns_liters = (
             db.session.query(func.coalesce(func.sum(SalesReturn.liters), 0))
             .filter(
@@ -981,14 +1128,23 @@ def credit_aging(account, as_of_date):
 
 def fuel_sales_for_date(entry_date):
     """Liters sold and revenue for entry_date, grouped by fuel type name -
-    computed from nozzle meter reading differences (Sale rows), the same
-    figures the sales stat cards are built from."""
+    computed from nozzle meter reading differences (Sale rows) AND direct
+    tank-level entries (DirectSale rows), the same figures the sales stat
+    cards are built from. A fuel type only ever has one or the other on
+    any given date/tank in practice (see FuelType.entry_mode), but both
+    are folded into the same totals unconditionally so a fuel type's
+    history across a mode switch still adds up."""
     sales = Sale.query.filter_by(entry_date=entry_date).join(Nozzle).all()
     by_fuel = {}
     for s in sales:
         d = by_fuel.setdefault(s.nozzle.tank.fuel_type.name, {"liters": 0.0, "revenue": 0.0})
         d["liters"] += s.liters
         d["revenue"] += s.total_amount
+    direct_sales = DirectSale.query.filter_by(entry_date=entry_date).join(Tank).all()
+    for ds in direct_sales:
+        d = by_fuel.setdefault(ds.tank.fuel_type.name, {"liters": 0.0, "revenue": 0.0})
+        d["liters"] += ds.liters
+        d["revenue"] += ds.total_amount
     return by_fuel
 
 
@@ -1077,13 +1233,14 @@ def account_ledger_events(account):
 
 def cash_account_balance(cash_account):
     """Cash-in-hand: opening balance, plus every date's cash sales (total
-    sales minus credit minus bank sales) and every cash-method receipt,
-    minus cash physically deposited into a bank account and every
-    cash-method outflow (loans, expenses, fuel purchases, supplier
-    payments - each of those can instead be routed through a specific
-    bank account via "Paid via", in which case it hits that bank's
-    balance instead and is excluded here)."""
+    sales - Sale AND DirectSale combined - minus credit minus bank sales)
+    and every cash-method receipt, minus cash physically deposited into a
+    bank account and every cash-method outflow (loans, expenses, fuel
+    purchases, supplier payments - each of those can instead be routed
+    through a specific bank account via "Paid via", in which case it hits
+    that bank's balance instead and is excluded here)."""
     total_sales = db.session.query(func.coalesce(func.sum(Sale.total_amount), 0)).scalar()
+    total_sales += db.session.query(func.coalesce(func.sum(DirectSale.total_amount), 0)).scalar()
     total_credit = db.session.query(func.coalesce(func.sum(CreditGiven.amount), 0)).scalar()
     total_bank_sales = db.session.query(func.coalesce(func.sum(BankSale.amount), 0)).scalar()
     total_deposits = db.session.query(func.coalesce(func.sum(CashDeposit.amount), 0)).scalar()
@@ -1178,12 +1335,17 @@ def _cash_daily_net_changes():
         opening_date = cash_account.opening_balance_date or cash_account.created_at.date()
         add([(opening_date, cash_account.opening_balance)])
 
-    # Cash portion of nozzle sales for a date is total sales minus credit
-    # minus bank sales on that same date - mirrors sales_breakdown_for_date,
-    # just summed per date across all of history in one grouped query each
-    # rather than one query per date.
+    # Cash portion of nozzle + direct sales for a date is total sales
+    # minus credit minus bank sales on that same date - mirrors
+    # sales_breakdown_for_date, just summed per date across all of
+    # history in one grouped query each rather than one query per date.
     sales_by_date = dict(
         db.session.query(Sale.entry_date, func.sum(Sale.total_amount)).group_by(Sale.entry_date).all()
+    )
+    direct_sales_by_date = dict(
+        db.session.query(DirectSale.entry_date, func.sum(DirectSale.total_amount))
+        .group_by(DirectSale.entry_date)
+        .all()
     )
     credit_by_date = dict(
         db.session.query(CreditGiven.entry_date, func.sum(CreditGiven.amount))
@@ -1193,9 +1355,10 @@ def _cash_daily_net_changes():
     bank_sales_by_date = dict(
         db.session.query(BankSale.entry_date, func.sum(BankSale.amount)).group_by(BankSale.entry_date).all()
     )
-    for entry_date in set(sales_by_date) | set(credit_by_date) | set(bank_sales_by_date):
+    for entry_date in set(sales_by_date) | set(direct_sales_by_date) | set(credit_by_date) | set(bank_sales_by_date):
         cash_amount = (
             sales_by_date.get(entry_date, 0)
+            + direct_sales_by_date.get(entry_date, 0)
             - credit_by_date.get(entry_date, 0)
             - bank_sales_by_date.get(entry_date, 0)
         )
@@ -1272,6 +1435,23 @@ def _cash_daily_net_changes():
     )
 
     return changes
+
+
+def cash_account_balance_as_of(cash_account, as_of_date):
+    """Cash-in-hand as it stood at the END of as_of_date - the closing
+    balance for that date, not the all-time figure cash_account_balance()
+    returns. Same components as _cash_daily_net_changes() (which already
+    includes DirectSale in its cash-sales component), summed only through
+    as_of_date.
+
+    A new, additional function - used ONLY on the Ledger and Daily Report
+    pages, which are date-driven and need to show the balance as it stood
+    on whatever date is being paged to, not today's all-time figure.
+    cash_account_balance() itself is deliberately left untouched: it's
+    still used everywhere else (dashboard, account pages, settings) for
+    the current/all-time figure, unconditionally."""
+    changes = _cash_daily_net_changes()
+    return round(sum(v for d, v in changes.items() if d <= as_of_date), 2)
 
 
 def cash_would_go_negative(hypothetical_changes):
@@ -1376,7 +1556,14 @@ def cash_account_ledger_events(cash_account):
             }
         )
 
-    sale_dates = [row[0] for row in db.session.query(Sale.entry_date).distinct().all()]
+    # Union of Sale AND DirectSale dates - a date with ONLY direct-entry
+    # activity (no metered Sale at all) still has a nonzero cash
+    # contribution via sales_breakdown_for_date() (already DirectSale-
+    # aware), and skipping it here would silently drop that day's cash
+    # sales row from the history list, breaking every running balance
+    # shown after it.
+    sale_dates = {row[0] for row in db.session.query(Sale.entry_date).distinct().all()}
+    sale_dates |= {row[0] for row in db.session.query(DirectSale.entry_date).distinct().all()}
     for d in sale_dates:
         breakdown = sales_breakdown_for_date(d)
         if breakdown["cash"]:
@@ -1774,6 +1961,137 @@ def bank_account_ledger_events(bank_account):
 
     events.reverse()
     return events
+
+
+def bank_account_balance_as_of(bank_account, as_of_date):
+    """This bank account's balance as it stood at the END of as_of_date -
+    mirrors BankAccount.balance's component list EXACTLY (see that
+    property in models.py: bank_sales, deposits, receipts,
+    employee_loans_paid, expenses, fuel_purchases restricted to
+    payment_type == "cash", supplier_payments_paid, salary_payments_paid
+    net of deduction, sales_returns restricted to method == "bank",
+    product_sales restricted to method == "bank", product_purchases
+    restricted to payment_type == "cash") - with entry_date <= as_of_date
+    added to each component.
+
+    DirectSale never appears here - it's fuel revenue exactly like Sale,
+    and neither table ever touches a bank account directly; only BankSale
+    (a reclassification of revenue collected via bank, independent of
+    whether the underlying sale was recorded via meter or direct entry -
+    see the module-level notes on this app's design) does, and it's
+    already covered by bank_sales above.
+
+    Explicit SQL sums (not Python-summing the relationship backrefs, which
+    have no natural place to add a date filter without loading everything
+    into memory first) - same style as cash_account_balance().
+
+    A new, additional function - used ONLY on the Ledger and Daily Report
+    pages. BankAccount.balance itself is deliberately left untouched for
+    every other page (Accounts, bank account detail, dashboard, ...),
+    which must keep showing the current/all-time figure exactly as before."""
+    bank_sales_total = (
+        db.session.query(func.coalesce(func.sum(BankSale.amount), 0))
+        .filter(BankSale.bank_account_id == bank_account.id, BankSale.entry_date <= as_of_date)
+        .scalar()
+    )
+    deposits_total = (
+        db.session.query(func.coalesce(func.sum(CashDeposit.amount), 0))
+        .filter(CashDeposit.bank_account_id == bank_account.id, CashDeposit.entry_date <= as_of_date)
+        .scalar()
+    )
+    receipts_total = (
+        db.session.query(func.coalesce(func.sum(Receipt.amount), 0))
+        .filter(Receipt.bank_account_id == bank_account.id, Receipt.entry_date <= as_of_date)
+        .scalar()
+    )
+    loans_total = (
+        db.session.query(func.coalesce(func.sum(EmployeeLoan.amount), 0))
+        .filter(EmployeeLoan.bank_account_id == bank_account.id, EmployeeLoan.entry_date <= as_of_date)
+        .scalar()
+    )
+    expenses_total = (
+        db.session.query(func.coalesce(func.sum(Expense.amount), 0))
+        .filter(Expense.bank_account_id == bank_account.id, Expense.entry_date <= as_of_date)
+        .scalar()
+    )
+    fuel_purchases_total = (
+        db.session.query(func.coalesce(func.sum(StockPurchase.cost), 0))
+        .filter(
+            StockPurchase.bank_account_id == bank_account.id,
+            StockPurchase.payment_type == "cash",
+            StockPurchase.entry_date <= as_of_date,
+        )
+        .scalar()
+    )
+    supplier_payments_total = (
+        db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0))
+        .filter(SupplierPayment.bank_account_id == bank_account.id, SupplierPayment.entry_date <= as_of_date)
+        .scalar()
+    )
+    salaries_total = (
+        db.session.query(
+            func.coalesce(func.sum(SalaryPayment.gross_amount - SalaryPayment.deduction_amount), 0)
+        )
+        .filter(SalaryPayment.bank_account_id == bank_account.id, SalaryPayment.entry_date <= as_of_date)
+        .scalar()
+    )
+    sales_returns_total = (
+        db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0))
+        .filter(
+            SalesReturn.bank_account_id == bank_account.id,
+            SalesReturn.method == "bank",
+            SalesReturn.entry_date <= as_of_date,
+        )
+        .scalar()
+    )
+    product_sales_total = (
+        db.session.query(func.coalesce(func.sum(ProductSale.amount), 0))
+        .filter(
+            ProductSale.bank_account_id == bank_account.id,
+            ProductSale.method == "bank",
+            ProductSale.entry_date <= as_of_date,
+        )
+        .scalar()
+    )
+    product_purchases_total = (
+        db.session.query(func.coalesce(func.sum(ProductPurchase.total_cost), 0))
+        .filter(
+            ProductPurchase.bank_account_id == bank_account.id,
+            ProductPurchase.payment_type == "cash",
+            ProductPurchase.entry_date <= as_of_date,
+        )
+        .scalar()
+    )
+    # The opening balance is anchored on its own opening_balance_date (or
+    # created_at.date() if unset - same fallback _cash_daily_net_changes()
+    # uses for the cash account) and only counted once as_of_date has
+    # reached it. Unlike BankAccount.balance (always-unconditional - it
+    # has no date to be "as of" in the first place), an AS-OF balance for
+    # a date before the account's own baseline would otherwise show money
+    # that, as of that date, hadn't been declared into this account yet -
+    # exactly the double-counting book_stock()/Account.balance already
+    # guard against for a tank/account's own opening figure. Matters for
+    # backfilling: an owner setting up a bank account today and then
+    # entering older paper records from before that setup date must see
+    # this account read as empty on those older dates, not carrying an
+    # opening balance backwards in time.
+    opening_date = bank_account.opening_balance_date or bank_account.created_at.date()
+    opening = bank_account.opening_balance if as_of_date >= opening_date else 0.0
+    return round(
+        opening
+        + bank_sales_total
+        + deposits_total
+        + receipts_total
+        - loans_total
+        - expenses_total
+        - fuel_purchases_total
+        - supplier_payments_total
+        - salaries_total
+        - sales_returns_total
+        + product_sales_total
+        - product_purchases_total,
+        2,
+    )
 
 
 def product_margin_for_period(start, end):

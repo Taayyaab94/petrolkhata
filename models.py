@@ -133,6 +133,22 @@ class Shift(TenantScoped, db.Model):
 
 
 class FuelType(TenantScoped, db.Model):
+    """entry_mode decides how sales for THIS fuel type are recorded, for
+    every tank of it at once: "meter" (the original nozzle-reading flow -
+    see Sale) or "direct" (a total-liters figure keyed by tank instead -
+    see DirectSale). It lives here rather than on Tank because switching
+    is meant to move a whole fuel type's tanks together - see DirectSale's
+    docstring for why entry granularity is still per-tank even though the
+    switch itself is per-fuel-type.
+
+    direct_entry_combined only matters while entry_mode == "direct" AND
+    this fuel type has more than one tank - it picks whether the Ledger
+    asks for one "Total litres" figure per tank (False, the default and
+    the only case that ever applies to a single-tank fuel type) or one
+    combined figure for the whole fuel type, auto-split across its tanks
+    proportional to each tank's own stock (see
+    ledger_logic.split_combined_direct_sale())."""
+
     __table_args__ = (
         db.UniqueConstraint("pump_id", "name", name="uq_fueltype_pump_name"),
     )
@@ -140,6 +156,8 @@ class FuelType(TenantScoped, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(50), nullable=False)
     price_per_liter = db.Column(db.Float, nullable=False, default=0)
+    entry_mode = db.Column(db.String(10), nullable=False, default="meter")  # meter | direct
+    direct_entry_combined = db.Column(db.Boolean, nullable=False, default=False)
 
 
 class FuelPriceHistory(TenantScoped, db.Model):
@@ -392,6 +410,53 @@ class Sale(TenantScoped, db.Model):
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
     nozzle = db.relationship("Nozzle", backref="sales")
+    shift = db.relationship("Shift")
+    user = db.relationship("User")
+
+
+class DirectSale(TenantScoped, db.Model):
+    """A debit-side ledger entry: total liters sold for one TANK on one
+    date, within one shift - the alternative to Sale for a pump that
+    doesn't track individual nozzle meter readings (or gets a total
+    straight off an Automatic Tank Gauge instead).
+
+    Keyed by tank, not nozzle or fuel type: book_stock() (ledger_logic.py)
+    tracks stock per physical tank, and a fuel type can span more than one
+    tank (this app's own real data has a fuel type with two), so a tank is
+    the smallest unit an entry can be attributed to without guessing.
+    FuelType.entry_mode/direct_entry_combined decide whether the OWNER
+    types one figure per tank or one combined figure for the whole fuel
+    type that then gets split across tanks (see
+    split_combined_direct_sale() in ledger_logic.py) - either way, what
+    lands here is always a real, tank-attributed row; a combined entry is
+    never stored unattributed.
+
+    Deliberately NOT a variant of Sale - there is no previous/current
+    meter reading here, and no testing concept (testing is fuel drained
+    back into a tank during METERED dispensing specifically; it doesn't
+    apply when there's no meter reading to test against - see
+    NozzleTesting's docstring).
+
+    At most one DirectSale exists per (tank_id, entry_date, shift_id) -
+    re-submitting a figure for a date/shift that already has one updates
+    it in place rather than creating a duplicate, mirroring Sale's own
+    uq_sale_nozzle_date_shift exactly (see Sale's docstring above)."""
+
+    __table_args__ = (
+        db.UniqueConstraint("tank_id", "entry_date", "shift_id", name="uq_directsale_tank_date_shift"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    tank_id = db.Column(db.Integer, db.ForeignKey("tank.id"), nullable=False)
+    shift_id = db.Column(db.Integer, db.ForeignKey("shift.id"), nullable=False)
+    entry_date = db.Column(db.Date, nullable=False)
+    liters = db.Column(db.Float, nullable=False)
+    price_per_liter = db.Column(db.Float, nullable=False)
+    total_amount = db.Column(db.Float, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    tank = db.relationship("Tank", backref="direct_sales")
     shift = db.relationship("Shift")
     user = db.relationship("User")
 
