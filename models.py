@@ -695,6 +695,27 @@ class Expense(TenantScoped, db.Model):
     user = db.relationship("User")
 
 
+class OtherIncome(TenantScoped, db.Model):
+    """Income that isn't a product sale and isn't tied to fuel or a
+    customer account - rent received, a profit share from a side
+    business at the site, etc. Deliberately as simple as Expense's
+    mirror image: a free-text description and an amount, paid via cash
+    or bank only - no credit option, since there's no customer account
+    for this money to be owed by."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    entry_date = db.Column(db.Date, nullable=False)
+    description = db.Column(db.String(200), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank
+    bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    bank_account = db.relationship("BankAccount", backref="other_income_entries")
+    user = db.relationship("User")
+
+
 class BankAccount(TenantScoped, db.Model):
     __table_args__ = (
         db.UniqueConstraint("pump_id", "name", name="uq_bankaccount_pump_name"),
@@ -735,6 +756,11 @@ class BankAccount(TenantScoped, db.Model):
         product_purchases_total = sum(
             (pp.total_cost or 0) for pp in self.product_purchases if pp.payment_type == "cash"
         )
+        # other_income_entries is only ever populated with method == "bank"
+        # rows for this bank account (see OtherIncome and
+        # ledger_other_income() in app.py) - no method filter needed here,
+        # same reasoning as product_sales_total's docstring above it.
+        other_income_total = sum(oi.amount for oi in self.other_income_entries)
         return round(
             self.opening_balance
             + sales_total
@@ -747,7 +773,8 @@ class BankAccount(TenantScoped, db.Model):
             - salaries_total
             - sales_returns_total
             + product_sales_total
-            - product_purchases_total,
+            - product_purchases_total
+            + other_income_total,
             2,
         )
 

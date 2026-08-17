@@ -60,6 +60,10 @@
     <div class="value">Rs {{ "%.2f"|format(total_product_sales_amount) }}</div>
     <div class="sub">{{ "%.2f"|format(total_product_sales_units) }} units sold</div>
   </div>
+  <div class="stat-card accent-green">
+    <div class="label">Other Income</div>
+    <div class="value">Rs {{ "%.2f"|format(total_other_income) }}</div>
+  </div>
   <div class="stat-card accent-red">
     <div class="label">Product Purchases</div>
     <div class="value">Rs {{ "%.2f"|format(total_product_purchases_cost) }}</div>
@@ -202,6 +206,28 @@
   </div>
 
   <div class="panel">
+    <div class="panel-head"><h3>Other Income</h3></div>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Description</th><th>Method</th><th>Amount (Rs)</th></tr></thead>
+      <tbody>
+        {% for oi in other_income_entries %}
+        <tr>
+          <td>{{ oi.description }}</td>
+          <td>{{ "Via " + oi.bank_account.name if oi.method == "bank" else "Cash" }}</td>
+          <td>{{ "%.2f"|format(oi.amount) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3">No other income on this date.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div class="two-col">
+  <div class="panel">
     <div class="panel-head"><h3>Product Purchases</h3></div>
     <div class="table-wrap">
     <table class="table">
@@ -333,7 +359,7 @@
   </div>
 </div>
 
-<p class="hint">Net Cash Flow = sales - credit given + receipts - expenses - cash-paid purchases - supplier payments - salaries paid - cash-refunded sales returns + cash-method non-fuel sales - cash-paid product purchases. Purchases made on supplier credit aren't subtracted at the time of purchase since that cash hasn't left yet - it's counted when the supplier is actually paid; a sales return (or non-fuel sale, or product purchase) settled via a bank or a customer's/supplier's account is excluded here the same way, since it doesn't move cash-in-hand (see that bank's balance, or the account's balance, instead). For a period profit view (revenue against the cost of fuel and products actually sold), see the <a href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}">Monthly Report</a>.</p>
+<p class="hint">Net Cash Flow = sales - credit given + receipts - expenses - cash-paid purchases - supplier payments - salaries paid - cash-refunded sales returns + cash-method non-fuel sales - cash-paid product purchases + cash-method other income. Purchases made on supplier credit aren't subtracted at the time of purchase since that cash hasn't left yet - it's counted when the supplier is actually paid; a sales return (or non-fuel sale, or product purchase, or other income) settled via a bank or a customer's/supplier's account is excluded here the same way, since it doesn't move cash-in-hand (see that bank's balance, or the account's balance, instead). For a period profit view (revenue against the cost of fuel and products actually sold), see the <a href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}">Monthly Report</a>.</p>
 
 <script>
 // Export menu: click the toggle to show/hide its PDF/Excel links, click

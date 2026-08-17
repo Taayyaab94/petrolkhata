@@ -25,7 +25,7 @@
   </form>
 </div>
 
-<div class="subtitle" style="margin:-4px 0 10px;">Presented as an income statement - each figure below feeds the next: Fuel Revenue, gross &rarr; less Sales Returns &rarr; Net Fuel Revenue &rarr; less Cost of Fuel Sold &rarr; Fuel Gross Margin &rarr; plus Product Gross Margin &rarr; Total Gross Margin &rarr; less Expenses &amp; Salaries &rarr; Net Profit.</div>
+<div class="subtitle" style="margin:-4px 0 10px;">Presented as an income statement - each figure below feeds the next: Fuel Revenue, gross &rarr; less Sales Returns &rarr; Net Fuel Revenue &rarr; less Cost of Fuel Sold &rarr; Fuel Gross Margin &rarr; plus Product Gross Margin &rarr; Total Gross Margin &rarr; plus Other Income &rarr; less Expenses &amp; Salaries &rarr; Net Profit.</div>
 <div class="stat-row">
   <div class="stat-card accent-brand">
     <div class="label">Fuel Revenue, Gross</div>
@@ -71,6 +71,10 @@
     <div class="value">Rs {{ "%.2f"|format(total_gross_margin) }}</div>
     <div class="sub">Fuel + product gross margin</div>
   </div>
+  <div class="stat-card accent-green">
+    <div class="label">Other Income</div>
+    <div class="value">Rs {{ "%.2f"|format(other_income_total) }}</div>
+  </div>
   <div class="stat-card accent-red">
     <div class="label">Less: Expenses</div>
     <div class="value">Rs {{ "%.2f"|format(expenses_total) }}</div>
@@ -83,7 +87,7 @@
   <div class="stat-card {{ 'accent-green' if net_profit >= 0 else 'accent-red' }}">
     <div class="label">Net Profit</div>
     <div class="value">Rs {{ "%.2f"|format(net_profit) }}</div>
-    <div class="sub">Total gross margin &minus; expenses &minus; salaries</div>
+    <div class="sub">Total gross margin + other income &minus; expenses &minus; salaries</div>
   </div>
 </div>
 

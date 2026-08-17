@@ -96,6 +96,7 @@ from models import (
     Nozzle,
     NozzleReset,
     NozzleTesting,
+    OtherIncome,
     PasswordResetToken,
     Product,
     ProductPurchase,
@@ -1159,6 +1160,7 @@ BACKUP_MODELS = [
     ProductRateHistory,
     ProductPurchase,
     ProductSale,
+    OtherIncome,
 ]
 
 
@@ -2265,6 +2267,8 @@ def get_feed_for_date(entry_date, full_visibility):
         )
     for ps in ProductSale.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "product_sale", "sort": ps.recorded_at, "obj": ps})
+    for oi in OtherIncome.query.filter_by(entry_date=entry_date).all():
+        events.append({"kind": "other_income", "sort": oi.recorded_at, "obj": oi})
     for nt in NozzleTesting.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "nozzle_testing", "sort": nt.recorded_at, "obj": nt})
 
@@ -3919,6 +3923,42 @@ def ledger_product_sale():
     return redirect(url_for("ledger", date=entry_date, shift=shift.id))
 
 
+@app.route("/ledger/other-income", methods=["POST"])
+@login_required
+def ledger_other_income():
+    """Income that isn't a product sale - rent, a side-business profit
+    share, etc. Not owner-only: lives under the same "Other Income" entry
+    point as Non-Fuel Product Sales, which staff can already enter (see
+    ledger_product_sale()'s docstring). Only ever INCREASES cash/bank, so
+    like ledger_product_sale(), deliberately no would_overdraw_cash() call."""
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    description = request.form.get("description", "").strip()
+    amount = request.form.get("amount", type=float)
+    method, bank_account, method_error = resolve_payment_method(request.form)
+
+    if not description:
+        flash("Please enter a description.", "error")
+    elif not amount or amount <= 0:
+        flash("Amount must be a positive number.", "error")
+    elif method_error:
+        flash(method_error, "error")
+    else:
+        db.session.add(
+            OtherIncome(
+                entry_date=entry_date,
+                description=description,
+                amount=amount,
+                method=method,
+                bank_account_id=bank_account.id if bank_account else None,
+                user_id=current_user.id,
+            )
+        )
+        db.session.commit()
+        flash(f"Recorded other income: {description} - Rs {amount:,.2f}", "success")
+
+    return redirect(url_for("ledger", date=entry_date))
+
+
 @app.route("/ledger/product-purchase", methods=["POST"])
 @login_required
 @owner_required
@@ -4205,6 +4245,7 @@ DELETABLE_ENTRIES = {
     "product-sale": (ProductSale, "product sale"),
     "product-purchase": (ProductPurchase, "product purchase"),
     "nozzle-testing": (NozzleTesting, "testing entry"),
+    "other-income": (OtherIncome, "other income entry"),
 }
 
 
@@ -5445,6 +5486,16 @@ def _reports_context(selected_date):
         (pp.total_cost for pp in product_purchases if pp.payment_type == "cash" and pp.method == "cash"), 0.0
     )
 
+    # Income that isn't a product sale (rent, a side-business profit
+    # share, ...) - cash/bank only, no credit option (see OtherIncome in
+    # models.py), so unlike sales returns/product sales above there's no
+    # "on account" method to exclude from the cash total.
+    other_income_entries = (
+        OtherIncome.query.filter_by(entry_date=selected_date).order_by(OtherIncome.recorded_at).all()
+    )
+    total_other_income = sum((oi.amount for oi in other_income_entries), 0.0)
+    cash_other_income_total = sum((oi.amount for oi in other_income_entries if oi.method == "cash"), 0.0)
+
     tanks = Tank.query.order_by(Tank.number).all()
     tank_rows = []
     for t in tanks:
@@ -5471,6 +5522,7 @@ def _reports_context(selected_date):
         - cash_sales_returns_total
         + cash_product_sales_total
         - cash_product_purchases_total
+        + cash_other_income_total
     )
     outstanding_credit = sum((b for a in Account.query.all() if (b := a.balance) > 0), 0.0)
     # Date-aware closing balances for the SELECTED date, not the all-time
@@ -5519,6 +5571,8 @@ def _reports_context(selected_date):
         "product_purchases": product_purchases,
         "total_product_purchases_units": total_product_purchases_units,
         "total_product_purchases_cost": total_product_purchases_cost,
+        "other_income_entries": other_income_entries,
+        "total_other_income": total_other_income,
     }
 
 
@@ -5553,6 +5607,7 @@ def reports_export():
         ("Sales Returns (Rs)", ctx["total_sales_returns_amount"]),
         ("Non-Fuel Sales (units)", ctx["total_product_sales_units"]),
         ("Non-Fuel Sales (Rs)", ctx["total_product_sales_amount"]),
+        ("Other Income (Rs)", ctx["total_other_income"]),
         ("Product Purchases (units)", ctx["total_product_purchases_units"]),
         ("Product Purchases (Rs)", ctx["total_product_purchases_cost"]),
         ("Expenses (Rs)", ctx["total_expenses"]),
@@ -5626,6 +5681,16 @@ def reports_export():
                 for ps in ctx["product_sales"]
             ],
             "align": ["left", "right", "right", "right", "left"],
+        },
+        {
+            "type": "table",
+            "heading": "Other Income",
+            "columns": ["Description", "Method", "Amount (Rs)"],
+            "rows": [
+                [oi.description, "Via " + oi.bank_account.name if oi.method == "bank" else "Cash", oi.amount]
+                for oi in ctx["other_income_entries"]
+            ],
+            "align": ["left", "left", "right"],
         },
         {
             "type": "table",
@@ -5737,7 +5802,7 @@ def _reports_monthly_context(start, end):
     Sales Returns = Net Fuel Revenue - Cost of Fuel Sold = Fuel Gross
     Margin; then Product Revenue - Cost of Products Sold = Product Gross
     Margin; Fuel Gross Margin + Product Gross Margin = Total Gross Margin
-    - Expenses - Salaries = Net Profit. cogs_for_period() nets sales
+    + Other Income - Expenses - Salaries = Net Profit. cogs_for_period() nets sales
     returns into COGS/margin already (see its docstring) - net_revenue
     below is the ONLY other place a return is subtracted, so net_profit
     must never subtract sales_returns_amount again on top of gross_margin,
@@ -5851,12 +5916,20 @@ def _reports_monthly_context(start, end):
         start, end
     )
     total_gross_margin = round(gross_margin + product_commission, 2)
+    # Income that isn't a product sale (rent, a side-business profit
+    # share, ...) - has no associated cost, so unlike product_commission
+    # above it's a pure addition, not a revenue-minus-cost margin.
+    other_income_total = float(
+        db.session.query(func.coalesce(func.sum(OtherIncome.amount), 0))
+        .filter(OtherIncome.entry_date >= start, OtherIncome.entry_date <= end)
+        .scalar()
+    )
     # No further "- sales_returns_amount" here: net_revenue (and therefore
     # gross_margin) is already net of returns. Subtracting it again would
     # double-count the same refund - that was the bug this comment is
     # guarding against. Net Profit is Total Gross Margin (fuel + product)
-    # minus operating costs only.
-    net_profit = round(total_gross_margin - expenses_total - salaries_total, 2)
+    # plus Other Income, minus operating costs.
+    net_profit = round(total_gross_margin + other_income_total - expenses_total - salaries_total, 2)
 
     return {
         "revenue": revenue,
@@ -5871,6 +5944,7 @@ def _reports_monthly_context(start, end):
         "product_commission": product_commission,
         "product_category_detail": product_category_detail,
         "total_gross_margin": total_gross_margin,
+        "other_income_total": other_income_total,
         "expenses_total": expenses_total,
         "expenses_by_category": expenses_by_category,
         "salaries_total": salaries_total,
@@ -5940,6 +6014,7 @@ def reports_monthly_export():
                 ("Less: Cost of Products Sold (Rs)", ctx["product_cost"]),
                 ("Product Gross Margin (Rs)", ctx["product_commission"]),
                 ("Total Gross Margin (Rs)", ctx["total_gross_margin"]),
+                ("Other Income (Rs)", ctx["other_income_total"]),
                 ("Less: Expenses (Rs)", ctx["expenses_total"]),
                 ("Less: Salaries (Rs)", ctx["salaries_total"]),
                 ("Net Profit (Rs)", ctx["net_profit"]),
@@ -6055,6 +6130,7 @@ def reports_trends():
     salaries_by_day = group_sum(SalaryPayment, SalaryPayment.gross_amount)
     returns_amount_by_day = group_sum(SalesReturn, SalesReturn.amount)
     product_revenue_by_day = group_sum(ProductSale, ProductSale.amount)
+    other_income_by_day = group_sum(OtherIncome, OtherIncome.amount)
     # Unlike cogs_by_day below, this needs no weighted-average/unit-cost
     # lookup at all - every ProductSale row already carries its own
     # purchase_rate, snapshotted at the moment of sale (see
@@ -6148,7 +6224,8 @@ def reports_trends():
             - cogs_by_day.get(d, 0)  # net fuel COGS
             - expenses_by_day.get(d, 0)
             - salaries_by_day.get(d, 0)
-            + product_margin_series[i],
+            + product_margin_series[i]
+            + other_income_by_day.get(d, 0),
             2,
         )
         for i, d in enumerate(all_dates)
@@ -6227,6 +6304,7 @@ def reports_trends():
         total_product_revenue=round(sum(product_revenue_by_day.values()), 2),
         total_product_cost=round(sum(product_cost_by_day.values()), 2),
         total_product_margin=round(sum(product_margin_series), 2),
+        total_other_income=round(sum(other_income_by_day.values()), 2),
         total_profit=round(sum(profit_series), 2),
     )
 

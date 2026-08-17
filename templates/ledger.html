@@ -363,7 +363,14 @@
     </div>
 
     <div class="ledger-section">
-      <h3>Non-Fuel Sale</h3>
+      <h3>Other Income</h3>
+      <label>Type
+        <select id="other_income_entry_type">
+          <option value="product">Non-Fuel Product Sales</option>
+          <option value="income">Other Income</option>
+        </select>
+      </label>
+      <div id="other-income-type-product">
       <p class="hint-sm">Lubricants, filters, and shop items sold at the forecourt - priced at this date's rate, snapshotted onto the entry so a later price change never re-prices it. Search the catalogue below, or add a new product on the fly.</p>
       <form method="post" action="{{ url_for('ledger_product_sale') }}" id="product-sale-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -446,6 +453,37 @@
           <button type="submit" class="btn btn-sm">Record Non-Fuel Sale</button>
         </div>
       </form>
+      </div>
+      <div id="other-income-type-income" style="display:none;">
+      <p class="hint-sm">Income that isn't a product sale and isn't tied to fuel - rent received, a profit share from a side business at the site, etc.</p>
+      <form method="post" action="{{ url_for('ledger_other_income') }}" id="other-income-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
+        <div class="form-grid">
+          <label>Description
+            <input type="text" name="description" placeholder="e.g. Rent Received" required>
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" required>
+          </label>
+          <label>Received via
+            <select name="paid_via" class="paidvia-select" data-scope="other_income">
+              <option value="cash">Cash</option>
+              <option value="__new__">+ Add new bank account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="new-paidvia-field" data-scope="other_income" style="display:none;">New bank account name
+            <input type="text" name="new_bank_account_name">
+          </label>
+        </div>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn btn-sm">Record Other Income</button>
+        </div>
+      </form>
+      </div>
     </div>
 
     <div class="ledger-section">
@@ -1144,6 +1182,7 @@
       "handover": ("handover", "this cash handover"),
       "salary": ("salary", "this salary payment"),
       "product_sale": ("product-sale", "this non-fuel sale"),
+      "other_income": ("other-income", "this other income entry"),
       "product_purchase": ("product-purchase", "this product purchase"),
       "nozzle_testing": ("nozzle-testing", "this testing entry"),
     }[e.kind] %}
@@ -1213,6 +1252,10 @@
       {% elif e.kind == "product_sale" %}
       <div class="feed-desc"><strong>{{ e.obj.product.label }}</strong><span>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} &middot; {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else ("On " + e.obj.account.name + "'s account" if e.obj.method == "credit" and e.obj.account else "Cash") }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-debit">Non-Fuel Sale</span>
+      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      {% elif e.kind == "other_income" %}
+      <div class="feed-desc"><strong>{{ e.obj.description }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }} &middot; {{ e.obj.user.username }}</span></div>
+      <span class="feed-tag feed-tag-debit">Other Income</span>
       <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
       {% elif e.kind == "product_purchase" %}
       <div class="feed-desc"><strong>{{ e.obj.product.label }}{{ " return/correction" if e.obj.quantity < 0 }}</strong><span>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} &middot; {{ ("Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash") if e.obj.payment_type == "cash" else "On credit" }} &middot; {{ e.obj.user.username }}</span></div>
@@ -1497,6 +1540,19 @@ if (returnEntryType && returnTypeReturn && returnTypeTesting) {
     const isTesting = returnEntryType.value === 'testing';
     returnTypeReturn.style.display = isTesting ? 'none' : '';
     returnTypeTesting.style.display = isTesting ? '' : 'none';
+  });
+}
+
+// --- Other Income: same type-selector-swaps-two-forms pattern as Sales
+// Return / Testing above ---
+const otherIncomeEntryType = document.getElementById('other_income_entry_type');
+const otherIncomeTypeProduct = document.getElementById('other-income-type-product');
+const otherIncomeTypeIncome = document.getElementById('other-income-type-income');
+if (otherIncomeEntryType && otherIncomeTypeProduct && otherIncomeTypeIncome) {
+  otherIncomeEntryType.addEventListener('change', function () {
+    const isIncome = otherIncomeEntryType.value === 'income';
+    otherIncomeTypeProduct.style.display = isIncome ? 'none' : '';
+    otherIncomeTypeIncome.style.display = isIncome ? '' : 'none';
   });
 }
 

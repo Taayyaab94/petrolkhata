@@ -189,8 +189,14 @@
 </div>
 
 <div class="panel">
-  <div class="panel-head"><h3>Products</h3></div>
+  <div class="panel-head">
+    <h3>Products</h3>
+    <button type="button" class="btn btn-sm btn-ghost" id="products-toggle" aria-expanded="false">
+      {{ products|length }} product{{ "s" if products|length != 1 }} &#9656; View all
+    </button>
+  </div>
   <p class="hint">Lubricants, filters and shop items - counted in whole units or by the litre, never through a nozzle. Editing a rate here records dated history (see product_rates_on_date), so past sales keep costing at the rate that actually applied then. Deactivate rather than delete once a product has sale or purchase history.</p>
+  <div id="products-table-wrap" style="display:none;">
   <div class="table-wrap">
   <table class="table">
     <thead>
@@ -256,6 +262,7 @@
   </table>
   </div>
   <p class="hint">Delete only works for a product with no sale or purchase history yet - deactivate it instead once it has some; a deactivated product disappears from future sale pickers but its history and past figures stay intact.</p>
+  </div>
 </div>
 
 <div class="panel">
@@ -632,5 +639,20 @@ function reindexSettingsNozzles() {
 }
 
 addSettingsNozzle();
+
+// --- Products list: collapsed by default behind a count/toggle, since
+// the catalogue can run to dozens or hundreds of rows ---
+(function () {
+  const toggle = document.getElementById('products-toggle');
+  const wrap = document.getElementById('products-table-wrap');
+  if (!toggle || !wrap) return;
+  const collapsedLabel = toggle.textContent;
+  toggle.addEventListener('click', function () {
+    const isHidden = wrap.style.display === 'none';
+    wrap.style.display = isHidden ? '' : 'none';
+    toggle.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+    toggle.textContent = isHidden ? 'Collapse ▲' : collapsedLabel;
+  });
+})();
 </script>
 {% endblock %}

@@ -25,6 +25,7 @@ from models import (
     Nozzle,
     NozzleReset,
     NozzleTesting,
+    OtherIncome,
     Product,
     ProductPurchase,
     ProductRateHistory,
@@ -1293,6 +1294,11 @@ def cash_account_balance(cash_account):
         .filter(ProductPurchase.payment_type == "cash", ProductPurchase.method == "cash")
         .scalar()
     )
+    total_cash_other_income = (
+        db.session.query(func.coalesce(func.sum(OtherIncome.amount), 0))
+        .filter(OtherIncome.method == "cash")
+        .scalar()
+    )
     return round(
         cash_account.opening_balance
         + total_sales
@@ -1307,7 +1313,8 @@ def cash_account_balance(cash_account):
         - total_cash_salaries
         - total_cash_returns
         + total_cash_product_sales
-        - total_cash_product_purchases,
+        - total_cash_product_purchases
+        + total_cash_other_income,
         2,
     )
 
@@ -1432,6 +1439,12 @@ def _cash_daily_net_changes():
         .group_by(ProductPurchase.entry_date)
         .all(),
         sign=-1,
+    )
+    add(
+        db.session.query(OtherIncome.entry_date, func.sum(OtherIncome.amount))
+        .filter(OtherIncome.method == "cash")
+        .group_by(OtherIncome.entry_date)
+        .all()
     )
 
     return changes
@@ -1616,6 +1629,10 @@ def cash_account_ledger_events(cash_account):
     for pp in ProductPurchase.query.filter_by(payment_type="cash", method="cash").all():
         events.append(
             {"kind": "product_purchase", "entry_date": pp.entry_date, "sort_key": (pp.entry_date, pp.recorded_at), "obj": pp, "delta": -(pp.total_cost or 0)}
+        )
+    for oi in OtherIncome.query.filter_by(method="cash").all():
+        events.append(
+            {"kind": "other_income", "entry_date": oi.entry_date, "sort_key": (oi.entry_date, oi.recorded_at), "obj": oi, "delta": oi.amount}
         )
 
     events.sort(key=lambda e: e["sort_key"])
@@ -1952,6 +1969,14 @@ def bank_account_ledger_events(bank_account):
             events.append(
                 {"kind": "product_purchase", "entry_date": pp.entry_date, "sort_key": (pp.entry_date, pp.recorded_at), "obj": pp, "delta": -(pp.total_cost or 0)}
             )
+    # No method == "bank" filter needed - other_income_entries is only ever
+    # populated for method == "bank" rows (bank_account_id is only ever set
+    # that way, see the route), unlike product_sales above which is a
+    # shared backref across both cash and bank rows.
+    for oi in bank_account.other_income_entries:
+        events.append(
+            {"kind": "other_income", "entry_date": oi.entry_date, "sort_key": (oi.entry_date, oi.recorded_at), "obj": oi, "delta": oi.amount}
+        )
 
     events.sort(key=lambda e: e["sort_key"])
     running = 0.0
@@ -1971,8 +1996,8 @@ def bank_account_balance_as_of(bank_account, as_of_date):
     payment_type == "cash", supplier_payments_paid, salary_payments_paid
     net of deduction, sales_returns restricted to method == "bank",
     product_sales restricted to method == "bank", product_purchases
-    restricted to payment_type == "cash") - with entry_date <= as_of_date
-    added to each component.
+    restricted to payment_type == "cash", other_income_entries) - with
+    entry_date <= as_of_date added to each component.
 
     DirectSale never appears here - it's fuel revenue exactly like Sale,
     and neither table ever touches a bank account directly; only BankSale
@@ -2062,6 +2087,15 @@ def bank_account_balance_as_of(bank_account, as_of_date):
         )
         .scalar()
     )
+    # No method == "bank" filter needed in the SQL itself - bank_account_id
+    # is only ever set on an OtherIncome row for method == "bank" (see the
+    # route), exactly as deposits_total/receipts_total above already rely
+    # on for their own bank_account_id filter.
+    other_income_total = (
+        db.session.query(func.coalesce(func.sum(OtherIncome.amount), 0))
+        .filter(OtherIncome.bank_account_id == bank_account.id, OtherIncome.entry_date <= as_of_date)
+        .scalar()
+    )
     # The opening balance is anchored on its own opening_balance_date (or
     # created_at.date() if unset - same fallback _cash_daily_net_changes()
     # uses for the cash account) and only counted once as_of_date has
@@ -2089,7 +2123,8 @@ def bank_account_balance_as_of(bank_account, as_of_date):
         - salaries_total
         - sales_returns_total
         + product_sales_total
-        - product_purchases_total,
+        - product_purchases_total
+        + other_income_total,
         2,
     )
 
