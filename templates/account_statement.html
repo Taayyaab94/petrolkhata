@@ -69,6 +69,7 @@
           {% elif e.kind == "sales_return" %}Sales Return
           {% elif e.kind == "product_sale" %}Non-Fuel Sale
           {% elif e.kind == "product_purchase" %}Product Purchase (Credit)
+          {% elif e.kind == "other_income" %}Other Income
           {% endif %}
         </td>
         <td>
@@ -82,6 +83,8 @@
             {{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }} returned to {{ e.obj.tank.label }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
           {% elif e.kind in ("product_sale", "product_purchase") %}
             {{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
+          {% elif e.kind == "other_income" %}
+            {{ e.obj.description }}
           {% elif e.obj %}
             {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
           {% else %}-{% endif %}

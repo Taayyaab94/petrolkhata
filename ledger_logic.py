@@ -1063,6 +1063,12 @@ def credit_aging(account, as_of_date):
         # defensive guard account_ledger_events() uses for this backref.
         if ps.method == "credit":
             debits.append({"date": ps.entry_date, "amount": ps.amount})
+    for oi in account.other_income_entries:
+        # account_id is only ever set on an OtherIncome row for method ==
+        # "credit" (see OtherIncome's docstring in models.py) - same
+        # defensive guard account_ledger_events() uses for this backref.
+        if oi.method == "credit":
+            debits.append({"date": oi.entry_date, "amount": oi.amount})
 
     credits_total = (
         sum(r.amount for r in account.receipts)
@@ -1215,6 +1221,13 @@ def account_ledger_events(account):
         if ps.method == "credit":
             events.append(
                 {"kind": "product_sale", "entry_date": ps.entry_date, "sort_key": (ps.entry_date, ps.recorded_at), "obj": ps, "delta": ps.amount}
+            )
+    for oi in account.other_income_entries:
+        # account_id is only ever set on an OtherIncome row for method ==
+        # "credit" - same defensive guard as product_sales above.
+        if oi.method == "credit":
+            events.append(
+                {"kind": "other_income", "entry_date": oi.entry_date, "sort_key": (oi.entry_date, oi.recorded_at), "obj": oi, "delta": oi.amount}
             )
     for pp in account.product_purchases:
         if pp.payment_type == "credit":

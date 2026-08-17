@@ -3934,13 +3934,16 @@ def ledger_other_income():
     entry_date = parse_date_param(request.form.get("entry_date"))
     description = request.form.get("description", "").strip()
     amount = request.form.get("amount", type=float)
-    method, bank_account, method_error = resolve_payment_method(request.form)
+    method, bank_account, account, method_error = resolve_return_method(request.form)
 
     if not description:
+        db.session.rollback()
         flash("Please enter a description.", "error")
     elif not amount or amount <= 0:
+        db.session.rollback()
         flash("Amount must be a positive number.", "error")
     elif method_error:
+        db.session.rollback()
         flash(method_error, "error")
     else:
         db.session.add(
@@ -3950,6 +3953,7 @@ def ledger_other_income():
                 amount=amount,
                 method=method,
                 bank_account_id=bank_account.id if bank_account else None,
+                account_id=account.id if account else None,
                 user_id=current_user.id,
             )
         )
@@ -5008,6 +5012,7 @@ _STATEMENT_KIND_LABELS = {
     "sales_return": "Sales Return",
     "product_sale": "Non-Fuel Sale",
     "product_purchase": "Product Purchase (Credit)",
+    "other_income": "Other Income",
 }
 
 
@@ -5054,6 +5059,13 @@ def _statement_event_details(e):
         if obj.deduction_amount:
             text += f" - Rs {obj.deduction_amount:,.2f} deducted against advance"
         return text
+    if e["kind"] == "other_income":
+        # An Other Income row only ever reaches an account's statement when
+        # method == "credit" - account_id is never set otherwise - so
+        # there's no payment-method text to show here, just the
+        # description, mirroring how product_sale/product_purchase's
+        # branch above doesn't show payment method either.
+        return obj.description
     if obj is not None:
         text = f"Via {obj.bank_account.name}" if obj.method == "bank" else "Cash"
         if obj.note:

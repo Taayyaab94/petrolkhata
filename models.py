@@ -343,6 +343,11 @@ class Account(TenantScoped, db.Model):
         product_purchases_credit_total = sum(
             (pp.total_cost or 0) for pp in self.product_purchases if pp.payment_type == "credit"
         )
+        # Other Income recorded "on account" (method == "credit") increases
+        # what this account owes, the same direction as product_sales_credit_total
+        # above - account_id is only ever set on an OtherIncome row for that
+        # method.
+        other_income_credit_total = sum(oi.amount for oi in self.other_income_entries if oi.method == "credit")
         return round(
             self.opening_balance
             + credit_given_total
@@ -353,7 +358,8 @@ class Account(TenantScoped, db.Model):
             - salary_deductions_total
             - sales_returns_total
             + product_sales_credit_total
-            - product_purchases_credit_total,
+            - product_purchases_credit_total
+            + other_income_credit_total,
             2,
         )
 
@@ -696,23 +702,25 @@ class Expense(TenantScoped, db.Model):
 
 
 class OtherIncome(TenantScoped, db.Model):
-    """Income that isn't a product sale and isn't tied to fuel or a
-    customer account - rent received, a profit share from a side
-    business at the site, etc. Deliberately as simple as Expense's
-    mirror image: a free-text description and an amount, paid via cash
-    or bank only - no credit option, since there's no customer account
-    for this money to be owed by."""
+    """Income that isn't a product sale and isn't tied to fuel - rent
+    received, a profit share from a side business at the site, etc.
+    Deliberately as simple as Expense's mirror image: a free-text
+    description and an amount, paid via cash, bank, or "on account" the
+    same way Non-Fuel Product Sales does (e.g. a service performed on
+    credit for a customer)."""
 
     id = db.Column(db.Integer, primary_key=True)
     entry_date = db.Column(db.Date, nullable=False)
     description = db.Column(db.String(200), nullable=False)
     amount = db.Column(db.Float, nullable=False)
-    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank
+    method = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank | credit
     bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
+    account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=True)  # set only when method == "credit"
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
     bank_account = db.relationship("BankAccount", backref="other_income_entries")
+    account = db.relationship("Account", backref="other_income_entries")
     user = db.relationship("User")
 
 
