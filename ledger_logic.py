@@ -491,7 +491,7 @@ def reprice_entries(start, end, apply_changes=False):
 
     changes = {
         "sales": [], "direct_sales": [], "credits": [], "returns": [],
-        "skipped_credits": [], "skipped_sales": [], "skipped_direct_sales": [],
+        "skipped_credits": [],
     }
 
     sales = (
@@ -504,18 +504,6 @@ def reprice_entries(start, end, apply_changes=False):
         fuel = s.nozzle.tank.fuel_type
         new_price = resolve(fuel, s.entry_date)
         new_total = round(s.liters * new_price, 2)
-        if s.price_overridden:
-            # Deliberately priced away from the default at save time (see
-            # Sale.price_overridden's docstring in models.py) - re-pricing
-            # would silently overwrite that discount, so it's left alone
-            # and just reported, mirroring skipped_credits below.
-            changes["skipped_sales"].append({
-                "obj": s, "fuel": fuel.name, "label": s.nozzle.label,
-                "liters": s.liters, "old_price": s.price_per_liter,
-                "new_price": new_price,
-                "old_amount": s.total_amount, "new_amount": s.total_amount,
-            })
-            continue
         if abs(new_price - s.price_per_liter) < 0.0001 and abs(new_total - s.total_amount) < 0.01:
             continue
         changes["sales"].append({
@@ -542,17 +530,6 @@ def reprice_entries(start, end, apply_changes=False):
         fuel = ds.tank.fuel_type
         new_price = resolve(fuel, ds.entry_date)
         new_total = round(ds.liters * new_price, 2)
-        if ds.price_overridden:
-            # Same reasoning as the Sale loop above - a deliberate override
-            # at save time, so it's left alone rather than silently
-            # re-priced.
-            changes["skipped_direct_sales"].append({
-                "obj": ds, "fuel": fuel.name, "label": ds.tank.label,
-                "liters": ds.liters, "old_price": ds.price_per_liter,
-                "new_price": new_price,
-                "old_amount": ds.total_amount, "new_amount": ds.total_amount,
-            })
-            continue
         if abs(new_price - ds.price_per_liter) < 0.0001 and abs(new_total - ds.total_amount) < 0.01:
             continue
         changes["direct_sales"].append({
@@ -791,6 +768,47 @@ def stock_series(tank, dates):
     return series
 
 
+def credit_discounts_for_period(start=None, end=None, fuel_type_id=None, shift_id=None):
+    """Total discretionary discount given via CreditGiven entries between
+    start and end (inclusive) - the gap between what a credit sale was
+    actually billed (amount) and what it would have cost at list price
+    (liters * price_per_liter), for every credit row whose amount doesn't
+    equal that product (the same mismatch signature reprice_entries() uses
+    to detect a deliberately-priced row, see its docstring).
+
+    Positive = a discount (billed less than list price); negative = a
+    premium (billed more). Zero whenever no credit row in range/scope
+    carries an override - i.e. this is 0 for every pump that has never
+    used the discount override, so it's a pure no-op addition for them.
+
+    start/end are None-able: None on either side means unbounded on that
+    side (e.g. start=None, end=None is "all time"), matching how a caller
+    with no date to page against - cash_account_balance() - wants the
+    whole history, not an arbitrary wide range.
+
+    This is what "total sales"/revenue must be reduced by everywhere it's
+    derived from Sale + DirectSale sums: those rows always record fuel at
+    full list price regardless of what a credit customer was actually
+    billed, so without this adjustment cash reconciliation shows phantom
+    cash that was never collected, and revenue/margin figures overstate
+    what was actually earned on a discounted credit sale."""
+    q = CreditGiven.query
+    if start is not None:
+        q = q.filter(CreditGiven.entry_date >= start)
+    if end is not None:
+        q = q.filter(CreditGiven.entry_date <= end)
+    if fuel_type_id is not None:
+        q = q.filter(CreditGiven.fuel_type_id == fuel_type_id)
+    if shift_id is not None:
+        q = q.filter(CreditGiven.shift_id == shift_id)
+    total = 0.0
+    for c in q.all():
+        list_amount = round(c.liters * c.price_per_liter, 2)
+        if abs(c.amount - list_amount) > 0.01:
+            total += (list_amount - c.amount)
+    return round(total, 2)
+
+
 def sales_breakdown_for_date(entry_date, shift_id=None):
     """Total nozzle + direct sales for entry_date, split by how they were
     collected: credit (owed by a customer), bank (reconciled to a bank
@@ -819,6 +837,12 @@ def sales_breakdown_for_date(entry_date, shift_id=None):
         bank_q = bank_q.filter(BankSale.shift_id == shift_id)
 
     total = sale_q.scalar() + direct_sale_q.scalar()
+    # A credit sale billed below list price (see credit_discounts_for_period())
+    # already overstates `total` by the discount - Sale/DirectSale always
+    # record fuel at full list price, with no discount capability of their
+    # own, so without this the cash figure below shows phantom cash that
+    # was never actually collected.
+    total = round(total - credit_discounts_for_period(entry_date, entry_date, shift_id=shift_id), 2)
     credit, bank = credit_q.scalar(), bank_q.scalar()
     cash = round(total - credit - bank, 2)
     return {"total": total, "credit": credit, "bank": bank, "cash": cash}
@@ -1199,6 +1223,18 @@ def fuel_sales_for_date(entry_date):
         d = by_fuel.setdefault(ds.tank.fuel_type.name, {"liters": 0.0, "revenue": 0.0})
         d["liters"] += ds.liters
         d["revenue"] += ds.total_amount
+    # A discounted CreditGiven row (see credit_discounts_for_period()'s
+    # docstring) draws from the SAME fuel Sale/DirectSale already valued at
+    # full list price above - net its discount out of that fuel's revenue
+    # here, since CreditGiven carries its own fuel_type_id and can be
+    # attributed per fuel exactly, unlike the whole-date total elsewhere.
+    for c in CreditGiven.query.filter_by(entry_date=entry_date).all():
+        list_amount = round(c.liters * c.price_per_liter, 2)
+        if abs(c.amount - list_amount) > 0.01:
+            fuel = db.session.get(FuelType, c.fuel_type_id)
+            if fuel is not None:
+                d = by_fuel.setdefault(fuel.name, {"liters": 0.0, "revenue": 0.0})
+                d["revenue"] -= (list_amount - c.amount)
     return by_fuel
 
 
@@ -1302,6 +1338,12 @@ def cash_account_balance(cash_account):
     that bank's balance instead and is excluded here)."""
     total_sales = db.session.query(func.coalesce(func.sum(Sale.total_amount), 0)).scalar()
     total_sales += db.session.query(func.coalesce(func.sum(DirectSale.total_amount), 0)).scalar()
+    # Nets out discretionary discounts on discounted CreditGiven rows - see
+    # credit_discounts_for_period()'s docstring. total_sales otherwise
+    # overstates fuel revenue by whatever a credit customer's bill was
+    # discounted below list price, since Sale/DirectSale always record fuel
+    # at full list price. All-time figure here, so start/end are unbounded.
+    total_sales -= credit_discounts_for_period()
     total_credit = db.session.query(func.coalesce(func.sum(CreditGiven.amount), 0)).scalar()
     total_bank_sales = db.session.query(func.coalesce(func.sum(BankSale.amount), 0)).scalar()
     total_deposits = db.session.query(func.coalesce(func.sum(CashDeposit.amount), 0)).scalar()
@@ -1422,12 +1464,25 @@ def _cash_daily_net_changes():
     bank_sales_by_date = dict(
         db.session.query(BankSale.entry_date, func.sum(BankSale.amount)).group_by(BankSale.entry_date).all()
     )
+    # Per-day discretionary discount on discounted CreditGiven rows - same
+    # mismatch signature credit_discounts_for_period()/reprice_entries() use.
+    # Row-by-row (not a SQL aggregate) since the mismatch check needs each
+    # row's own liters/price/amount, grouped into one dict here instead of
+    # one query per date - same reasoning every other component above uses.
+    discount_by_date = {}
+    for entry_date, liters, price, amount in db.session.query(
+        CreditGiven.entry_date, CreditGiven.liters, CreditGiven.price_per_liter, CreditGiven.amount
+    ).all():
+        list_amount = round(liters * price, 2)
+        if abs(amount - list_amount) > 0.01:
+            discount_by_date[entry_date] = discount_by_date.get(entry_date, 0.0) + (list_amount - amount)
     for entry_date in set(sales_by_date) | set(direct_sales_by_date) | set(credit_by_date) | set(bank_sales_by_date):
         cash_amount = (
             sales_by_date.get(entry_date, 0)
             + direct_sales_by_date.get(entry_date, 0)
             - credit_by_date.get(entry_date, 0)
             - bank_sales_by_date.get(entry_date, 0)
+            - discount_by_date.get(entry_date, 0)
         )
         add([(entry_date, cash_amount)])
 
@@ -2625,7 +2680,10 @@ def daily_margin(entry_date, costs=None):
         .filter(SalesReturn.entry_date == entry_date)
         .scalar()
     )
-    net_revenue = round(revenue - sales_returns_amount, 2)
+    # See credit_discounts_for_period()'s docstring: revenue above is gross
+    # Sale/DirectSale (always list price), so a discounted CreditGiven row
+    # on this date overstates it by the discount unless netted out here.
+    net_revenue = round(revenue - sales_returns_amount - credit_discounts_for_period(entry_date, entry_date), 2)
 
     fuel_cogs, by_fuel = cogs_for_period(entry_date, entry_date)
     fuel_margin = round(net_revenue - fuel_cogs, 2)
@@ -3289,6 +3347,21 @@ def _profit_series_for_window(start, end_date):
     sales_by_day = group_sum(Sale, Sale.total_amount)
     for d, v in group_sum(DirectSale, DirectSale.total_amount).items():
         sales_by_day[d] = sales_by_day.get(d, 0) + v
+    # Net out per-day discretionary discounts on discounted CreditGiven rows
+    # (see credit_discounts_for_period()'s docstring) - sales_by_day above is
+    # gross Sale/DirectSale (always list price), so without this both
+    # profit_series and dashboard_trend_series()'s cash_series (both built
+    # from sales_by_day) would overstate revenue/cash by the discount.
+    # Row-by-row, grouped by date, for the same reason _cash_daily_net_changes()
+    # does this instead of one credit_discounts_for_period() call per day.
+    for entry_date_val, liters, price, amount in (
+        db.session.query(CreditGiven.entry_date, CreditGiven.liters, CreditGiven.price_per_liter, CreditGiven.amount)
+        .filter(CreditGiven.entry_date >= start, CreditGiven.entry_date <= end_date)
+        .all()
+    ):
+        list_amount = round(liters * price, 2)
+        if abs(amount - list_amount) > 0.01:
+            sales_by_day[entry_date_val] = sales_by_day.get(entry_date_val, 0) - (list_amount - amount)
     expenses_by_day = group_sum(Expense, Expense.amount)
     salaries_by_day = group_sum(SalaryPayment, SalaryPayment.gross_amount)
     returns_amount_by_day = group_sum(SalesReturn, SalesReturn.amount)

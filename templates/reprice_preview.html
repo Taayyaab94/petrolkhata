@@ -109,18 +109,6 @@
   ~ "would silently overwrite that discount, so they are not being changed. Review them by hand if any of these "
   ~ "actually should be re-priced."
 ) }}
-{{ skipped_table(
-  preview.skipped_sales, "Left alone - nozzle sales entered at an overridden price", "Nozzle",
-  "These nozzle readings were saved with a deliberately overridden price (not the date's default). Re-pricing "
-  ~ "them would silently overwrite that override, so they are not being changed. Review them by hand if any of "
-  ~ "these actually should be re-priced."
-) }}
-{{ skipped_table(
-  preview.skipped_direct_sales, "Left alone - direct sales entered at an overridden price", "Tank",
-  "These direct sales entries were saved with a deliberately overridden price (not the date's default). "
-  ~ "Re-pricing them would silently overwrite that override, so they are not being changed. Review them by hand "
-  ~ "if any of these actually should be re-priced."
-) }}
 
 {% if preview.count %}
 <div class="panel">

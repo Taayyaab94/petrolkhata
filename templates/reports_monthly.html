@@ -43,6 +43,11 @@
     <div class="sub">Gross revenue less sales returns</div>
   </div>
   <div class="stat-card accent-red">
+    <div class="label">Total Discounts Given</div>
+    <div class="value">Rs {{ "%.2f"|format(total_discounts) }}</div>
+    <div class="sub">Credit sales billed below list price - already netted out of Fuel Revenue, Gross above</div>
+  </div>
+  <div class="stat-card accent-red">
     <div class="label">Less: Cost of Fuel Sold</div>
     <div class="value">Rs {{ "%.2f"|format(cogs) }}</div>
     <div class="sub">Net liters sold &times; avg purchase cost</div>

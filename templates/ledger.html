@@ -209,10 +209,6 @@
                 {% endif %}
                 <input type="number" step="0.01" min="0" id="reading_{{ row.nozzle.id }}" name="reading_{{ row.nozzle.id }}" class="nz-current-input"
                        placeholder="This date's reading" value="{{ row.existing_reading if row.existing_reading is not none else '' }}">
-                <label class="nz-price-manual" title="Override this date's default price for this nozzle only - leave blank to use the default.">Price/L
-                  <input type="number" step="0.01" min="0.01" name="price_{{ row.nozzle.id }}" class="nz-price-input"
-                         placeholder="{{ "%.2f"|format(row.price) }}">
-                </label>
                 <div class="calc-preview" id="calc_{{ row.nozzle.id }}">{% if row.previous_is_auto %}Enter this date's reading{% else %}No entry for the day before - enter both readings{% endif %}</div>
               </div>
               {% endfor %}
@@ -250,12 +246,6 @@
                 {% endfor %}
               </div>
               {% endif %}
-              <div class="form-grid">
-                <label title="Override this date's default price for this fuel type - leave blank to use the default.">Price/L override (optional)
-                  <input type="number" step="0.01" min="0.01" class="direct-price-input" name="price_override"
-                         placeholder="{{ "%.2f"|format(fuel_prices_by_id.get(group.fuel_type.id)) }}">
-                </label>
-              </div>
               <div class="calc-preview">Amount will be calculated automatically</div>
             </div>
             <div style="margin-top:14px;">
@@ -622,16 +612,16 @@
               {% endfor %}
             </select>
           </label>
-          <label>Enter by <span class="hint-sm">use Amount when giving a discount that doesn't cleanly equal litres &times; price</span>
+          <label>Enter by <span class="hint-sm">the other field shows the equivalent - edit it to give a discount</span>
             <select id="credit_entry_mode" name="entry_mode">
               <option value="liters">By Litres</option>
               <option value="amount">By Amount</option>
             </select>
           </label>
-          <label id="credit_liters_label">Liters
+          <label id="credit_liters_label"><span id="credit_liters_label_text">Liters</span>
             <input type="number" step="0.01" min="0.01" name="liters" id="credit_liters" required>
           </label>
-          <label id="credit_amount_label" style="display:none;">Amount (Rs)
+          <label id="credit_amount_label"><span id="credit_amount_label_text">Amount (Rs)</span>
             <input type="number" step="0.01" min="0.01" name="amount" id="credit_amount">
           </label>
           <label>Vehicle number (optional)
@@ -1320,8 +1310,7 @@ function fmtMoney(v) {
 document.querySelectorAll('.nozzle-row').forEach(function (row) {
   const input = row.querySelector('.nz-current-input');
   const preview = row.querySelector('.calc-preview');
-  const defaultPrice = parseFloat(row.dataset.price);
-  const priceInput = row.querySelector('.nz-price-input');
+  const price = parseFloat(row.dataset.price);
   const manualPrev = row.querySelector('.nz-previous-input');
   const existingTesting = parseFloat(row.dataset.testing) || 0;
 
@@ -1331,17 +1320,6 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
       return isNaN(v) ? null : v;
     }
     return parseFloat(row.dataset.last);
-  }
-
-  // Live preview reads whatever is CURRENTLY in the price field - the
-  // override, if one is typed, otherwise the pre-filled default - so it
-  // always matches what the server will actually price the row at.
-  function getPrice() {
-    if (priceInput && priceInput.value !== '') {
-      const v = parseFloat(priceInput.value);
-      if (!isNaN(v) && v > 0) return v;
-    }
-    return defaultPrice;
   }
 
   function update() {
@@ -1363,7 +1341,6 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
     // reports over_by) via sync_sale_testing() once this is saved.
     const testing = Math.min(existingTesting, gross);
     const liters = gross - testing;
-    const price = getPrice();
     const amount = liters * price;
     if (testing > 0) {
       preview.innerHTML = gross.toFixed(2) + ' L &minus; ' + testing.toFixed(2) + ' L testing = ' + liters.toFixed(2) +
@@ -1375,7 +1352,6 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
   }
   input.addEventListener('input', update);
   if (manualPrev) manualPrev.addEventListener('input', update);
-  if (priceInput) priceInput.addEventListener('input', update);
   update();
 });
 
@@ -1384,19 +1360,10 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
 // across that group's field(s) (one combined field, or one per tank) x
 // that fuel's price on the selected date.
 document.querySelectorAll('.fuel-group-body').forEach(function (body) {
-  const defaultPrice = parseFloat(body.dataset.price) || 0;
+  const price = parseFloat(body.dataset.price) || 0;
   const inputs = body.querySelectorAll('.direct-liters-input');
-  const priceInput = body.querySelector('.direct-price-input');
   const preview = body.querySelector('.calc-preview');
   if (!preview) return;
-
-  function getPrice() {
-    if (priceInput && priceInput.value !== '') {
-      const v = parseFloat(priceInput.value);
-      if (!isNaN(v) && v > 0) return v;
-    }
-    return defaultPrice;
-  }
 
   function update() {
     let total = 0;
@@ -1413,13 +1380,11 @@ document.querySelectorAll('.fuel-group-body').forEach(function (body) {
       preview.className = 'calc-preview';
       return;
     }
-    const price = getPrice();
     const amount = total * price;
     preview.innerHTML = total.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
     preview.className = 'calc-preview has-value';
   }
   inputs.forEach(function (inp) { inp.addEventListener('input', update); });
-  if (priceInput) priceInput.addEventListener('input', update);
   update();
 });
 
@@ -1479,69 +1444,81 @@ document.querySelectorAll('[id^="dip_"]').forEach(function (input) {
   update();
 });
 
-// --- Credit-to-customer live calculation - By Litres computes the amount
-// (unchanged from before entry_mode existed); By Amount computes the
-// derived litres instead, previewed as a division rather than made to
-// look like litres * price = amount (that mismatch is the whole point of
-// amount-mode, e.g. a discount, not an error state) ---
+// --- Credit-to-customer live calculation. entry_mode decides which field
+// is primary (what the owner actually typed) - the OTHER field is the
+// computed equivalent, auto-filled on every edit of the primary field but
+// left genuinely editable, so it can be pulled down below (or pushed
+// above) litres * price to record a discretionary discount on this
+// specific credit sale. Editing the equivalent field directly only
+// refreshes the preview - it never gets silently overwritten while the
+// owner is typing into it. ---
 const creditFuelSelect = document.getElementById('credit_fuel_type');
 const creditEntryMode = document.getElementById('credit_entry_mode');
-const creditLitersLabel = document.getElementById('credit_liters_label');
-const creditAmountLabel = document.getElementById('credit_amount_label');
+const creditLitersLabelText = document.getElementById('credit_liters_label_text');
+const creditAmountLabelText = document.getElementById('credit_amount_label_text');
 const creditLiters = document.getElementById('credit_liters');
 const creditAmount = document.getElementById('credit_amount');
 const creditCalc = document.getElementById('credit_calc');
-function updateCreditCalc() {
+
+function creditPrice() {
   const opt = creditFuelSelect.options[creditFuelSelect.selectedIndex];
-  const price = opt ? parseFloat(opt.dataset.price) : NaN;
-  const isAmountMode = creditEntryMode && creditEntryMode.value === 'amount';
+  const p = opt ? parseFloat(opt.dataset.price) : NaN;
+  return isNaN(p) ? NaN : p;
+}
 
-  if (isAmountMode) {
-    const amount = parseFloat(creditAmount.value);
-    if (isNaN(price) || price <= 0 || isNaN(amount)) {
-      creditCalc.textContent = 'Litres (equivalent) will be calculated automatically';
-      creditCalc.className = 'calc-preview';
-      return;
-    }
-    const liters = amount / price;
-    creditCalc.innerHTML = 'Rs ' + fmtMoney(amount) + ' &divide; Rs ' + price.toFixed(2) + '/L = <strong>' +
-      liters.toFixed(2) + ' L equivalent</strong>';
-    creditCalc.className = 'calc-preview has-value';
-    return;
-  }
-
+function creditPreview() {
+  const price = creditPrice();
   const liters = parseFloat(creditLiters.value);
-  if (isNaN(price) || isNaN(liters)) {
-    creditCalc.textContent = 'Amount will be calculated automatically';
+  const amount = parseFloat(creditAmount.value);
+  if (isNaN(price) || price <= 0 || isNaN(liters) || isNaN(amount)) {
+    creditCalc.textContent = 'Enter litres and amount (or choose a fuel) to see a preview';
     creditCalc.className = 'calc-preview';
     return;
   }
-  const amount = liters * price;
-  creditCalc.innerHTML = liters.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+  const listAmount = Math.round(liters * price * 100) / 100;
+  const diff = Math.round((listAmount - amount) * 100) / 100;
+  if (Math.abs(diff) > 0.01) {
+    creditCalc.innerHTML = liters.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + '/L = Rs ' + fmtMoney(listAmount) +
+      ' &rarr; billed <strong>Rs ' + fmtMoney(amount) + '</strong> (' +
+      (diff > 0 ? 'Rs ' + fmtMoney(diff) + ' discount' : 'Rs ' + fmtMoney(-diff) + ' premium') + ')';
+  } else {
+    creditCalc.innerHTML = liters.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + '/L = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+  }
   creditCalc.className = 'calc-preview has-value';
 }
+
+function recomputeCreditEquivalent() {
+  const price = creditPrice();
+  const isAmountMode = creditEntryMode && creditEntryMode.value === 'amount';
+  if (isAmountMode) {
+    const amount = parseFloat(creditAmount.value);
+    creditLiters.value = (isNaN(price) || price <= 0 || isNaN(amount)) ? '' : (Math.round((amount / price) * 100) / 100).toFixed(2);
+  } else {
+    const liters = parseFloat(creditLiters.value);
+    creditAmount.value = (isNaN(price) || isNaN(liters)) ? '' : (Math.round(liters * price * 100) / 100).toFixed(2);
+  }
+  creditPreview();
+}
+
 if (creditFuelSelect) {
-  creditFuelSelect.addEventListener('change', updateCreditCalc);
-  creditLiters.addEventListener('input', updateCreditCalc);
-  if (creditAmount) creditAmount.addEventListener('input', updateCreditCalc);
+  creditFuelSelect.addEventListener('change', recomputeCreditEquivalent);
+  creditLiters.addEventListener('input', function () {
+    if (creditEntryMode && creditEntryMode.value === 'amount') creditPreview();
+    else recomputeCreditEquivalent();
+  });
+  if (creditAmount) creditAmount.addEventListener('input', function () {
+    if (creditEntryMode && creditEntryMode.value === 'amount') recomputeCreditEquivalent();
+    else creditPreview();
+  });
 }
 if (creditEntryMode) {
   creditEntryMode.addEventListener('change', function () {
     const isAmountMode = creditEntryMode.value === 'amount';
-    creditLitersLabel.style.display = isAmountMode ? 'none' : '';
-    creditAmountLabel.style.display = isAmountMode ? '' : 'none';
+    creditLitersLabelText.textContent = isAmountMode ? 'Liters (equivalent - edit to override)' : 'Liters';
+    creditAmountLabelText.textContent = isAmountMode ? 'Amount (Rs)' : 'Amount (Rs) (equivalent - edit to discount)';
     creditLiters.required = !isAmountMode;
     creditAmount.required = isAmountMode;
-    // Clear whichever field just became hidden so a stale value from the
-    // other mode is never submitted alongside the active one - same
-    // problem the product picker's search input solves by clearing its
-    // hidden id on every edit (see initProductPicker above).
-    if (isAmountMode) {
-      creditLiters.value = '';
-    } else {
-      creditAmount.value = '';
-    }
-    updateCreditCalc();
+    recomputeCreditEquivalent();
   });
 }
 

@@ -55,6 +55,7 @@ from ledger_logic import (
     cash_movement_for_date,
     cogs_for_period,
     credit_aging,
+    credit_discounts_for_period,
     credit_given_sparkline,
     customer_concentration,
     daily_margin,
@@ -2981,27 +2982,8 @@ def ledger_readings():
         # Price as of entry_date, not today's current price - so backfilling
         # or correcting an old date re-prices at the rate that was actually
         # in effect then, never at whatever the price happens to be today.
-        default_price = price_on_date(nozzle.fuel_type, entry_date)
-        raw_price = request.form.get(f"price_{nozzle.id}", "").strip()
-        if raw_price:
-            try:
-                price = float(raw_price)
-            except ValueError:
-                errors.append(f"{nozzle.label}: price is not a valid number.")
-                continue
-            if price <= 0:
-                errors.append(f"{nozzle.label}: price must be a positive number.")
-                continue
-        else:
-            price = default_price
+        price = price_on_date(nozzle.fuel_type, entry_date)
         total_amount = round(liters * price, 2)
-        # Decided once, here, while today's default is known with zero
-        # ambiguity - reprice_entries() (ledger_logic.py) reads this flag
-        # forever after rather than re-guessing it from a possibly-corrected
-        # price history. Applies ONLY to this current-date row - never to
-        # the backfilled prior-slot row below, which belongs to a different
-        # date than the one this override was typed for.
-        overridden = abs(price - default_price) > 0.0001
 
         if backfill_prior:
             bf_price = price_on_date(nozzle.fuel_type, backfill_prior["entry_date"])
@@ -3024,10 +3006,6 @@ def ledger_readings():
                     testing_liters=0,
                     price_per_liter=bf_price,
                     total_amount=round(bf_liters * bf_price, 2),
-                    # Never the current row's override - the backfilled row
-                    # is a different date than the one the owner typed a
-                    # price for; it always prices at its OWN date's default.
-                    price_overridden=False,
                     user_id=current_user.id,
                 )
             )
@@ -3039,7 +3017,6 @@ def ledger_readings():
             existing.testing_liters = 0
             existing.price_per_liter = price
             existing.total_amount = total_amount
-            existing.price_overridden = overridden
             existing.user_id = current_user.id
         else:
             db.session.add(
@@ -3053,7 +3030,6 @@ def ledger_readings():
                     testing_liters=0,
                     price_per_liter=price,
                     total_amount=total_amount,
-                    price_overridden=overridden,
                     user_id=current_user.id,
                 )
             )
@@ -3147,27 +3123,7 @@ def ledger_direct_sale():
     # Price as of entry_date, not today's current price - so backfilling
     # or correcting an old date re-prices at the rate that was actually in
     # effect then, exactly like nozzle readings already do.
-    default_price = price_on_date(fuel_type, entry_date)
-    raw_price = request.form.get("price_override", "").strip()
-    price_error = None
-    if raw_price:
-        try:
-            price = float(raw_price)
-        except ValueError:
-            price = None
-            price_error = f"{fuel_type.name}: price is not a valid number."
-        if price is not None and price <= 0:
-            price = None
-            price_error = f"{fuel_type.name}: price must be a positive number."
-    else:
-        price = default_price
-    if price_error:
-        flash(price_error, "error")
-        return redirect(url_for("ledger", date=entry_date, shift=shift.id))
-    # One price/verdict for the whole submission - every DirectSale row it
-    # creates or updates shares the same date and fuel type, so they all
-    # share the same default and the same override outcome.
-    price_overridden = abs(price - default_price) > 0.0001
+    price = price_on_date(fuel_type, entry_date)
     combine = fuel_type.direct_entry_combined and len(tanks) > 1
 
     liters_by_tank_id = {}
@@ -3219,7 +3175,6 @@ def ledger_direct_sale():
             existing.liters = liters
             existing.price_per_liter = price
             existing.total_amount = total_amount
-            existing.price_overridden = price_overridden
             existing.user_id = current_user.id
         else:
             db.session.add(
@@ -3230,7 +3185,6 @@ def ledger_direct_sale():
                     liters=liters,
                     price_per_liter=price,
                     total_amount=total_amount,
-                    price_overridden=price_overridden,
                     user_id=current_user.id,
                 )
             )
@@ -3625,17 +3579,27 @@ def ledger_receipt():
 def ledger_credit():
     """Fuel already sold (see CreditGiven's docstring in models.py) handed
     to a customer on account instead of collected as cash. entry_mode
-    decides which of liters/amount is what the user actually typed and
-    which is derived from it via this date's price:
+    decides which of liters/amount is what the user actually typed
+    (primary) versus its computed equivalent (secondary) - and the
+    secondary side can itself be overridden downward to record a
+    discretionary discount, e.g. lower the litres billed in "By Amount"
+    mode, or lower the amount billed in "By Litres" mode:
 
-    - "liters" (default): liters is entered, amount = liters * price -
-      unchanged from this route's original behaviour.
-    - "amount": amount is entered EXACTLY as typed (never recomputed), and
-      liters is derived from it purely for record-keeping (it doesn't
-      touch stock either way - the Sale already did). This is how a
-      discount that doesn't cleanly equal liters * price gets recorded:
-      the discount lives entirely in the gap between amount and
-      liters * price_per_liter.
+    - "liters" (default): liters is the primary figure. amount defaults to
+      liters * price, but the submitted "amount" field (pre-filled with
+      that default, editable client-side) is taken as authoritative if
+      present - so amount can be reduced below liters * price to bill the
+      customer a negotiated, lower total.
+    - "amount": amount is the primary figure, taken exactly as typed. The
+      submitted "liters" field defaults to amount / price but can be
+      reduced client-side, e.g. to bill the full amount while crediting
+      only part of the litres.
+
+    price_per_liter stored is always this date's default price regardless
+    of mode or override - it's never itself overridden. The discount lives
+    entirely in the gap between amount and liters * price_per_liter, which
+    is also the signature reprice_entries() (ledger_logic.py) uses to
+    detect a deliberately-discounted row and leave it alone.
 
     Fuel type is required in both modes - price_on_date() needs it
     regardless of which direction the calculation runs.
@@ -3666,6 +3630,12 @@ def ledger_credit():
     elif entry_mode == "amount" and (not amount_in or amount_in <= 0):
         db.session.rollback()
         flash("Amount must be a positive number.", "error")
+    elif entry_mode == "liters" and amount_in is not None and amount_in <= 0:
+        db.session.rollback()
+        flash("Amount must be a positive number.", "error")
+    elif entry_mode == "amount" and liters_in is not None and liters_in <= 0:
+        db.session.rollback()
+        flash("Liters must be a positive number.", "error")
     elif entry_mode == "amount" and price_on_date(fuel, entry_date) <= 0:
         db.session.rollback()
         flash("This fuel has no price set yet - please set a price before recording credit by amount.", "error")
@@ -3673,10 +3643,10 @@ def ledger_credit():
         price = price_on_date(fuel, entry_date)
         if entry_mode == "amount":
             amount = amount_in
-            liters = round(amount_in / price, 2)
+            liters = round(liters_in, 2) if liters_in is not None else round(amount_in / price, 2)
         else:
             liters = liters_in
-            amount = round(liters * price, 2)
+            amount = round(amount_in, 2) if amount_in is not None else round(liters * price, 2)
         db.session.add(
             CreditGiven(
                 account_id=customer.id,
@@ -5308,16 +5278,20 @@ def account_entry_credit_edit(entry_id):
         flash("Liters must be a positive number.", "error")
     elif entry_mode == "amount" and (not amount_in or amount_in <= 0):
         flash("Amount must be a positive number.", "error")
+    elif entry_mode == "liters" and amount_in is not None and amount_in <= 0:
+        flash("Amount must be a positive number.", "error")
+    elif entry_mode == "amount" and liters_in is not None and liters_in <= 0:
+        flash("Liters must be a positive number.", "error")
     elif entry_mode == "amount" and price_on_date(fuel, entry_date) <= 0:
         flash("This fuel has no price set yet - please set a price before recording credit by amount.", "error")
     else:
         price = price_on_date(fuel, entry_date)
         if entry_mode == "amount":
             amount = amount_in
-            liters = round(amount_in / price, 2)
+            liters = round(liters_in, 2) if liters_in is not None else round(amount_in / price, 2)
         else:
             liters = liters_in
-            amount = round(liters * price, 2)
+            amount = round(amount_in, 2) if amount_in is not None else round(liters * price, 2)
         entry.entry_date = entry_date
         entry.fuel_type_id = fuel.id
         entry.liters = liters
@@ -5969,6 +5943,14 @@ def _reports_context(selected_date):
     # its Python type) would otherwise render as a bare "0" instead of
     # "0.00", inconsistent with every other row.
     total_sales = sum((s.total_amount for s in sales), 0.0) + sum((d.total_amount for d in direct_sales), 0.0)
+    # Sale/DirectSale always record fuel at full list price with no
+    # discount capability of their own - net out any discretionary discount
+    # given via a CreditGiven row on this date (see
+    # credit_discounts_for_period()'s docstring), or total_sales (and
+    # everything below derived from it - cash_sales, net_cash_flow) would
+    # overstate revenue/cash by the discount.
+    total_discounts = credit_discounts_for_period(selected_date, selected_date)
+    total_sales -= total_discounts
     total_liters = sum((s.liters for s in sales), 0.0) + sum((d.liters for d in direct_sales), 0.0)
     # Testing has no DirectSale equivalent at all (see models.py) - it
     # only ever comes from metered Sale rows.
@@ -6090,6 +6072,7 @@ def _reports_context(selected_date):
 
     return {
         "total_sales": total_sales,
+        "total_discounts": total_discounts,
         "total_liters": total_liters,
         "total_testing_liters": total_testing_liters,
         "by_fuel": by_fuel,
@@ -6386,6 +6369,14 @@ def _reports_monthly_context(start, end):
         .filter(DirectSale.entry_date >= start, DirectSale.entry_date <= end)
         .scalar()
     )
+    # Sale/DirectSale always record fuel at full list price with no
+    # discount capability of their own - net out any discretionary discount
+    # given via a CreditGiven row in this period (see
+    # credit_discounts_for_period()'s docstring), or revenue (and every
+    # figure below derived from it - net_revenue, gross_margin, net_profit)
+    # would overstate what was actually earned on a discounted credit sale.
+    total_discounts = credit_discounts_for_period(start, end)
+    revenue -= total_discounts
     liters_sold = float(
         db.session.query(func.coalesce(func.sum(Sale.liters), 0))
         .filter(Sale.entry_date >= start, Sale.entry_date <= end)
@@ -6484,6 +6475,7 @@ def _reports_monthly_context(start, end):
 
     return {
         "revenue": revenue,
+        "total_discounts": total_discounts,
         "net_revenue": net_revenue,
         "liters_sold": liters_sold,
         "testing_liters": testing_liters,
@@ -6760,6 +6752,22 @@ def reports_trends():
     # and cash_account_balance() already do.
     for d, v in group_sum(DirectSale, DirectSale.total_amount).items():
         sales_by_day[d] = sales_by_day.get(d, 0) + v
+    # Net out per-day discretionary discounts on discounted CreditGiven rows
+    # (see credit_discounts_for_period()'s docstring) - sales_by_day above is
+    # gross Sale/DirectSale (always list price), so without this cash_series,
+    # profit_series, and totals.total_sales (all built from sales_by_day)
+    # would overstate revenue/cash by the discount. Row-by-row, grouped by
+    # date, mirroring dashboard_trend_series()'s own _profit_series_for_window()
+    # fix in ledger_logic.py rather than one credit_discounts_for_period()
+    # call per day.
+    for entry_date_val, liters, price, amount in (
+        db.session.query(CreditGiven.entry_date, CreditGiven.liters, CreditGiven.price_per_liter, CreditGiven.amount)
+        .filter(CreditGiven.entry_date >= start, CreditGiven.entry_date <= end)
+        .all()
+    ):
+        list_amount = round(liters * price, 2)
+        if abs(amount - list_amount) > 0.01:
+            sales_by_day[entry_date_val] = sales_by_day.get(entry_date_val, 0) - (list_amount - amount)
     credit_by_day = group_sum(CreditGiven, CreditGiven.amount)
     payments_by_day = group_sum(Receipt, Receipt.amount)
     expenses_by_day = group_sum(Expense, Expense.amount)
