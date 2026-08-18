@@ -4,83 +4,636 @@
 <div class="page-head">
   <div>
     <h1>Dashboard</h1>
-    <div class="subtitle">A quick read-only snapshot. Everything here comes from today's ledger entries.</div>
+    <div class="subtitle">A quick read-only snapshot for the selected date.</div>
+    <div class="subtitle">{{ freshness_text }}</div>
   </div>
-  <a href="{{ url_for('ledger') }}" class="btn">Open Ledger &rarr;</a>
+  <form method="get" class="date-picker-form">
+    <a href="{{ url_for('dashboard', date=prev_date.isoformat()) }}" class="btn btn-ghost btn-sm" aria-label="Previous day">&lsaquo;</a>
+    <label class="date-picker-label">Date
+      <input type="date" name="date" value="{{ selected_date.isoformat() }}" max="{{ today.isoformat() }}" onchange="this.form.submit()">
+    </label>
+    {% if next_date %}
+    <a href="{{ url_for('dashboard', date=next_date.isoformat()) }}" class="btn btn-ghost btn-sm" aria-label="Next day">&rsaquo;</a>
+    {% endif %}
+    <span class="hint-sm dash-keyboard-hint">Use &larr; &rarr; to change date</span>
+    <a href="{{ url_for('dashboard') }}" class="btn btn-ghost btn-sm">Today</a>
+    <a href="{{ url_for('dashboard', date=yesterday_date.isoformat()) }}" class="btn btn-ghost btn-sm">Yesterday</a>
+    <a href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}" class="btn btn-ghost btn-sm">This month &rarr;</a>
+    <button type="button" id="dash-reset-layout" class="btn btn-ghost btn-sm">Reset layout</button>
+    <a href="{{ url_for('ledger') }}" class="btn">Open Ledger &rarr;</a>
+  </form>
 </div>
 
-<div class="stat-row">
-  <div class="stat-card accent-brand">
-    <div class="label">Today's Sales</div>
-    <div class="value">Rs {{ "%.2f"|format(today_total) }}</div>
-    <div class="sub">{{ today_sale_count }} nozzle reading(s) &middot; {{ "%.2f"|format(today_liters) }} L</div>
-  </div>
+<div class="dash-layout{{ '' if current_user.is_owner else ' no-rail' }}" data-user-id="{{ current_user.id }}">
 
   {% if current_user.is_owner %}
-  <div class="stat-card accent-red">
-    <div class="label">Today's Credit Given</div>
-    <div class="value">Rs {{ "%.2f"|format(today_credit_given) }}</div>
-  </div>
-  <div class="stat-card accent-red">
-    <div class="label">Today's Expenses</div>
-    <div class="value">Rs {{ "%.2f"|format(today_expenses) }}</div>
-  </div>
-  <div class="stat-card">
-    <div class="label">Outstanding Receivables (Owed To You)</div>
-    <div class="value">Rs {{ "%.2f"|format(outstanding_credit) }}</div>
-  </div>
-  <div class="stat-card">
-    <div class="label">Outstanding Payables (You Owe)</div>
-    <div class="value">Rs {{ "%.2f"|format(outstanding_supplier) }}</div>
-  </div>
-  <div class="stat-card accent-green">
-    <div class="label">Cash in Hand</div>
-    <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
+  <div class="dash-rail">
+    <section class="panel">
+      <div class="panel-head"><h3>At a Glance</h3></div>
+      <div class="stat-row">
+        {% for item in kpi_rail %}
+        <div class="stat-card">
+          {% if item.href %}
+          <a class="stat-link" href="{{ item.href }}">
+            <div class="label">{{ item.label }}</div>
+            <div class="value">{{ item.value }}</div>
+          </a>
+          {% else %}
+          <div class="label">{{ item.label }}</div>
+          <div class="value">{{ item.value }}</div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </section>
   </div>
   {% endif %}
-</div>
 
-{% if current_user.is_owner and bank_accounts %}
-<div class="panel">
-  <div class="panel-head"><h3>Bank Balances</h3></div>
-  <div class="table-wrap">
-  <table class="table">
-    <thead><tr><th>Bank</th><th>Balance (Rs)</th></tr></thead>
-    <tbody>
-      {% for b in bank_accounts %}
-      <tr>
-        <td>{{ b.name }}</td>
-        <td>{{ "%.2f"|format(b.balance) }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="dash-main" id="dash-main">
+
+    {% if current_user.is_owner %}
+    <section class="panel dash-card" data-card="completeness" id="card-completeness">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-completeness"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Day Completeness</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-completeness">
+        {% if completeness %}
+          {% for item in completeness %}<span class="badge badge-low">{{ item.message }}</span> {% endfor %}
+        {% else %}
+          <span class="badge badge-ok">Day looks complete</span>
+        {% endif %}
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- ============================================================ A ==== -->
+    <section class="panel dash-card" data-card="six-numbers" id="card-six-numbers">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-six-numbers"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Summary</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-six-numbers">
+      <div class="stat-row">
+        <div class="stat-card accent-brand">
+          <a class="stat-link" href="{{ url_for('reports', date=selected_date.isoformat()) }}">
+            <div class="label">Sales</div>
+            <div class="value">Rs {{ "%.2f"|format(sales_total) }}</div>
+            <div class="sub">{{ sale_count }} nozzle reading(s) &middot; {{ "%.2f"|format(total_liters) }} L</div>
+            {% if sales_spark %}<div class="stat-spark">{{ sales_spark|safe }}</div>{% endif %}
+          </a>
+        </div>
+
+        {% if current_user.is_owner %}
+        <div class="stat-card {{ 'accent-green' if margin.total_margin >= 0 else 'accent-red' }}">
+          <a class="stat-link" href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}">
+            <div class="label">Total Margin</div>
+            <div class="value">Rs {{ "%.2f"|format(margin.total_margin) }}</div>
+            <div class="sub">Fuel + products + other income</div>
+            {% if margin_spark %}<div class="stat-spark">{{ margin_spark|safe }}</div>{% endif %}
+          </a>
+        </div>
+        <div class="stat-card accent-green">
+          <a class="stat-link" href="{{ url_for('cash_account_detail') }}">
+            <div class="label">Cash in Hand</div>
+            <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
+            {% if cash_spark %}<div class="stat-spark">{{ cash_spark|safe }}</div>{% endif %}
+          </a>
+        </div>
+        <div class="stat-card accent-red">
+          <a class="stat-link" href="{{ url_for('reports', date=selected_date.isoformat()) }}">
+            <div class="label">Credit Given</div>
+            <div class="value">Rs {{ "%.2f"|format(credit_given_total) }}</div>
+            <div class="sub">{% if credit_given_pct is not none %}{{ "%.1f"|format(credit_given_pct) }}% of sales{% else %}no sales today{% endif %}</div>
+            {% if credit_spark %}<div class="stat-spark">{{ credit_spark|safe }}</div>{% endif %}
+          </a>
+        </div>
+        <div class="stat-card">
+          <a class="stat-link" href="{{ url_for('accounts') }}">
+            <div class="label">Receivables</div>
+            <div class="value">Rs {{ "%.2f"|format(aging.total) }}</div>
+            <div class="sub">{{ aging.account_count }} account(s) owe you</div>
+          </a>
+        </div>
+        <div class="stat-card">
+          <a class="stat-link" href="{{ url_for('inventory') }}">
+            <div class="label">Stock Value</div>
+            <div class="value">Rs {{ "%.2f"|format(stock_value_total) }}</div>
+            <div class="sub">{{ "%.2f"|format(stock_liters_total) }} L across {{ tank_rows|length }} tank(s)</div>
+          </a>
+        </div>
+        {% endif %}
+      </div>
+      </div>
+    </section>
+
+    <!-- ==================================================== F (Phase 3) === -->
+    {% if current_user.is_owner %}
+    <section class="panel dash-card" data-card="needs-attention" id="card-needs-attention">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-needs-attention"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Needs Attention</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-needs-attention">
+        {% if attention_items %}
+        <ul class="attention-list">
+          {% for item in attention_items %}
+          <li class="attention-row">
+            <span class="badge {{ 'badge-low' if item.severity == 'critical' else ('badge-warn' if item.severity == 'warning' else '') }}">{{ item.severity }}</span>
+            {% if item.url %}<a href="{{ item.url }}" class="attention-title">{{ item.title }}</a>{% else %}<span class="attention-title">{{ item.title }}</span>{% endif %}
+            <span class="attention-detail">{{ item.detail }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <span class="badge badge-ok">Nothing needs attention</span>
+        {% endif %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if current_user.is_owner and bank_accounts %}
+    <section class="panel dash-card" data-card="bank-balances" id="card-bank-balances">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-bank-balances"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Bank Balances</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-bank-balances">
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Bank</th><th>Balance (Rs)</th></tr></thead>
+        <tbody>
+          {% for b in bank_accounts %}
+          <tr>
+            <td>{{ b.name }}</td>
+            <td>{{ "%.2f"|format(bank_balances_by_id[b.id]) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- ============================================================ B ==== -->
+    <section class="panel dash-card" data-card="fuel-rates" id="card-fuel-rates">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-fuel-rates"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Fuel Rates</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-fuel-rates">
+      <div class="stat-row">
+        {% for card in fuel_rate_cards %}
+        <div class="stat-card">
+          <div class="label">{{ card.fuel_type.name }}</div>
+          <div class="value">Rs {{ "%.2f"|format(card.rate) }}</div>
+          <div class="sub">{%- if card.rate_age_days is none -%}
+            no rate history
+          {%- elif card.rate_age_days == 0 -%}
+            changed today
+          {%- elif card.rate_age_days == 1 -%}
+            changed yesterday
+          {%- else -%}
+            changed {{ card.rate_age_days }} days ago
+          {%- endif %}</div>
+          <div class="sub">{{ "%.2f"|format(card.liters) }} L &middot; Rs {{ "%.2f"|format(card.amount) }}</div>
+          <div class="sub">{% if card.margin_per_liter is not none %}Rs {{ "%.2f"|format(card.margin_per_liter) }}/L margin{% else %}no cost history{% endif %}</div>
+        </div>
+        {% endfor %}
+      </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ C ==== -->
+    <section class="panel dash-card" data-card="tanks" id="card-tanks">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-tanks"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Tanks &amp; Days of Stock</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-tanks">
+      <div class="tank-grid">
+        {% for row in tank_rows %}
+        {% set raw_width = row.fill_pct if row.fill_pct is not none else 0 %}
+        {% set bar_width = [[raw_width, 100]|min, 0]|max %}
+        {% set bar_class = 'neg' if (row.over_capacity or row.negative or (row.fill_pct is not none and row.fill_pct <= 20)) else ('warn' if (row.fill_pct is none or row.fill_pct <= 40) else 'pos') %}
+        <div class="tank-card">
+          <a class="stat-link tank-card-link" href="{{ url_for('inventory') }}">
+            <div class="tank-card-head">
+              <strong>{{ row.tank.label }}</strong>
+              {% if row.over_capacity %}<span class="badge badge-low">OVER CAPACITY</span>
+              {% elif row.negative %}<span class="badge badge-low">NEGATIVE STOCK</span>
+              {% elif row.is_low %}<span class="badge badge-low">LOW STOCK</span>
+              {% else %}<span class="badge badge-ok">OK</span>{% endif %}
+            </div>
+            <div class="tank-fill-track">
+              <div class="tank-fill-bar {{ bar_class }}" style="width: {{ bar_width }}%;"></div>
+            </div>
+            <div class="sub">{% if row.fill_pct is not none %}{{ "%.1f"|format(row.fill_pct) }}%{% else %}-{% endif %} &middot; {{ "%.2f"|format(row.stock) }} / {{ "%.2f"|format(row.capacity) }} L</div>
+            <div class="sub">{% if row.days_of_stock is not none %}{{ "%.1f"|format(row.days_of_stock) }} days of cover{% else %}no recent sales rate{% endif %}</div>
+            <div class="sub">{% if row.reorder_on %}Reorder by {{ row.reorder_on.strftime('%d %b %Y') }}{% else %}no reorder projection{% endif %}</div>
+          </a>
+        </div>
+        {% endfor %}
+      </div>
+      </div>
+    </section>
+
+    {% if low_stock %}
+    <div class="flash flash-error">
+      Low stock warning: {{ low_stock|map(attribute='tank')|map(attribute='label')|join(', ') }} - log a Fuel Purchase on the Ledger screen.
+    </div>
+    {% endif %}
+
+    {% if current_user.is_owner %}
+
+    {% if dip_variance.dip_count %}
+    <section class="panel dash-card" data-card="dip-variance" id="card-dip-variance">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-dip-variance"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Dip Variance - {{ selected_date.strftime('%d %b %Y') }}</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-dip-variance">
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Tank</th><th>Dip (L)</th><th>Book Stock (L)</th><th>Variance (L)</th><th>Variance (Rs)</th></tr></thead>
+        <tbody>
+          {% for row in dip_variance.rows %}
+          <tr class="{{ 'row-low' if row.variance_liters < 0 else '' }}">
+            <td>{{ row.tank.label }}</td>
+            <td>{{ "%.2f"|format(row.dip.dip_liters) }}</td>
+            <td>{{ "%.2f"|format(row.dip.dip_liters - row.variance_liters) }}</td>
+            <td>{{ "%.2f"|format(row.variance_liters) }}</td>
+            <td>{{ "%.2f"|format(row.variance_value) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr><td colspan="3">Total</td><td>{{ "%.2f"|format(dip_variance.total_liters) }}</td><td>{{ "%.2f"|format(dip_variance.total_value) }}</td></tr>
+        </tfoot>
+      </table>
+      </div>
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- ============================================================ D ==== -->
+    <section class="panel dash-card" data-card="cash-reconciliation" id="card-cash-reconciliation">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-cash-reconciliation"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Cash Reconciliation - {{ selected_date.strftime('%d %b %Y') }}</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-cash-reconciliation">
+      <div class="table-wrap">
+      <table class="table">
+        <tbody>
+          <tr class="recon-anchor"><td>Opening cash</td><td>Rs {{ "%.2f"|format(cash_movement.opening) }}</td></tr>
+          {% for row in cash_movement.inflows %}
+          <tr><td>+ {{ row.label }}</td><td>Rs {{ "%.2f"|format(row.amount) }}</td></tr>
+          {% endfor %}
+          {% for row in cash_movement.outflows %}
+          <tr><td>&minus; {{ row.label }}</td><td>Rs {{ "%.2f"|format(row.amount) }}</td></tr>
+          {% endfor %}
+          <tr class="recon-anchor"><td>Closing cash</td><td>Rs {{ "%.2f"|format(cash_movement.closing) }}</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="recon-formula">
+        Opening (Rs {{ "%.2f"|format(cash_movement.opening) }}) + Money in (Rs {{ "%.2f"|format(cash_movement.total_in) }}) &minus; Money out (Rs {{ "%.2f"|format(cash_movement.total_out) }}) = Closing (Rs {{ "%.2f"|format(cash_movement.closing) }})
+      </div>
+      </div>
+    </section>
+
+    <!-- shift scorecard - carried over from Phase 1 (spec section 0) --- -->
+    <section class="panel dash-card" data-card="shift-scorecard" id="card-shift-scorecard">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-shift-scorecard"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Shift Scorecard - {{ selected_date.strftime('%d %b %Y') }}</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-shift-scorecard">
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Shift</th><th>Expected Cash</th><th>Counted</th><th>Variance</th><th>Attendant</th></tr></thead>
+        <tbody>
+          {% for row in handover_rows %}
+          <tr class="{{ 'row-low' if row.variance is not none and row.variance < -1 else '' }}">
+            <td>{{ row.shift.name }}</td>
+            <td>{{ "%.2f"|format(row.expected) }}</td>
+            <td>{{ "%.2f"|format(row.declared) if row.declared is not none else "-" }}</td>
+            <td>
+              {% if row.variance is none %}<span class="badge">Not reconciled</span>
+              {% elif row.variance < -1 %}<span class="badge badge-low">Short {{ "%.2f"|format(-row.variance) }}</span>
+              {% elif row.variance > 1 %}<span class="badge badge-warn">Over {{ "%.2f"|format(row.variance) }}</span>
+              {% else %}<span class="badge badge-ok">Matches</span>{% endif %}
+            </td>
+            <td>{{ row.handover.attendant.name if row.handover and row.handover.attendant else "-" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      <p class="hint">Record handovers on the Ledger. A variance is a check on the register, not a transaction - it doesn't change any balance on its own.</p>
+      </div>
+    </section>
+
+    <section class="panel dash-card" data-card="revenue-mix" id="card-revenue-mix">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-revenue-mix"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Revenue Mix</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-revenue-mix">
+        <div class="chart-wrap donut-wrap">{{ revenue_mix_donut|safe }}</div>
+      </div>
+    </section>
+
+    <!-- ============================================================ E ==== -->
+    <section class="panel dash-card" data-card="aging" id="card-aging">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-aging"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Receivables Aging</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-aging">
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Bucket</th><th>Amount (Rs)</th></tr></thead>
+        <tbody>
+          <tr><td>0-30 days</td><td>{{ "%.2f"|format(aging.buckets['0-30']) }}</td></tr>
+          <tr><td>31-60 days</td><td>{{ "%.2f"|format(aging.buckets['31-60']) }}</td></tr>
+          <tr><td>61-90 days</td><td>{{ "%.2f"|format(aging.buckets['61-90']) }}</td></tr>
+          <tr><td>90+ days</td><td>{{ "%.2f"|format(aging.buckets['90+']) }}</td></tr>
+        </tbody>
+        <tfoot><tr><td>Total</td><td>{{ "%.2f"|format(aging.total) }}</td></tr></tfoot>
+      </table>
+      </div>
+      {% if concentration.top %}
+      <div class="table-wrap concentration-block">
+        <p class="hint">
+          {% if concentration.is_concentrated %}
+          <span class="badge badge-warn">Concentrated</span> Top 3 customers hold {{ "%.1f"|format(concentration.top3_share_pct) }}% of receivables.
+          {% else %}
+          Top 3 customers hold {{ "%.1f"|format(concentration.top3_share_pct) }}% of receivables - not concentrated.
+          {% endif %}
+        </p>
+        <table class="table">
+          <thead><tr><th>Customer</th><th>Outstanding (Rs)</th><th>Share</th></tr></thead>
+          <tbody>
+            {% for row in concentration.top %}
+            <tr>
+              <td><a href="{{ url_for('account_detail', account_id=row.account.id) }}">{{ row.account.name }}</a></td>
+              <td>{{ "%.2f"|format(row.balance) }}</td>
+              <td>{{ "%.1f"|format(row.share_pct) if row.share_pct is not none else "-" }}%</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+      </div>
+    </section>
+
+    <section class="panel dash-card" data-card="chase-list" id="card-chase-list">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-chase-list"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Chase List</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-chase-list">
+        {% if aging.chase_list %}
+        <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>Account</th><th>Outstanding (Rs)</th><th>Oldest (days)</th></tr></thead>
+          <tbody>
+            {% for entry in aging.chase_list %}
+            <tr>
+              <td><a href="{{ url_for('account_detail', account_id=entry.account.id) }}">{{ entry.account.name }}</a></td>
+              <td>{{ "%.2f"|format(entry.outstanding) }}</td>
+              <td>{{ entry.oldest_days if entry.oldest_days is not none else "-" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        </div>
+        {% else %}
+        <span class="badge badge-ok">Nothing to chase</span>
+        {% endif %}
+      </div>
+    </section>
+
+    <!-- ==================================================== H (Phase 3) === -->
+    <section class="panel dash-card" data-card="mtd-pace" id="card-mtd-pace">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-mtd-pace"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>This Month So Far</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-mtd-pace">
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="label">MTD Revenue</div>
+          <div class="value">Rs {{ "%.2f"|format(pace.mtd_revenue) }}</div>
+          <div class="sub">Rs {{ "%.2f"|format(pace.prior_mtd_revenue) }} at day {{ pace.days_elapsed }} last month{% if pace.revenue_delta_pct is not none %} &middot; {{ "%+.1f"|format(pace.revenue_delta_pct) }}%{% endif %}</div>
+        </div>
+        <div class="stat-card {{ 'accent-green' if pace.ahead else 'accent-red' }}">
+          <div class="label">MTD Profit</div>
+          <div class="value">Rs {{ "%.2f"|format(pace.mtd_profit) }}</div>
+          <div class="sub">Rs {{ "%.2f"|format(pace.prior_mtd_profit) }} at day {{ pace.days_elapsed }} last month{% if pace.profit_delta_pct is not none %} &middot; {{ "%+.1f"|format(pace.profit_delta_pct) }}%{% endif %}</div>
+          {% if pace.profit_delta_pct is not none %}
+          <span class="badge {{ 'badge-ok' if pace.ahead else 'badge-low' }}">{{ 'Ahead' if pace.ahead else 'Behind' }} of last month's pace</span>
+          {% endif %}
+        </div>
+        <div class="stat-card">
+          <div class="label">Projected Revenue</div>
+          <div class="value">Rs {{ "%.2f"|format(pace.projected_revenue) }}</div>
+          <div class="sub">{{ pace.days_elapsed }} of {{ pace.days_in_month }} days elapsed, straight-line</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">Projected Profit</div>
+          <div class="value">Rs {{ "%.2f"|format(pace.projected_profit) }}</div>
+          <div class="sub">Last month's full total: Rs {{ "%.2f"|format(pace.prior_full_profit) }}</div>
+        </div>
+      </div>
+      <div class="recon-formula">
+        Break-even (based on the last {{ break_even.lookback_days }} days of expenses and salaries): daily fixed cost Rs {{ "%.2f"|format(break_even.daily_fixed_cost) }}
+        {% if break_even.margin_per_liter is none %}
+        &divide; no fuel margin data for today - break-even litres can't be shown.
+        {% elif break_even.margin_per_liter <= 0 %}
+        &divide; margin per litre is Rs {{ "%.2f"|format(break_even.margin_per_liter) }} (zero or negative) - selling more fuel today would lose more money, so a break-even litre figure isn't meaningful.
+        {% else %}
+        &divide; Rs {{ "%.2f"|format(break_even.margin_per_liter) }} margin/L = {{ "%.1f"|format(break_even.break_even_liters) }} L needed today.
+        Actual: {{ "%.1f"|format(break_even.actual_liters) }} L
+        ({{ "%+.1f"|format(break_even.surplus_liters) }} L {{ 'surplus' if break_even.surplus_liters >= 0 else 'shortfall' }}).
+        {% endif %}
+      </div>
+      </div>
+    </section>
+
+    {% if dead_stock_rows %}
+    <section class="panel dash-card" data-card="dead-stock" id="card-dead-stock">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-dead-stock"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Dead Stock</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-dead-stock">
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Product</th><th>Stock on Hand</th><th>Days Since Last Sale</th><th>Value Tied Up (Rs)</th></tr></thead>
+        <tbody>
+          {% for row in dead_stock_rows %}
+          <tr>
+            <td>{{ row.product.label }}</td>
+            <td>{{ "%.2f"|format(row.stock) }}</td>
+            <td>{{ row.days_since_last_sale if row.days_since_last_sale is not none else "never sold" }}</td>
+            <td>{{ "%.2f"|format(row.value) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot><tr><td colspan="3">Cash tied up in dead stock</td><td>{{ "%.2f"|format(dead_stock_total) }}</td></tr></tfoot>
+      </table>
+      </div>
+      </div>
+    </section>
+    {% endif %}
+
+    <section class="panel dash-card" data-card="nozzle-throughput" id="card-nozzle-throughput">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-nozzle-throughput"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Nozzle Throughput - Last {{ nozzle_throughput.days }} Days</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-nozzle-throughput">
+      {% if nozzle_throughput.direct_entry_fuel_types %}
+      <p class="hint">{{ nozzle_throughput.direct_entry_fuel_types|join(', ') }} {{ 'is' if nozzle_throughput.direct_entry_fuel_types|length == 1 else 'are' }} on direct entry - no nozzle data to show for {{ 'it' if nozzle_throughput.direct_entry_fuel_types|length == 1 else 'them' }}.</p>
+      {% endif %}
+      {% if nozzle_throughput.rows %}
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Nozzle</th><th>Fuel</th><th>Litres</th><th>Litres / Day</th><th>Share of Dispenser</th><th></th></tr></thead>
+        <tbody>
+          {% for row in nozzle_throughput.rows %}
+          <tr class="{{ 'row-low' if row.underperforming else '' }}">
+            <td>{{ row.nozzle.label }}</td>
+            <td>{{ row.fuel_type.name }}</td>
+            <td>{{ "%.2f"|format(row.liters) }}</td>
+            <td>{{ "%.2f"|format(row.liters_per_day) }}</td>
+            <td>{{ "%.1f"|format(row.share * 100) if row.share is not none else "-" }}%</td>
+            <td>{% if row.underperforming %}<span class="badge">Underperforming</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% else %}
+      <span class="badge">No meter-mode nozzles to show</span>
+      {% endif %}
+      </div>
+    </section>
+
+    {% if payables %}
+    <section class="panel dash-card" data-card="payables-schedule" id="card-payables-schedule">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-payables-schedule"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>Payables Schedule</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-payables-schedule">
+      <p class="hint">Aged by the oldest credit purchase on file for each supplier - not a FIFO settlement walk (payments aren't matched to individual invoices in this ledger), so treat "days outstanding" as an honest approximation.</p>
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Supplier</th><th>Amount Owed (Rs)</th><th>Oldest Credit Purchase</th><th>Days Outstanding</th></tr></thead>
+        <tbody>
+          {% for row in payables %}
+          <tr>
+            <td><a href="{{ url_for('account_detail', account_id=row.account.id) }}">{{ row.account.name }}</a></td>
+            <td>{{ "%.2f"|format(row.amount_owed) }}</td>
+            <td>{{ row.oldest_purchase_date.strftime('%d %b %Y') if row.oldest_purchase_date else "-" }}</td>
+            <td>{{ row.days_outstanding if row.days_outstanding is not none else "-" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- ============================================================ G ==== -->
+    <section class="panel dash-card" data-card="trend-profit" id="card-trend-profit">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-trend-profit"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>30-Day Profit Trend</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+        <label class="chart-control">
+          <input type="checkbox" id="compare-toggle" class="chart-control-input">
+          <span>Compare to previous period</span>
+        </label>
+      </div>
+      <div class="card-body" id="card-body-trend-profit">
+        <div class="chart-wrap" data-chart-role="profit">{{ profit_chart|safe }}</div>
+      </div>
+    </section>
+    <section class="panel dash-card" data-card="trend-cash-credit" id="card-trend-cash-credit">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-trend-cash-credit"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>30-Day Cash vs Credit</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+      </div>
+      <div class="card-body" id="card-body-trend-cash-credit">
+        <div class="chart-wrap">{{ cash_credit_chart|safe }}</div>
+      </div>
+    </section>
+
+    {% if fuel_liters_chart %}
+    <section class="panel dash-card" data-card="trend-fuel" id="card-trend-fuel">
+      <div class="panel-head">
+        <button type="button" class="card-toggle" aria-expanded="true" aria-controls="card-body-trend-fuel"
+                title="Drag to reorder, or focus and press Alt+Up / Alt+Down">
+          <h3>30-Day Fuel Sold</h3><span class="chevron" aria-hidden="true">&#9662;</span>
+        </button>
+        <div class="unit-toggle" role="group" aria-label="Units">
+          <button type="button" class="unit-toggle-btn" data-unit="liters" aria-pressed="true">Litres</button>
+          <button type="button" class="unit-toggle-btn" data-unit="rupees" aria-pressed="false">Rupees</button>
+        </div>
+      </div>
+      <div class="card-body" id="card-body-trend-fuel">
+        <div class="chart-wrap" data-unit-view="liters">{{ fuel_liters_chart|safe }}</div>
+        <div class="chart-wrap" data-unit-view="rupees" style="display:none">{{ fuel_amount_chart|safe }}</div>
+      </div>
+    </section>
+    {% endif %}
+
+    {% endif %}
   </div>
 </div>
-{% endif %}
 
-<div class="panel">
-  <div class="panel-head"><h3>Stock Levels</h3></div>
-  <div class="table-wrap">
-  <table class="table">
-    <thead><tr><th>Tank</th><th>Fuel</th><th>Stock (L)</th><th>Status</th></tr></thead>
-    <tbody>
-      {% for row in tank_rows %}
-      <tr class="{{ 'row-low' if row.stock <= row.tank.low_stock_threshold else '' }}">
-        <td>{{ row.tank.label }}</td>
-        <td>{{ row.tank.fuel_type.name }}</td>
-        <td>{{ "%.2f"|format(row.stock) }}</td>
-        <td>{% if row.stock <= row.tank.low_stock_threshold %}<span class="badge badge-low">LOW STOCK</span>{% else %}<span class="badge badge-ok">OK</span>{% endif %}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  </div>
-</div>
-
-{% if low_stock %}
-<div class="flash flash-error">
-  Low stock warning: {{ low_stock|map(attribute='tank')|map(attribute='label')|join(', ') }} - log a Fuel Purchase on the Ledger screen.
-</div>
-{% endif %}
+<script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>
 {% endblock %}

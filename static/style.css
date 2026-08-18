@@ -1,36 +1,77 @@
 /* =========================================================================
    Petrol Khata - design tokens
-   Warm neutral surfaces, near-black ink, a single deep-blue accent, colour
-   reserved for money direction (green = in our favour, red = against,
-   amber = needs attention). Both themes fall out of the same variable
-   names via prefers-color-scheme, so component rules below never branch
-   on theme - they just read the current value of a token.
+   Charcoal grounds, gold as the brand/interface colour, electric green
+   reserved EXCLUSIVELY for money in our favour. Colour still carries
+   meaning first (green = in our favour, red = against, orange = needs
+   attention) - gold carries no prior financial meaning in this app, so it
+   is free to take on the interactive role (links, primary buttons, focus
+   rings, active nav) without overloading a financial signal. See "the
+   money keeps the colour, the interface takes the metal" in the design
+   spec this file implements.
+
+   Dark is the unconditional default (:root). Light is an opt-in variant
+   selected by [data-theme="light"] on <html>, toggled by the control in
+   the sidebar user block (base.html) and applied before first paint by
+   the inline script in each page's <head> - see that script for why it
+   has to be inline and synchronous. There is deliberately NO
+   prefers-color-scheme media query: the OS preference no longer selects
+   the theme, only the explicit toggle (persisted to localStorage) does.
+   Component rules below never branch on theme - they just read the
+   current value of a token. --chart-1..6 are a separate categorical ramp
+   for SVG chart series (charts.py / app.py / ledger_logic.py), distinct
+   from the semantic tokens above, though two of the six intentionally
+   reuse the pos/neg hues so "cash" and "credit/expense" series still read
+   as the same colours they mean everywhere else. --accent-ink and
+   --neg-ink are the text colours for the two places a semantic colour is
+   used as a SOLID fill with text on top (the primary button, and the
+   danger button's hover state) - both accent and neg swap between a
+   bright dark-mode value and a dark light-mode value, so a fixed
+   white/black text colour would fail contrast in one theme or the other.
    ========================================================================= */
 
-:root {
-  --bg: #fafaf9;
-  --surface: #ffffff;
-  --surface-2: #f5f5f4;
-  --border: #e7e5e4;
-  --border-strong: #d6d3d1;
+:root {                      /* DARK - the default, unconditional */
+  color-scheme: dark;
 
-  --ink: #1c1917;
-  --muted: #78716c;
-  --faint: #a8a29e;
+  --bg: #101211;
+  --surface: #181B1A;
+  --surface-2: #1F2322;
+  --border: #262B29;
+  --border-strong: #38403D;
 
-  --accent: #1e3a8a;
-  --accent-soft: #eff6ff;
-  --accent-glow: rgba(30, 58, 138, 0.16);
+  --ink: #ECF1EE;
+  --muted: #99A5A0;
+  --faint: #808C87;           /* spec suggested #6B7772; retuned lighter -
+                                  see contrast report (4.5:1 floor) */
 
-  --pos: #15803d;
-  --pos-soft: #f0fdf4;
-  --pos-border: #bbf0cf;
-  --neg: #b91c1c;
-  --neg-soft: #fef2f2;
-  --neg-border: #f8c9c9;
-  --warn: #a16207;
-  --warn-soft: #fefce8;
-  --warn-border: #f3e29b;
+  --accent: #E3B341;          /* GOLD - brand, links, primary buttons, focus, active nav */
+  --accent-soft: #2A2113;
+  --accent-glow: rgba(227, 179, 65, 0.22);
+  --accent-ink: #101211;      /* dark text for the gold-filled primary button */
+
+  --pos: #35E07F;              /* ELECTRIC GREEN - money in our favour, never a button/link */
+  --pos-soft: #0E2418;
+  --pos-border: #1B5033;
+  --pos-glow: rgba(53, 224, 127, 0.24);
+
+  --neg: #FF6B6B;               /* money against us */
+  --neg-soft: #2B1416;
+  --neg-border: #5A2328;
+  --neg-ink: #201012;          /* dark text for the solid-red danger-button hover fill */
+  --neg-glow: rgba(255, 107, 107, 0.24);
+
+  --warn: #FF9F4A;              /* needs attention - orange, deliberately not gold */
+  --warn-soft: #2B1B0F;
+  --warn-border: #5A3418;
+  --warn-glow: rgba(255, 159, 74, 0.26);
+
+  /* chart series ramp - distinct from the semantic tokens above, but
+     chart-2/chart-4 intentionally match --pos/--neg (see header note). */
+  --chart-1: #E3B341;
+  --chart-2: #35E07F;
+  --chart-3: #57B6FF;
+  --chart-4: #FF6B6B;
+  --chart-5: #C08BFF;
+  --chart-6: #4ECFC0;
 
   /* spacing scale */
   --s1: 4px;
@@ -46,12 +87,18 @@
   --radius-md: 10px;
   --radius-lg: 14px;
   --shadow-card: none;
-  --shadow-pop: 0 24px 48px -16px rgba(28, 25, 23, 0.35), 0 4px 12px rgba(28, 25, 23, 0.12);
-  --shadow-overlay: 0 16px 32px -8px rgba(28, 25, 23, 0.28), 0 2px 10px rgba(28, 25, 23, 0.14);
+  /* Shadows on dark stay near-black and subtle - separation between
+     surfaces comes from --border, not elevation. */
+  --shadow-pop: 0 24px 48px -16px rgba(0, 0, 0, 0.6), 0 4px 16px rgba(0, 0, 0, 0.35);
+  --shadow-overlay: 0 16px 32px -8px rgba(0, 0, 0, 0.55), 0 2px 10px rgba(0, 0, 0, 0.3);
 
   /* --- back-compat aliases: every selector below (and any markup added
      later) can keep referencing these old names and still resolve to the
-     new palette, so nothing ends up reading an undefined variable. --- */
+     new palette, so nothing ends up reading an undefined variable. These
+     are declared once - a custom property's value (here, always another
+     var() reference) is re-resolved wherever it's used, so the light
+     block below doesn't need to repeat them for the aliases to pick up
+     the light values of --accent/--pos/etc. --- */
   --brand: var(--accent);
   --brand-dark: var(--accent);
   --brand-light: var(--accent-soft);
@@ -69,35 +116,61 @@
   --amber-border: var(--warn-border);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0c0a09;
-    --surface: #1c1917;
-    --surface-2: #262322;
-    --border: #292524;
-    --border-strong: #3f3b39;
+:root[data-theme="light"] {  /* LIGHT - opt-in only, via the sidebar toggle */
+  color-scheme: light;
 
-    --ink: #fafaf9;
-    --muted: #a8a29e;
-    --faint: #78716c;
+  --bg: #F7F8F7;
+  --surface: #FFFFFF;
+  --surface-2: #EFF2F0;
+  --border: #DDE3E0;
+  --border-strong: #C2CBC7;
 
-    --accent: #93c5fd;
-    --accent-soft: #1e293b;
-    --accent-glow: rgba(147, 197, 253, 0.22);
+  --ink: #141816;
+  --muted: #5A6763;
+  --faint: #5F6D69;           /* spec suggested #8A9793; retuned darker -
+                                  see contrast report (4.5:1 floor) */
 
-    --pos: #4ade80;
-    --pos-soft: #14261a;
-    --pos-border: #1f4a30;
-    --neg: #f87171;
-    --neg-soft: #2a1517;
-    --neg-border: #55232a;
-    --warn: #fbbf24;
-    --warn-soft: #292014;
-    --warn-border: #4a3a17;
+  --accent: #82640F;           /* spec suggested #8A6A16; retuned darker -
+                                   passed on plain white/surface (5.06:1)
+                                   but a plain link inside a --neg-soft
+                                   tinted row (e.g. .row-low) fell to
+                                   4.42:1, found live in the browser check;
+                                   this value clears --surface, --bg AND
+                                   all three -soft fills, see contrast
+                                   report */
+  --accent-soft: #FBF3DE;
+  --accent-glow: rgba(130, 100, 15, 0.18);
+  --accent-ink: #FFFFFF;
 
-    --shadow-pop: 0 24px 48px -16px rgba(0, 0, 0, 0.6), 0 4px 16px rgba(0, 0, 0, 0.35);
-    --shadow-overlay: 0 16px 32px -8px rgba(0, 0, 0, 0.55), 0 2px 10px rgba(0, 0, 0, 0.3);
-  }
+  --pos: #0F7A43;               /* spec suggested #12894C; retuned darker -
+                                    badge text on --pos-soft fell under
+                                    4.5:1, see contrast report */
+  --pos-soft: #E8F7EE;
+  --pos-border: #A9DEC1;
+  --pos-glow: rgba(15, 122, 67, 0.16);
+
+  --neg: #C0392F;
+  --neg-soft: #FDECEA;
+  --neg-border: #F3C2BC;
+  --neg-ink: #FFFFFF;
+  --neg-glow: rgba(192, 57, 47, 0.18);
+
+  --warn: #A0560A;              /* spec suggested #B4600A; retuned darker -
+                                    badge text on --warn-soft fell under
+                                    4.5:1, see contrast report */
+  --warn-soft: #FDF3E7;
+  --warn-border: #F0CFA4;
+  --warn-glow: rgba(160, 86, 10, 0.16);
+
+  --chart-1: #82640F;
+  --chart-2: #0F7A43;
+  --chart-3: #1D5FD1;
+  --chart-4: #C0392F;
+  --chart-5: #6D28D9;
+  --chart-6: #0F766E;
+
+  --shadow-pop: 0 24px 48px -16px rgba(20, 24, 22, 0.35), 0 4px 12px rgba(20, 24, 22, 0.12);
+  --shadow-overlay: 0 16px 32px -8px rgba(20, 24, 22, 0.28), 0 2px 10px rgba(20, 24, 22, 0.14);
 }
 
 * { box-sizing: border-box; }
@@ -111,6 +184,15 @@ body {
   color: var(--ink);
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  /* Universal tabular figures (deliberate no-webfont typographic move -
+     see the token block's header comment): digits align in columns
+     wherever they appear - stat values, table cells, the KPI rail,
+     running balances - without hunting down every numeric selector. Only
+     affects digit glyph widths, so it's harmless on prose. The
+     class-level declarations elsewhere in this file predate this and are
+     left in place as harmless duplicates rather than churned out. */
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
 }
 
 a { color: var(--accent); }
@@ -216,11 +298,15 @@ img, svg { max-width: 100%; }
 }
 .sidebar-nav a:hover .icon { opacity: 0.8; }
 
+/* Signature motif (1 of 2 - see .tank-fill-bar below): the active nav
+   item's left border becomes a luminous gauge bar via a soft glow of its
+   own colour, rather than a flat line - a quiet nod to a fuel gauge. */
 .sidebar-nav a.active {
   background: var(--accent-soft);
   color: var(--ink);
   font-weight: 600;
   border-left-color: var(--accent);
+  box-shadow: inset 2px 0 4px -1px var(--accent-glow);
 }
 .sidebar-nav a.active .icon { opacity: 0.9; }
 
@@ -273,6 +359,30 @@ img, svg { max-width: 100%; }
   text-decoration: none;
 }
 .sidebar-user a:hover { color: var(--ink); text-decoration: underline; }
+
+/* Theme toggle (dark is the default; this switches to the light variant -
+   see static/style.css's token block header and templates/base.html for
+   the rest of the plumbing). A labelled button, not a bare icon, and its
+   own :focus-visible comes for free from the generic "button:focus-visible"
+   rule above. */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--s3);
+  padding: 6px 10px;
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.76rem;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+  cursor: pointer;
+}
+.theme-toggle:hover { background: var(--border); color: var(--ink); }
+.theme-toggle .icon { font-size: 0.85rem; opacity: 0.8; }
 
 .main {
   flex: 1;
@@ -392,19 +502,26 @@ a:focus-visible, button:focus-visible, .btn:focus-visible, .filter-pill:focus-vi
 
 button { cursor: pointer; font-weight: 600; border: none; }
 
+/* Primary button = the brand/interface colour (gold). This is the one
+   place a semantic colour is used as a solid fill with text sitting on
+   top of it, so the text colour is its own token (--accent-ink) rather
+   than a fixed white/black - --accent flips between a bright dark-mode
+   value and a dark light-mode value, and a fixed text colour would fail
+   contrast in one theme or the other (see the token block's header
+   comment and the contrast report in the verification notes). */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--s2);
-  background: var(--ink);
-  color: var(--surface);
+  background: var(--accent);
+  color: var(--accent-ink);
   padding: 9px 16px;
   border-radius: var(--radius-sm);
   text-decoration: none;
   font-weight: 500;
   font-size: 0.85rem;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--accent);
   transition: opacity 0.12s;
 }
 .btn:hover { opacity: 0.85; }
@@ -419,7 +536,7 @@ button { cursor: pointer; font-weight: 600; border: none; }
 .btn-ghost:hover { background: var(--surface-2); opacity: 1; }
 
 .btn-danger { background: transparent; color: var(--neg); border: 1px solid var(--neg-border); }
-.btn-danger:hover { background: var(--neg); color: #fff; border-color: var(--neg); opacity: 1; }
+.btn-danger:hover { background: var(--neg); color: var(--neg-ink); border-color: var(--neg); opacity: 1; }
 
 .btn-sm { padding: 6px 12px; font-size: 0.78rem; border-radius: var(--radius-sm); }
 .btn-full-width { width: 100%; }
@@ -1136,6 +1253,272 @@ button { cursor: pointer; font-weight: 600; border: none; }
 .chart-legend-item { display: flex; align-items: center; gap: 6px; }
 .chart-legend-item .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 
+/* ---------- dashboard: tanks (Phase 1 block C) ---------- */
+
+.tank-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+
+.tank-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s4);
+  background: var(--surface);
+  min-width: 0;
+}
+
+.tank-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+
+.tank-card .sub { font-size: 0.8rem; color: var(--muted); margin-top: 3px; }
+
+/* Fill bar is deliberately clamped to 100% width even when the tank's
+   true fill_pct exceeds it (over_capacity) - the numeric sub-line right
+   below still shows the real, un-clamped percentage, so the data error
+   stays visible instead of being smoothed away by a "full-looking" bar. */
+.tank-fill-track {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+/* Signature motif (2 of 2 - see .sidebar-nav a.active above): the fill
+   bar gets a soft glow of its own state colour, same treatment as the
+   active nav item, so both read as one shared "gauge" language. */
+.tank-fill-bar { height: 100%; border-radius: 999px; box-shadow: 0 0 6px 0 var(--glow-color, transparent); }
+.tank-fill-bar.pos { background: var(--pos); --glow-color: var(--pos-glow); }
+.tank-fill-bar.warn { background: var(--warn); --glow-color: var(--warn-glow); }
+.tank-fill-bar.neg { background: var(--neg); --glow-color: var(--neg-glow); }
+
+/* ---------- dashboard: cash reconciliation & donut (Phase 1 block D) --- */
+
+.recon-anchor td { font-weight: 600; background: var(--surface-2); }
+
+.recon-formula {
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px dashed var(--border-strong);
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+.donut-wrap { display: flex; justify-content: center; }
+.donut-svg { width: 100%; max-width: 240px; height: auto; }
+/* Compound selectors, not bare .donut-total-* classes: the existing
+   ".chart-svg text { fill: var(--muted); }" rule above outranks a single
+   class on specificity alone, so a bare class here would be silently
+   overridden regardless of source order. */
+.donut-svg .donut-total-label { font-size: 11px; fill: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.donut-svg .donut-total-value { font-size: 15px; fill: var(--ink); font-weight: 700; }
+
+/* ---------- dashboard: Phase 2 interaction layer ---------- */
+
+/* extra badge tone (reports.html's Cash Handover table only ever needed
+   ok/low - the Dashboard's shift scorecard also needs a distinct
+   "over-counted" treatment, same token family as everything else). */
+.badge-warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-border); }
+
+/* Sticky KPI rail (spec section 4). Source order is RAIL then MAIN, which
+   is exactly what a narrow single-column layout needs ("rail renders
+   above the main cards") with no media query at all; the >=1100px block
+   below re-places both by explicit grid-column/grid-row rather than
+   relying on source order, so desktop gets main-left/rail-right without
+   moving either element in the DOM. */
+.dash-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s5);
+  align-items: start;
+}
+.dash-main, .dash-rail { min-width: 0; }
+
+/* Narrow/base: the rail's nine values as a one-row horizontal scroll strip
+   rather than a full extra screen of stacked cards - this is the DEFAULT
+   (unqualified) rule so it also protects a no-JS phone view; the
+   >=1100px block below switches it back to a normal stacked column. */
+.dash-rail .stat-row {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: var(--s3);
+  margin-bottom: 0;
+  -webkit-overflow-scrolling: touch;
+}
+.dash-rail .stat-row .stat-card { flex: 0 0 180px; min-width: 0; }
+
+@media (min-width: 1100px) {
+  .dash-layout:not(.no-rail) { grid-template-columns: minmax(0, 1fr) minmax(260px, 300px); }
+  .dash-layout:not(.no-rail) .dash-main { grid-column: 1; grid-row: 1; }
+  .dash-layout:not(.no-rail) .dash-rail {
+    grid-column: 2;
+    grid-row: 1;
+    position: sticky;
+    top: var(--s4);
+    max-height: calc(100vh - var(--s4) * 2);
+    overflow-y: auto;
+  }
+  .dash-rail .stat-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    overflow-x: visible;
+  }
+  .dash-rail .stat-row .stat-card { flex: initial; }
+}
+
+/* Collapsible cards (spec section 2). The toggle button always renders
+   and is always clickable; .is-collapsed is ONLY ever added by
+   dashboard.js, so with JS disabled or blocked this selector never
+   matches and every card-body stays visible - see that file's own
+   docstring for why this direction (hide-on-a-JS-added-class, never
+   hide-by-default-in-CSS) is the one progressive enhancement allows. */
+.dash-card { min-width: 0; }
+.card-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.card-toggle h3 { margin: 0; }
+.card-toggle .chevron {
+  flex-shrink: 0;
+  font-size: 0.7em;
+  color: var(--muted);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .card-toggle .chevron { transition: transform 0.15s ease; }
+}
+.card-toggle[aria-expanded="false"] .chevron { transform: rotate(-90deg); }
+.dash-card.is-collapsed .card-body { display: none; }
+.dash-card.is-dragging { opacity: 0.5; }
+
+/* Drill-down stat-card links (spec section 5). The negative-margin trick
+   makes the WHOLE padded card clickable (not just its text), while
+   leaving .stat-card's own inset accent box-shadow (drawn at the true
+   border edge) untouched, since the link's edge lands exactly on the
+   padding boundary, never past it. */
+.stat-card > a.stat-link {
+  display: block;
+  margin: calc(-1 * var(--s4));
+  padding: var(--s4);
+  color: inherit;
+  text-decoration: none;
+  border-radius: var(--radius-md);
+}
+.stat-card > a.stat-link:hover { background: var(--surface-2); text-decoration: none; }
+.stat-card > a.stat-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--surface-2);
+}
+.tank-card { padding: 0; overflow: hidden; }
+.tank-card > a.tank-card-link {
+  display: block;
+  padding: var(--s4);
+  color: inherit;
+  text-decoration: none;
+}
+.tank-card > a.tank-card-link:hover { background: var(--surface-2); text-decoration: none; }
+.tank-card > a.tank-card-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Sparklines (spec section 6). */
+.stat-spark { margin-top: var(--s3); line-height: 0; }
+.sparkline { display: block; width: 100%; height: 30px; }
+
+/* Chart tooltip + crosshair (spec section 7). */
+.chart-svg.chart-interactive { cursor: crosshair; }
+.chart-svg.chart-interactive:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chart-hit { cursor: pointer; }
+.chart-crosshair {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0;
+  pointer-events: none;
+}
+.chart-crosshair.is-active { opacity: 0.7; }
+.chart-tooltip {
+  position: absolute;
+  z-index: 40;
+  background: var(--ink);
+  color: var(--surface);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  box-shadow: var(--shadow-overlay);
+  pointer-events: none;
+  max-width: 240px;
+}
+.chart-tooltip-label {
+  font-weight: 600;
+  margin-bottom: 3px;
+  color: var(--surface);
+}
+.chart-tooltip-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.chart-tooltip-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.chart-tooltip-name { color: var(--surface); opacity: 0.85; }
+.chart-tooltip-value { font-variant-numeric: tabular-nums; font-weight: 600; margin-left: auto; padding-left: var(--s3); }
+
+/* Unit toggle + compare-to-previous controls (spec section 8). */
+.unit-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.unit-toggle-btn {
+  background: var(--surface);
+  color: var(--muted);
+  border: none;
+  padding: 6px 12px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.unit-toggle-btn + .unit-toggle-btn { border-left: 1px solid var(--border); }
+.unit-toggle-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.unit-toggle-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.chart-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--muted);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.chart-control-input { width: auto; padding: 0; min-height: 0; }
+
+/* Keyboard date-stepping hint (spec section 9). */
+.dash-keyboard-hint { align-self: center; }
+
 /* ---------- misc ---------- */
 
 .quick-links { display: flex; gap: var(--s3); flex-wrap: wrap; }
@@ -1194,6 +1577,32 @@ textarea {
 }
 textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 
+/* ---------- Phase 3: needs-attention block, concentration ---------- */
+
+.attention-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.attention-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.attention-title { font-weight: 600; }
+.attention-title:hover { text-decoration: underline; }
+.attention-detail { color: var(--muted); font-size: 0.85rem; flex-basis: 100%; }
+
+.concentration-block { margin-top: var(--s4); }
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 860px) {
@@ -1239,6 +1648,7 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
   .sidebar-user .who { display: none; }
   .sidebar-user .role-pill { display: none; }
   .sidebar-user a { margin-top: 0; }
+  .theme-toggle { margin-top: 0; }
   .main { padding: var(--s4); }
 }
 
@@ -1275,7 +1685,8 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
   .sidebar-user a,
   .export-menu a,
   .feed-item .delete-link,
-  .edit-toggle {
+  .edit-toggle,
+  .theme-toggle {
     display: inline-flex;
     align-items: center;
     min-height: 44px;
@@ -1317,6 +1728,47 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
 }
 
 @media print {
+  /* Printed reports stay black-on-white regardless of the active theme -
+     force every token back to its light value here, on :root (covers the
+     unqualified dark default) AND on both explicit [data-theme] values,
+     since the toggle's inline script sets the attribute explicitly rather
+     than ever leaving it unset once a user has switched at least once. */
+  :root,
+  :root[data-theme="light"],
+  :root[data-theme="dark"] {
+    color-scheme: light;
+    --bg: #F7F8F7;
+    --surface: #FFFFFF;
+    --surface-2: #EFF2F0;
+    --border: #DDE3E0;
+    --border-strong: #C2CBC7;
+    --ink: #141816;
+    --muted: #5A6763;
+    --faint: #5F6D69;
+    --accent: #82640F;
+    --accent-soft: #FBF3DE;
+    --accent-glow: rgba(130, 100, 15, 0.18);
+    --accent-ink: #FFFFFF;
+    --pos: #0F7A43;
+    --pos-soft: #E8F7EE;
+    --pos-border: #A9DEC1;
+    --pos-glow: rgba(15, 122, 67, 0.16);
+    --neg: #C0392F;
+    --neg-soft: #FDECEA;
+    --neg-border: #F3C2BC;
+    --neg-ink: #FFFFFF;
+    --neg-glow: rgba(192, 57, 47, 0.18);
+    --warn: #A0560A;
+    --warn-soft: #FDF3E7;
+    --warn-border: #F0CFA4;
+    --warn-glow: rgba(160, 86, 10, 0.16);
+    --chart-1: #82640F;
+    --chart-2: #0F7A43;
+    --chart-3: #1D5FD1;
+    --chart-4: #C0392F;
+    --chart-5: #6D28D9;
+    --chart-6: #0F766E;
+  }
   .sidebar, .no-print, .flash-list, .btn, .export-menu { display: none !important; }
   .app-shell { display: block; }
   .main { padding: 0; }
@@ -1330,5 +1782,10 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
   }
   .table-wrap { overflow: visible; }
   .table thead th { position: static; }
+  /* Belt-and-suspenders: true pure white/black regardless of any of the
+     token math above (--bg/--ink are off-white/off-black by design so
+     the app has softer contrast on screen) - printed body copy should be
+     literal black-on-white. This is the one literal hex pair the spec
+     exempts from the "no literals" sweep in section 2. */
   body { background: #fff; color: #000; }
 }

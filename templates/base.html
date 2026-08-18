@@ -3,7 +3,25 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark light">
+<!-- Dark is the default theme; this MUST run before the stylesheet loads
+     and MUST be inline (an external file would arrive too late), so that
+     a saved "light" preference applies before first paint instead of
+     flashing dark-then-light. Absence of a saved value, or any value
+     other than the two we write, leaves data-theme unset - :root's
+     unconditional dark tokens are already the default in that case, so
+     there is nothing to set. See static/style.css's token block header
+     for the rest of the theme architecture. -->
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem("pk-theme");
+    if (t === "light" || t === "dark") {
+      document.documentElement.dataset.theme = t;
+    }
+  } catch (e) { /* localStorage unavailable (private mode, etc.) - stay dark */ }
+})();
+</script>
 <title>{% block title %}Petrol Khata{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
@@ -51,8 +69,45 @@
       <span class="role-pill">{{ current_user.role }}</span>
       <a href="{{ url_for('change_password') }}">Change password</a>
       <a href="{{ url_for('logout') }}">Log out</a>
+      <button type="button" id="theme-toggle" class="theme-toggle" aria-pressed="false" onclick="pkToggleTheme()">
+        <span class="icon" id="theme-toggle-icon" aria-hidden="true">&#9728;</span><span id="theme-toggle-label">Light mode</span>
+      </button>
     </div>
   </aside>
+
+  <script>
+    /* Theme toggle: the inline no-flash script in <head> already applied
+       any saved preference to documentElement.dataset.theme before this
+       ran, so this only has to (1) make the button's label/aria-pressed
+       match whatever that ended up being, and (2) flip it on click. With
+       JavaScript disabled this script never runs, the button has no
+       handler, and clicking it does nothing - the app simply stays dark,
+       which is the documented no-JS fallback. */
+    (function () {
+      function currentTheme() {
+        return document.documentElement.dataset.theme === "light" ? "light" : "dark";
+      }
+      function syncToggleUI() {
+        var btn = document.getElementById("theme-toggle");
+        var label = document.getElementById("theme-toggle-label");
+        var icon = document.getElementById("theme-toggle-icon");
+        if (!btn || !label) return;
+        var isLight = currentTheme() === "light";
+        // The icon names the mode a click switches TO, matching the label
+        // text right next to it - a sun to go light, a moon to go dark.
+        label.textContent = isLight ? "Dark mode" : "Light mode";
+        if (icon) icon.innerHTML = isLight ? "&#127769;" : "&#9728;";
+        btn.setAttribute("aria-pressed", isLight ? "true" : "false");
+      }
+      window.pkToggleTheme = function () {
+        var next = currentTheme() === "light" ? "dark" : "light";
+        document.documentElement.dataset.theme = next;
+        try { localStorage.setItem("pk-theme", next); } catch (e) { /* toggle still works for this view */ }
+        syncToggleUI();
+      };
+      syncToggleUI();
+    })();
+  </script>
 
   <main class="main">
     <div class="content-max">

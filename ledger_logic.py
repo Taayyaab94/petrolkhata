@@ -6,12 +6,16 @@ editing or backfilling a past date can never leave numbers out of sync.
 """
 
 import bisect
+import math
 from datetime import datetime, timedelta
 
 from sqlalchemy import func
+from sqlalchemy.orm import joinedload, selectinload
 
 from extensions import db
 from models import (
+    Account,
+    BankAccount,
     BankSale,
     CashAccount,
     CashDeposit,
@@ -38,8 +42,25 @@ from models import (
     StockPurchase,
     SupplierPayment,
     Tank,
+    TankDip,
     TankDipChart,
 )
+
+# --------------------------------------------------------------------------
+# Phase 3 "Needs attention" (Block F) thresholds - every judgment-call
+# number the anomaly engine (attention_items(), in app.py) fires on lives
+# HERE, as one named constant each, so the owner can review and retune the
+# whole rule set in one place rather than hunting through comparisons
+# scattered across functions. dead_stock() and customer_concentration()
+# below also read their own thresholds from this same block, so there is
+# never a second copy of a number to fall out of sync with this one.
+DIP_VARIANCE_PCT = 0.005  # dip variance flagged once it exceeds 0.5% of book stock...
+DIP_VARIANCE_MIN_LITERS = 50  # ...or this many litres, whichever is bigger (small tanks, tiny book stock)
+LOW_DAYS_OF_STOCK = 3  # tank flagged "low / near dry" once projected cover drops below this many days
+CONCENTRATION_PCT = 50  # top-3-customers-share-of-receivables flagged past this percent
+HANDOVER_VARIANCE_TOLERANCE = 100  # shift handover cash variance (Rs) flagged past this
+DEAD_STOCK_DAYS = 60  # a product with stock on hand and no sale in this many days is "dead"
+# --------------------------------------------------------------------------
 
 
 def book_stock(tank, as_of_date):
@@ -1470,12 +1491,12 @@ def cash_account_balance_as_of(cash_account, as_of_date):
     includes DirectSale in its cash-sales component), summed only through
     as_of_date.
 
-    A new, additional function - used ONLY on the Ledger and Daily Report
-    pages, which are date-driven and need to show the balance as it stood
-    on whatever date is being paged to, not today's all-time figure.
+    A new, additional function - used by every date-driven page (Ledger,
+    Daily Report, Dashboard) that needs to show the balance as it stood on
+    whatever date is being paged to, not today's all-time figure.
     cash_account_balance() itself is deliberately left untouched: it's
-    still used everywhere else (dashboard, account pages, settings) for
-    the current/all-time figure, unconditionally."""
+    still used on the account/settings pages, which have no date to page
+    against, for the current/all-time figure, unconditionally."""
     changes = _cash_daily_net_changes()
     return round(sum(v for d, v in changes.items() if d <= as_of_date), 2)
 
@@ -2023,9 +2044,10 @@ def bank_account_balance_as_of(bank_account, as_of_date):
     have no natural place to add a date filter without loading everything
     into memory first) - same style as cash_account_balance().
 
-    A new, additional function - used ONLY on the Ledger and Daily Report
-    pages. BankAccount.balance itself is deliberately left untouched for
-    every other page (Accounts, bank account detail, dashboard, ...),
+    A new, additional function - used by every date-driven page (Ledger,
+    Daily Report, Dashboard) that needs a balance as of a paged-to date.
+    BankAccount.balance itself is deliberately left untouched for pages
+    with no date to page against (Accounts, bank account detail, ...),
     which must keep showing the current/all-time figure exactly as before."""
     bank_sales_total = (
         db.session.query(func.coalesce(func.sum(BankSale.amount), 0))
@@ -2204,3 +2226,1304 @@ def product_margin_for_period(start, end):
     total_cost = round(total_cost, 2)
     total_commission = round(total_revenue - total_cost, 2)
     return total_revenue, total_cost, total_commission, detail
+
+
+# ------------------------------------------------------- dashboard signals
+
+# Every entry kind that carries its own recorded_at, i.e. every model
+# last_activity_at() below has to check. Deliberately excludes rows with no
+# recorded_at (NozzleReset, TankDipChart, price/rate history, accounts,
+# users) - those aren't day-to-day entries, so a change to one of them
+# shouldn't make a stale day look freshly worked.
+_ENTRY_MODELS_WITH_RECORDED_AT = (
+    Sale,
+    DirectSale,
+    CreditGiven,
+    SalesReturn,
+    NozzleTesting,
+    Receipt,
+    StockPurchase,
+    SupplierPayment,
+    EmployeeLoan,
+    Expense,
+    BankSale,
+    CashDeposit,
+    SalaryPayment,
+    TankDip,
+    CashHandover,
+    ProductSale,
+    ProductPurchase,
+    OtherIncome,
+)
+
+
+def last_activity_at():
+    """The most recent recorded_at across every entry kind, or None if
+    nothing has ever been recorded. Used for the Dashboard's freshness
+    line - "last entry 22 minutes ago" - so a stale or half-entered day
+    is visibly different from a complete one."""
+    latest_per_model = [
+        db.session.query(func.max(model.recorded_at)).scalar()
+        for model in _ENTRY_MODELS_WITH_RECORDED_AT
+    ]
+    latest_per_model = [dt for dt in latest_per_model if dt is not None]
+    return max(latest_per_model) if latest_per_model else None
+
+
+def humanize_since(dt, now=None):
+    """'22 minutes ago' / '3 hours ago' / '2 days ago' / 'just now'."""
+    now = now or datetime.now()
+    seconds = max((now - dt).total_seconds(), 0)
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def day_completeness(entry_date):
+    """What's missing from entry_date's books, as a list of dicts:
+        {"kind": str, "message": str, "count": int}
+    Empty list means the day looks fully entered. Drives the Dashboard's
+    completeness line so a half-entered day is obvious before it becomes
+    a month-end mystery."""
+    items = []
+
+    # 1. Unread nozzles: every active shift x every meter-mode nozzle
+    # should have a Sale row for entry_date. One grouped query for the
+    # date's actual Sale rows, compared in Python against the expected
+    # set - not a query per nozzle per shift.
+    meter_nozzles = (
+        Nozzle.query.join(Tank, Nozzle.tank_id == Tank.id)
+        .join(FuelType, Tank.fuel_type_id == FuelType.id)
+        .filter(FuelType.entry_mode == "meter")
+        .all()
+    )
+    shifts = active_shifts()
+    expected_readings = {(n.id, s.id) for n in meter_nozzles for s in shifts}
+    actual_readings = set(
+        db.session.query(Sale.nozzle_id, Sale.shift_id).filter(Sale.entry_date == entry_date)
+    )
+    missing_readings = expected_readings - actual_readings
+    if missing_readings:
+        items.append(
+            {
+                "kind": "unread_nozzles",
+                "message": f"{len(missing_readings)} nozzle reading(s) not entered",
+                "count": len(missing_readings),
+            }
+        )
+
+    # 2. Direct-entry fuel types with no DirectSale that day.
+    direct_fuel_types = FuelType.query.filter_by(entry_mode="direct").all()
+    fuel_type_ids_with_direct_sale = {
+        fuel_type_id
+        for (fuel_type_id,) in db.session.query(Tank.fuel_type_id)
+        .join(DirectSale, DirectSale.tank_id == Tank.id)
+        .filter(DirectSale.entry_date == entry_date)
+        .distinct()
+    }
+    missing_direct = [ft for ft in direct_fuel_types if ft.id not in fuel_type_ids_with_direct_sale]
+    if missing_direct:
+        items.append(
+            {
+                "kind": "direct_entry_missing",
+                "message": f"{len(missing_direct)} fuel type(s) on direct entry with no sale recorded",
+                "count": len(missing_direct),
+            }
+        )
+
+    # 3. No dip.
+    dipped_tank_ids = {
+        tank_id
+        for (tank_id,) in db.session.query(TankDip.tank_id).filter(TankDip.entry_date == entry_date)
+    }
+    tanks_without_dip = [t for t in Tank.query.all() if t.id not in dipped_tank_ids]
+    if tanks_without_dip:
+        items.append(
+            {
+                "kind": "no_dip",
+                "message": f"{len(tanks_without_dip)} tank(s) without a dip reading",
+                "count": len(tanks_without_dip),
+            }
+        )
+
+    # 4. Shift not handed over - handover_rows_for_date() already carries
+    # a None handover for a shift nobody has reconciled yet.
+    not_handed_over = [row for row in handover_rows_for_date(entry_date) if row["handover"] is None]
+    if not_handed_over:
+        items.append(
+            {
+                "kind": "no_handover",
+                "message": f"{len(not_handed_over)} shift(s) not handed over",
+                "count": len(not_handed_over),
+            }
+        )
+
+    return items
+
+
+def fuel_rate_cards(entry_date, costs=None):
+    """Per fuel type for entry_date: the rate actually in effect, how long
+    that rate has been in effect, the litres/amount sold at it, and (as of
+    Phase 1) the weighted-average cost and margin per litre it implies.
+
+    costs is the {fuel_type_id: weighted_avg_cost} dict from
+    weighted_avg_costs() - pass it in so a caller building several
+    Dashboard cards resolves costs exactly once (see that function's
+    docstring). Resolved internally when omitted, so existing/standalone
+    callers keep working unchanged.
+
+    weighted_avg_cost() returns a bare 0.0 for a fuel type with NO
+    purchase history at all (nothing to average) - indistinguishable, by
+    value alone, from a fuel that was genuinely bought for free. Rather
+    than let that render as a fake 100% margin, cost_per_liter and
+    margin_per_liter are both set to None in that case; the template
+    shows "no cost history" instead."""
+    if costs is None:
+        costs = weighted_avg_costs(entry_date)
+    sales_by_fuel = fuel_sales_for_date(entry_date)
+    cards = []
+    for ft in FuelType.query.order_by(FuelType.name).all():
+        rate = price_on_date(ft, entry_date)
+        # Mirrors price_on_date()'s own query exactly (same filter, same
+        # tie-break) so the effective_date reported here can never drift
+        # from the rate it's describing.
+        history_row = (
+            FuelPriceHistory.query.filter(
+                FuelPriceHistory.fuel_type_id == ft.id,
+                FuelPriceHistory.effective_date <= entry_date,
+            )
+            .order_by(FuelPriceHistory.effective_date.desc(), FuelPriceHistory.id.desc())
+            .first()
+        )
+        rate_effective_date = history_row.effective_date if history_row else None
+        rate_age_days = (entry_date - rate_effective_date).days if rate_effective_date else None
+        sales = sales_by_fuel.get(ft.name, {"liters": 0.0, "revenue": 0.0})
+        cost_per_liter = costs.get(ft.id, 0.0)
+        if cost_per_liter:
+            cost_per_liter = round(cost_per_liter, 4)
+            margin_per_liter = round(rate - cost_per_liter, 4)
+        else:
+            cost_per_liter = None
+            margin_per_liter = None
+        cards.append(
+            {
+                "fuel_type": ft,
+                "rate": rate,
+                "rate_effective_date": rate_effective_date,
+                "rate_age_days": rate_age_days,
+                "liters": sales["liters"],
+                "amount": sales["revenue"],
+                "cost_per_liter": cost_per_liter,
+                "margin_per_liter": margin_per_liter,
+            }
+        )
+    return cards
+
+
+def weighted_avg_costs(as_of_date):
+    """{fuel_type_id: weighted average cost per litre} for every fuel type,
+    resolved ONCE. weighted_avg_cost() runs its own queries per fuel type,
+    so any caller that needs costs for several tanks/fuels at once (stock
+    value, daily margin, dip variance in rupees, rate-card margin) must
+    resolve them through here rather than calling weighted_avg_cost() per
+    tank/fuel in a loop - on a pump with several tanks sharing a handful
+    of fuel types, that loop would repeat the same StockPurchase scan
+    once per tank instead of once per fuel type."""
+    return {ft.id: weighted_avg_cost(ft, as_of_date) for ft in FuelType.query.all()}
+
+
+def tank_stock_rows(as_of_date, costs=None, lookback_days=14):
+    """Per-tank rows for the Dashboard's tank block and the stock-value
+    KPI: current book stock, fill against capacity, a rolling consumption
+    rate, a projected days-of-stock and reorder-by date, and Rs value at
+    that fuel's weighted average cost.
+
+    costs is the {fuel_type_id: weighted_avg_cost} dict from
+    weighted_avg_costs() - resolved once and passed in by a caller
+    building several cards; resolved internally when omitted.
+
+    lookback_days=14 is a judgment call: long enough that one unusually
+    quiet or busy day doesn't swing the projected reorder date, short
+    enough to still reflect a recent change (a nozzle out of service, a
+    new competitor's price, a seasonal shift) rather than a stale
+    30/90-day average. avg_daily_liters divides the window's NET litres
+    by this FIXED day count (not by however many of those days actually
+    had a sale), so a tank that sells briskly but had one silent day
+    still reads a sensible average rather than an inflated one.
+
+    Consumption is read with THREE grouped queries covering the whole
+    window (one each for Sale, DirectSale, SalesReturn, each grouped by
+    tank_id) - not a query per tank - the same reasoning
+    weighted_avg_costs() gives for fuel types. SalesReturn carries its own
+    tank_id (fuel physically re-enters a tank on a return, same as a
+    StockPurchase - see book_stock()'s docstring), so it nets out of the
+    consumption rate exactly like it nets out of book stock.
+
+    over_capacity is deliberate, not a bug guard: a stock reading above
+    capacity is a DATA ERROR (bad opening stock, a missed sale, a
+    double-entered delivery), not something to silently draw as a
+    (clamped) full tank the way some dashboards do. The bar is clamped at
+    100% for display, but the true percentage and an explicit flag both
+    still come back here so the template can surface the error instead of
+    hiding it."""
+    if costs is None:
+        costs = weighted_avg_costs(as_of_date)
+
+    window_start = as_of_date - timedelta(days=lookback_days - 1)
+
+    sold_by_tank = dict(
+        db.session.query(Nozzle.tank_id, func.sum(Sale.liters))
+        .select_from(Sale)
+        .join(Nozzle, Sale.nozzle_id == Nozzle.id)
+        .filter(Sale.entry_date >= window_start, Sale.entry_date <= as_of_date)
+        .group_by(Nozzle.tank_id)
+        .all()
+    )
+    direct_by_tank = dict(
+        db.session.query(DirectSale.tank_id, func.sum(DirectSale.liters))
+        .filter(DirectSale.entry_date >= window_start, DirectSale.entry_date <= as_of_date)
+        .group_by(DirectSale.tank_id)
+        .all()
+    )
+    returned_by_tank = dict(
+        db.session.query(SalesReturn.tank_id, func.sum(SalesReturn.liters))
+        .filter(SalesReturn.entry_date >= window_start, SalesReturn.entry_date <= as_of_date)
+        .group_by(SalesReturn.tank_id)
+        .all()
+    )
+
+    rows = []
+    for tank in Tank.query.order_by(Tank.number).all():
+        stock = book_stock(tank, as_of_date)
+        capacity = tank.capacity_liters
+        fill_pct = round(stock / capacity * 100, 1) if capacity else None
+        is_low = stock <= tank.low_stock_threshold
+        over_capacity = stock > capacity
+        negative = stock < 0
+
+        net_liters = (
+            (sold_by_tank.get(tank.id) or 0)
+            + (direct_by_tank.get(tank.id) or 0)
+            - (returned_by_tank.get(tank.id) or 0)
+        )
+        avg_daily_liters = round(net_liters / lookback_days, 2)
+        days_of_stock = round(stock / avg_daily_liters, 1) if avg_daily_liters > 0 else None
+
+        if is_low:
+            # Already at/below threshold - the reorder point isn't in the
+            # future, it's now.
+            reorder_on = as_of_date
+        elif avg_daily_liters <= 0:
+            # No positive sales rate in the window - projecting a reorder
+            # date would be a divide-by-zero (or a nonsensical "never
+            # empties" claim for a net-negative rate), so there's nothing
+            # honest to project.
+            reorder_on = None
+        else:
+            days_until = (stock - tank.low_stock_threshold) / avg_daily_liters
+            # Rounds UP: the first whole day by which projected stock is
+            # AT or BELOW the threshold, given today already has stock
+            # covering (at least) today.
+            reorder_on = as_of_date + timedelta(days=math.ceil(days_until))
+
+        rows.append(
+            {
+                "tank": tank,
+                "stock": stock,
+                "capacity": capacity,
+                "fill_pct": fill_pct,
+                "is_low": is_low,
+                "over_capacity": over_capacity,
+                "negative": negative,
+                "avg_daily_liters": avg_daily_liters,
+                "days_of_stock": days_of_stock,
+                "reorder_on": reorder_on,
+                "value": round(stock * costs.get(tank.fuel_type_id, 0.0), 2),
+            }
+        )
+    return rows
+
+
+def daily_margin(entry_date, costs=None):
+    """Today's profit picture: fuel margin (net of sales returns), product
+    margin, other income, and their total, for exactly one date.
+
+    costs is accepted for interface symmetry with the other Dashboard
+    helpers the route resolves once via weighted_avg_costs() and threads
+    through - but note it is NOT actually consumed here: cogs_for_period()
+    (below) has no parameter to accept a precomputed cost dict and always
+    resolves its own weighted_avg_cost() per fuel type internally. Passing
+    a stale/mismatched costs dict here therefore has no effect on the
+    numbers this returns; it's accepted (and ignored) purely so callers
+    don't need a special case. Left this way deliberately rather than
+    reaching into cogs_for_period() to add a costs parameter, which
+    _reports_monthly_context() (Monthly Report) and reports_trends() also
+    depend on and which this phase's brief says to leave alone.
+
+    fuel_revenue/fuel_cogs/fuel_margin mirror _reports_monthly_context()'s
+    own arithmetic line for line (gross Sale+DirectSale revenue, minus
+    SalesReturn amount, minus cogs_for_period()'s cost) rather than
+    summing cogs_for_period()'s already-rounded per-fuel detail rows -
+    that keeps this in exact agreement with the Monthly Report for a
+    single-day period, which double-rounding (round each fuel, then sum)
+    could otherwise drift from by a paisa. cogs_for_period() nets sales
+    returns into COST already (see its docstring) - net_revenue below is
+    the only OTHER place a return is subtracted, so fuel_margin must never
+    subtract sales-returns again on top of cogs_for_period()'s output, or
+    the same refund gets double-counted (this exact bug has happened here
+    before - see cogs_for_period()'s and _reports_monthly_context()'s own
+    docstrings).
+
+    total_margin folds in other_income with no cost side (a pure
+    addition, not a revenue-minus-cost margin) - the same treatment
+    _reports_monthly_context() gives it on the way to net profit."""
+    revenue = float(
+        db.session.query(func.coalesce(func.sum(Sale.total_amount), 0))
+        .filter(Sale.entry_date == entry_date)
+        .scalar()
+    )
+    revenue += float(
+        db.session.query(func.coalesce(func.sum(DirectSale.total_amount), 0))
+        .filter(DirectSale.entry_date == entry_date)
+        .scalar()
+    )
+    sales_returns_amount = float(
+        db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0))
+        .filter(SalesReturn.entry_date == entry_date)
+        .scalar()
+    )
+    net_revenue = round(revenue - sales_returns_amount, 2)
+
+    fuel_cogs, by_fuel = cogs_for_period(entry_date, entry_date)
+    fuel_margin = round(net_revenue - fuel_cogs, 2)
+    fuel_liters = round(sum(d["liters"] for d in by_fuel), 2)
+    margin_per_liter = round(fuel_margin / fuel_liters, 4) if fuel_liters else None
+
+    product_revenue, product_cost, product_margin, _ = product_margin_for_period(entry_date, entry_date)
+    other_income = float(
+        db.session.query(func.coalesce(func.sum(OtherIncome.amount), 0))
+        .filter(OtherIncome.entry_date == entry_date)
+        .scalar()
+    )
+    total_margin = round(fuel_margin + product_margin + other_income, 2)
+
+    return {
+        "fuel_revenue": net_revenue,
+        "fuel_cogs": fuel_cogs,
+        "fuel_margin": fuel_margin,
+        "fuel_liters": fuel_liters,
+        "margin_per_liter": margin_per_liter,
+        "product_revenue": product_revenue,
+        "product_cost": product_cost,
+        "product_margin": product_margin,
+        "other_income": other_income,
+        "total_margin": total_margin,
+        "by_fuel": by_fuel,
+    }
+
+
+def break_even_liters(as_of_date, lookback_days=30, costs=None):
+    """How many litres of fuel a day this pump needs to sell just to cover
+    its fixed costs, and whether as_of_date cleared that bar.
+
+    daily_fixed_cost is the average daily (Expense + SalaryPayment.gross_amount)
+    over the trailing lookback_days window ending on as_of_date - a rolling
+    average so one unusually heavy/light expense day doesn't swing the
+    number, the same reasoning tank_stock_rows() gives for its own
+    lookback window.
+
+    margin_per_liter reuses daily_margin()'s own blended fuel
+    margin-per-litre for as_of_date (fuel margin, net of sales returns,
+    divided by net fuel litres sold that day - the SAME figure the
+    Dashboard's "Fuel margin / litre" KPI already shows) rather than
+    recomputing it a different way. costs is threaded through to
+    daily_margin() purely for interface symmetry with every other
+    Dashboard helper that accepts it - see daily_margin()'s own docstring
+    for why it doesn't actually change the numbers.
+
+    This does call daily_margin() (and therefore cogs_for_period()) again
+    even when the Dashboard route already computed it once for the same
+    date - a handful of grouped, bounded queries (one per fuel type, not
+    per account), not the O(accounts) pattern account_positions() exists
+    to eliminate, so it doesn't reopen the Part 0 performance problem.
+
+    break_even_liters is None whenever margin_per_liter is None (no fuel
+    sold that day / no cost history) or <= 0 (selling at a loss per litre
+    makes "litres to break even" meaningless - more litres would only
+    lose more money) - the caller must render that guard explicitly rather
+    than showing a divide-by-zero or a negative litre figure."""
+    window_start = as_of_date - timedelta(days=lookback_days - 1)
+    expenses_total = float(
+        db.session.query(func.coalesce(func.sum(Expense.amount), 0))
+        .filter(Expense.entry_date >= window_start, Expense.entry_date <= as_of_date)
+        .scalar()
+    )
+    salaries_total = float(
+        db.session.query(func.coalesce(func.sum(SalaryPayment.gross_amount), 0))
+        .filter(SalaryPayment.entry_date >= window_start, SalaryPayment.entry_date <= as_of_date)
+        .scalar()
+    )
+    daily_fixed_cost = round((expenses_total + salaries_total) / lookback_days, 2)
+
+    margin = daily_margin(as_of_date, costs=costs)
+    margin_per_liter = margin["margin_per_liter"]
+    actual_liters = margin["fuel_liters"]
+
+    if margin_per_liter is None or margin_per_liter <= 0:
+        break_even = None
+        surplus = None
+    else:
+        break_even = round(daily_fixed_cost / margin_per_liter, 2)
+        surplus = round(actual_liters - break_even, 2)
+
+    return {
+        "lookback_days": lookback_days,
+        "daily_fixed_cost": daily_fixed_cost,
+        "margin_per_liter": margin_per_liter,
+        "break_even_liters": break_even,
+        "actual_liters": actual_liters,
+        "surplus_liters": surplus,
+    }
+
+
+def dip_variance_for_date(entry_date, costs=None):
+    """Every TankDip recorded on entry_date, compared against that tank's
+    book stock, valued in rupees at that fuel's weighted average cost.
+
+    Sign convention matches the Ledger feed and Daily Report exactly
+    (both compute `dip.dip_liters - book_stock(...)` - see the dip event
+    in the Ledger feed and the Daily Report's dip column): NEGATIVE means
+    stock is MISSING (the physical dip reads lower than the book says),
+    positive means more fuel is in the tank than the book accounts for.
+    variance_value just carries that same sign through at the fuel's
+    per-litre cost, so a short tank shows as a negative rupee figure."""
+    if costs is None:
+        costs = weighted_avg_costs(entry_date)
+
+    dips = TankDip.query.filter_by(entry_date=entry_date).all()
+    rows = []
+    total_liters = 0.0
+    total_value = 0.0
+    for dip in dips:
+        tank = dip.tank
+        variance_liters = round(dip.dip_liters - book_stock(tank, entry_date), 2)
+        variance_value = round(variance_liters * costs.get(tank.fuel_type_id, 0.0), 2)
+        total_liters += variance_liters
+        total_value += variance_value
+        rows.append(
+            {
+                "tank": tank,
+                "dip": dip,
+                "variance_liters": variance_liters,
+                "variance_value": variance_value,
+            }
+        )
+    return {
+        "rows": rows,
+        "total_liters": round(total_liters, 2),
+        "total_value": round(total_value, 2),
+        "dip_count": len(rows),
+    }
+
+
+def account_positions(as_of_date, include_aging=True):
+    """Every account with its balance (and optionally its aging buckets),
+    resolved in ONE pass with relationships eagerly loaded.
+
+    Account.balance and credit_aging() are Python properties/functions that
+    each walk the SAME 10 relationship collections per account (see
+    Account.balance's docstring in models.py and credit_aging()'s own
+    "CRITICAL INVARIANT" note above - the two lists must stay in lockstep).
+    Calling them per account from several independent Dashboard helpers
+    (receivables_aging(), working_capital(), and - as of Phase 3 -
+    customer_concentration()/payables_schedule()) is what made the
+    Dashboard spend >97% of its backend time in exactly those two
+    functions on a 20-account pump (measured: 201 + 181 SQL statements).
+    Every one of those consumers must now take this ONE result rather than
+    re-walking Account.query.all() on its own.
+
+    selectinload() batches each of the 10 collections into ONE extra query
+    per relationship (bounded by relationship count, not account count) -
+    11 SQL statements total for any number of accounts, instead of ~10
+    lazy-load queries PER account. Account.balance/credit_aging() are left
+    completely unchanged and are called exactly as before; they simply find
+    their relationship collections already populated in memory, so every
+    number they produce is identical to the pre-refactor code path - this
+    function changes nothing about HOW balance/aging are computed, only
+    how many queries it costs to gather the rows they read.
+
+    aging is only computed for balance > 0 accounts (same gating
+    receivables_aging() used before this refactor) - credit_aging()'s FIFO
+    walk is only meaningful for a debit balance; a supplier/payable account
+    gets aging=None here, same as it implicitly did before."""
+    accounts = (
+        Account.query.options(
+            selectinload(Account.credit_entries),
+            selectinload(Account.receipts),
+            selectinload(Account.stock_purchases),
+            selectinload(Account.supplier_payments),
+            selectinload(Account.employee_loans),
+            selectinload(Account.salary_payments),
+            selectinload(Account.sales_returns),
+            selectinload(Account.product_sales),
+            selectinload(Account.product_purchases),
+            selectinload(Account.other_income_entries),
+        )
+        .order_by(Account.id)
+        .all()
+    )
+    positions = []
+    for account in accounts:
+        balance = account.balance
+        aging = credit_aging(account, as_of_date) if (include_aging and balance > 0) else None
+        positions.append({"account": account, "balance": balance, "aging": aging})
+    return positions
+
+
+def receivables_aging(as_of_date, positions=None):
+    """credit_aging() (above), aggregated across every account currently
+    owed TO the pump (balance > 0) - the buckets behind the Dashboard's
+    aging table and chase list.
+
+    positions is the prebuilt list from account_positions() - pass it in
+    when a caller (the Dashboard route) has already resolved it, so this
+    doesn't re-walk every account's relationships a second time. Resolved
+    internally via account_positions(as_of_date) when omitted, so every
+    existing standalone caller keeps working unchanged - it just gets the
+    fast, single-pass query path automatically now instead of the old
+    Account.query.all() + per-account credit_aging() loop.
+
+    chase_list sorts OLDEST debt first (oldest_days descending), amount
+    only as the tiebreaker - the point of a chase list is money that's
+    been sitting the longest, not simply the biggest balance; a big but
+    fresh balance is far less urgent than a small balance nobody's paid
+    against in 90+ days.
+
+    The buckets returned here MUST sum to `total`, and `total` MUST equal
+    the sum of every positive Account.balance - the exact invariant
+    credit_aging()'s own docstring calls CRITICAL for one account; this is
+    that invariant summed across all of them."""
+    if positions is None:
+        positions = account_positions(as_of_date, include_aging=True)
+
+    positive = [p for p in positions if p["balance"] > 0]
+
+    buckets = {"0-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
+    entries = []
+    for pos in positive:
+        aging = pos["aging"]
+        for key in buckets:
+            buckets[key] = round(buckets[key] + aging["buckets"][key], 2)
+        entries.append(
+            {
+                "account": pos["account"],
+                "outstanding": pos["balance"],
+                "oldest_days": aging["oldest_days"],
+                "buckets": aging["buckets"],
+            }
+        )
+
+    def _chase_key(entry):
+        oldest = entry["oldest_days"]
+        # None (no dated debit found despite a positive balance - not
+        # expected in practice, but not impossible) sorts as if it were
+        # the NEWEST possible debt (age -1), i.e. LEAST urgent, rather
+        # than crashing the comparison or accidentally sorting first.
+        return (-(oldest if oldest is not None else -1), -entry["outstanding"])
+
+    chase_list = sorted(entries, key=_chase_key)[:5]
+
+    return {
+        "buckets": buckets,
+        "total": round(sum(buckets.values()), 2),
+        "chase_list": chase_list,
+        "account_count": len(positive),
+    }
+
+
+def working_capital(as_of_date, positions=None):
+    """A snapshot balance sheet, loosely: cash + bank (both AS-OF
+    as_of_date) plus receivables minus payables (both ALL-TIME - see
+    below), netted into one working-capital figure.
+
+    positions is the prebuilt list from account_positions() - see
+    receivables_aging()'s docstring for why sharing one pass matters.
+    Resolved internally (with include_aging=False, since aging buckets are
+    never used here) when omitted.
+
+    LIMITATION, stated plainly rather than hidden: Account.balance has no
+    as-of variant (it's a running total over ALL history - see its
+    docstring in models.py), so receivables/payables here are always
+    TODAY's all-time figures, never as of as_of_date, even though cash
+    and bank ARE genuinely as-of that date. `net` therefore mixes a
+    date-scoped cash/bank position with an all-time credit position - for
+    any date other than today, this is a real (if usually small)
+    inconsistency, not a bug to be "fixed" without adding an as-of
+    Account.balance, which is out of scope for this phase."""
+    if positions is None:
+        positions = account_positions(as_of_date, include_aging=False)
+
+    cash_account = CashAccount.query.first()
+    cash = cash_account_balance_as_of(cash_account, as_of_date) if cash_account else 0.0
+    bank = round(sum(bank_account_balance_as_of(b, as_of_date) for b in BankAccount.query.all()), 2)
+    balances = [p["balance"] for p in positions]
+    receivables = round(sum(b for b in balances if b > 0), 2)
+    payables = round(-sum(b for b in balances if b < 0), 2)
+    return {
+        "cash": cash,
+        "bank": bank,
+        "receivables": receivables,
+        "payables": payables,
+        "net": round(cash + bank + receivables - payables, 2),
+    }
+
+
+def dead_stock(as_of_date, days=DEAD_STOCK_DAYS):
+    """Non-fuel products with stock on hand that hasn't moved: on-hand > 0
+    and the most recent ProductSale is more than `days` old, or there has
+    never been one. Sorted by value (on-hand x Product.purchase_rate)
+    descending, so the biggest chunk of dead cash surfaces first.
+
+    Built from product_stock_summary() (already one grouped-query pair,
+    see its own docstring) plus ONE additional grouped
+    max(ProductSale.entry_date) GROUP BY product_id query - never a query
+    per product, regardless of catalogue size."""
+    summary = [row for row in product_stock_summary(as_of_date) if row["on_hand"] > 0]
+    if not summary:
+        return []
+
+    ids = [row["product"].id for row in summary]
+    last_sale_by_product = dict(
+        db.session.query(ProductSale.product_id, func.max(ProductSale.entry_date))
+        .filter(ProductSale.product_id.in_(ids))
+        .group_by(ProductSale.product_id)
+        .all()
+    )
+
+    rows = []
+    for row in summary:
+        product = row["product"]
+        last_sale = last_sale_by_product.get(product.id)
+        days_since = (as_of_date - last_sale).days if last_sale else None
+        if last_sale is None or days_since > days:
+            rows.append(
+                {
+                    "product": product,
+                    "stock": row["on_hand"],
+                    "days_since_last_sale": days_since,
+                    "value": round(row["on_hand"] * product.purchase_rate, 2),
+                }
+            )
+    rows.sort(key=lambda r: r["value"], reverse=True)
+    return rows
+
+
+def nozzle_throughput(as_of_date, days=30):
+    """Per-nozzle litres over the trailing `days` window ending on
+    as_of_date, its daily rate, and its share of its own dispenser's
+    total - flagging a nozzle whose share is under half its fair share
+    (1 / nozzles on that dispenser) as `underperforming`, which usually
+    means a meter fault or an attendant steering customers to a different
+    pump rather than an actual demand drop.
+
+    Meter-mode fuel types only (direct-entry fuel types have no nozzle/Sale
+    data at all - see FuelType.entry_mode) - filtered at the query, not
+    post-filtered, and any direct-entry fuel type currently configured is
+    named in the returned "direct_entry_fuel_types" list so the card can
+    say so rather than silently omitting those nozzles with no
+    explanation.
+
+    ONE grouped query (Sale joined to Nozzle, summed litres by nozzle_id)
+    over the window, plus one Nozzle query with the tank/fuel_type/
+    dispenser relationships eagerly joined - never a query per nozzle."""
+    window_start = as_of_date - timedelta(days=days - 1)
+    liters_by_nozzle = dict(
+        db.session.query(Sale.nozzle_id, func.sum(Sale.liters))
+        .filter(Sale.entry_date >= window_start, Sale.entry_date <= as_of_date)
+        .group_by(Sale.nozzle_id)
+        .all()
+    )
+
+    nozzles = (
+        Nozzle.query.join(Tank, Nozzle.tank_id == Tank.id)
+        .join(FuelType, Tank.fuel_type_id == FuelType.id)
+        .filter(FuelType.entry_mode == "meter")
+        .options(joinedload(Nozzle.tank).joinedload(Tank.fuel_type), joinedload(Nozzle.dispenser))
+        .order_by(Nozzle.dispenser_id, Nozzle.nozzle_number)
+        .all()
+    )
+
+    by_dispenser = {}
+    for n in nozzles:
+        by_dispenser.setdefault(n.dispenser_id, []).append(n)
+
+    rows = []
+    for n in nozzles:
+        liters = round(liters_by_nozzle.get(n.id) or 0.0, 2)
+        liters_per_day = round(liters / days, 2)
+        siblings = by_dispenser[n.dispenser_id]
+        dispenser_total = round(sum(liters_by_nozzle.get(s.id) or 0.0 for s in siblings), 2)
+        fair_share = round(1 / len(siblings), 4)
+        if dispenser_total > 0:
+            share = round(liters / dispenser_total, 4)
+            underperforming = share < 0.5 * fair_share
+        else:
+            share = None
+            underperforming = False
+        rows.append(
+            {
+                "nozzle": n,
+                "tank": n.tank,
+                "fuel_type": n.tank.fuel_type,
+                "dispenser": n.dispenser,
+                "liters": liters,
+                "liters_per_day": liters_per_day,
+                "share": share,
+                "fair_share": fair_share,
+                "underperforming": underperforming,
+                "days": days,
+            }
+        )
+    rows.sort(key=lambda r: r["liters"], reverse=True)
+
+    direct_entry_fuel_types = [ft.name for ft in FuelType.query.filter_by(entry_mode="direct").order_by(FuelType.name).all()]
+
+    return {"rows": rows, "direct_entry_fuel_types": direct_entry_fuel_types, "days": days}
+
+
+def customer_concentration(positions, top_n=5):
+    """How much of total receivables sits with a handful of customers -
+    positions is the prebuilt list from account_positions(); this takes it
+    rather than walking accounts again itself (see account_positions()'s
+    own docstring for why that consolidation exists).
+
+    top3_share_pct > CONCENTRATION_PCT (module constant, shared with
+    attention_items()'s "Customer concentration" rule) flags the risk: a
+    pump that can be materially hurt by ONE customer's default, not
+    diversified across many small balances."""
+    receivable_positions = [p for p in positions if p["balance"] > 0]
+    total_receivable = round(sum(p["balance"] for p in receivable_positions), 2)
+    ranked = sorted(receivable_positions, key=lambda p: p["balance"], reverse=True)
+
+    top = []
+    for p in ranked[:top_n]:
+        share_pct = round(p["balance"] / total_receivable * 100, 1) if total_receivable else None
+        top.append({"account": p["account"], "balance": p["balance"], "share_pct": share_pct})
+
+    top3_total = sum(p["balance"] for p in ranked[:3])
+    top3_share_pct = round(top3_total / total_receivable * 100, 1) if total_receivable else 0.0
+
+    return {
+        "total_receivable": total_receivable,
+        "top": top,
+        "top3_share_pct": top3_share_pct,
+        "is_concentrated": top3_share_pct > CONCENTRATION_PCT,
+    }
+
+
+def payables_schedule(positions, as_of_date):
+    """Accounts the pump owes money TO (balance < 0), each with the amount
+    owed and the date of the OLDEST unsettled credit purchase against them
+    (StockPurchase or ProductPurchase with payment_type == "credit"),
+    sorted oldest first. positions is the prebuilt list from
+    account_positions() - account.stock_purchases/account.product_purchases
+    are already eagerly loaded on it, so this reads them from memory with
+    no additional queries.
+
+    Honesty note (not a bug, a real data-model limitation): this ages by
+    the oldest CREDIT PURCHASE date, NOT by a true FIFO settlement walk
+    the way credit_aging() ages receivables. Supplier payments in this
+    ledger are posted against the account as a whole, never matched to one
+    specific invoice, so there is no way to know which purchase(s) a given
+    payment actually cleared. "days outstanding" here is a reasonable,
+    honest approximation ("we've owed this supplier something, continuously,
+    since at least this date") - not a claim that THIS specific invoice is
+    still open."""
+    rows = []
+    for pos in positions:
+        balance = pos["balance"]
+        if balance >= 0:
+            continue
+        account = pos["account"]
+        credit_dates = [p.entry_date for p in account.stock_purchases if p.payment_type == "credit"]
+        credit_dates += [p.entry_date for p in account.product_purchases if p.payment_type == "credit"]
+        oldest = min(credit_dates) if credit_dates else None
+        days_outstanding = (as_of_date - oldest).days if oldest else None
+        rows.append(
+            {
+                "account": account,
+                "amount_owed": round(-balance, 2),
+                "oldest_purchase_date": oldest,
+                "days_outstanding": days_outstanding,
+            }
+        )
+    rows.sort(key=lambda r: (r["days_outstanding"] is None, -(r["days_outstanding"] or 0)))
+    return rows
+
+
+def cash_movement_for_date(entry_date):
+    """The cash reconciliation card: every category _cash_daily_net_changes()
+    folds into cash-in-hand for entry_date, split apart instead of summed,
+    plus the opening/closing balance either side of them.
+
+    The category list below is not independently chosen - it is
+    _cash_daily_net_changes() (the single source of truth for what moves
+    cash) read line for line and re-grouped per category instead of per
+    date. If a category is ever added there, it must be added HERE in the
+    same change or this card will silently stop closing.
+
+    opening/closing are read off ONE call to _cash_daily_net_changes()
+    (sliced twice in Python: through entry_date - 1, and through
+    entry_date) rather than two separate calls to
+    cash_account_balance_as_of() - same result (that function does
+    exactly this slice internally), one fewer full-history grouped-query
+    pass over every cash-affecting table.
+
+    INVARIANT (asserted by this phase's test suite, not just here in
+    prose): opening + total_in - total_out == closing, exactly, once both
+    sides are rounded to 2dp. If it doesn't, a category above is either
+    missing or double-counted - that mismatch IS the point of this card.
+
+    KNOWN EDGE CASE: the CashAccount's own opening_balance is injected by
+    _cash_daily_net_changes() as a pseudo-change dated on
+    opening_balance_date - it is already correctly folded into `opening`
+    for every date AFTER that one, and into neither for any date BEFORE
+    it, so the invariant holds on every ordinary day. But it is not one
+    of the itemized in/out categories below (it isn't a day's business
+    activity, it's the register's own initial funding), so on the single
+    date that EQUALS the cash account's opening_balance_date, `closing`
+    includes it while `opening` (as-of the day before) and the categories
+    (both scoped to entry_date's own activity) do not - the invariant can
+    appear to be off by exactly that opening balance on that one day."""
+    def scalar(query):
+        return float(query.scalar() or 0)
+
+    cash_sales = sales_breakdown_for_date(entry_date)["cash"]
+    cash_receipts = scalar(
+        db.session.query(func.coalesce(func.sum(Receipt.amount), 0))
+        .filter(Receipt.entry_date == entry_date, Receipt.method == "cash")
+    )
+    cash_product_sales = scalar(
+        db.session.query(func.coalesce(func.sum(ProductSale.amount), 0))
+        .filter(ProductSale.entry_date == entry_date, ProductSale.method == "cash")
+    )
+    cash_other_income = scalar(
+        db.session.query(func.coalesce(func.sum(OtherIncome.amount), 0))
+        .filter(OtherIncome.entry_date == entry_date, OtherIncome.method == "cash")
+    )
+
+    cash_expenses = scalar(
+        db.session.query(func.coalesce(func.sum(Expense.amount), 0))
+        .filter(Expense.entry_date == entry_date, Expense.method == "cash")
+    )
+    cash_fuel_purchases = scalar(
+        db.session.query(func.coalesce(func.sum(StockPurchase.cost), 0))
+        .filter(
+            StockPurchase.entry_date == entry_date,
+            StockPurchase.payment_type == "cash",
+            StockPurchase.method == "cash",
+        )
+    )
+    cash_supplier_payments = scalar(
+        db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0))
+        .filter(SupplierPayment.entry_date == entry_date, SupplierPayment.method == "cash")
+    )
+    cash_employee_loans = scalar(
+        db.session.query(func.coalesce(func.sum(EmployeeLoan.amount), 0))
+        .filter(EmployeeLoan.entry_date == entry_date, EmployeeLoan.method == "cash")
+    )
+    cash_salaries = scalar(
+        db.session.query(
+            func.coalesce(func.sum(SalaryPayment.gross_amount - SalaryPayment.deduction_amount), 0)
+        ).filter(SalaryPayment.entry_date == entry_date, SalaryPayment.method == "cash")
+    )
+    cash_deposits = scalar(
+        db.session.query(func.coalesce(func.sum(CashDeposit.amount), 0))
+        .filter(CashDeposit.entry_date == entry_date)
+    )
+    cash_sales_returns = scalar(
+        db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0))
+        .filter(SalesReturn.entry_date == entry_date, SalesReturn.method == "cash")
+    )
+    cash_product_purchases = scalar(
+        db.session.query(func.coalesce(func.sum(ProductPurchase.total_cost), 0))
+        .filter(
+            ProductPurchase.entry_date == entry_date,
+            ProductPurchase.payment_type == "cash",
+            ProductPurchase.method == "cash",
+        )
+    )
+
+    inflows = [
+        {"label": "Cash sales", "amount": round(cash_sales, 2)},
+        {"label": "Receipts", "amount": round(cash_receipts, 2)},
+        {"label": "Product sales", "amount": round(cash_product_sales, 2)},
+        {"label": "Other income", "amount": round(cash_other_income, 2)},
+    ]
+    outflows = [
+        {"label": "Expenses", "amount": round(cash_expenses, 2)},
+        {"label": "Fuel purchases", "amount": round(cash_fuel_purchases, 2)},
+        {"label": "Supplier payments", "amount": round(cash_supplier_payments, 2)},
+        {"label": "Employee loans / drawings", "amount": round(cash_employee_loans, 2)},
+        {"label": "Salaries paid", "amount": round(cash_salaries, 2)},
+        {"label": "Deposited to bank", "amount": round(cash_deposits, 2)},
+        {"label": "Sales returns refunded", "amount": round(cash_sales_returns, 2)},
+        {"label": "Product purchases", "amount": round(cash_product_purchases, 2)},
+    ]
+
+    total_in = round(sum(row["amount"] for row in inflows), 2)
+    total_out = round(sum(row["amount"] for row in outflows), 2)
+
+    changes = _cash_daily_net_changes()
+    prev_date = entry_date - timedelta(days=1)
+    opening = round(sum(v for d, v in changes.items() if d <= prev_date), 2)
+    closing = round(sum(v for d, v in changes.items() if d <= entry_date), 2)
+
+    return {
+        "opening": opening,
+        "closing": closing,
+        "inflows": [row for row in inflows if row["amount"]],
+        "outflows": [row for row in outflows if row["amount"]],
+        "total_in": total_in,
+        "total_out": total_out,
+        "net": round(total_in - total_out, 2),
+    }
+
+
+def revenue_mix_for_date(entry_date):
+    """Segments for the Dashboard's revenue-mix donut: how entry_date's
+    money actually came in, across fuel (split cash/credit/bank via
+    sales_breakdown_for_date(), which already handles DirectSale),
+    non-fuel products, and other income.
+
+    Colors are theme tokens (var(--chart-N)), not literal hex, so the
+    donut re-themes with everything else. They reuse the app's existing
+    cash=green / credit=red convention from reports_trends()'s own Sales
+    chart (charts.stacked_bar_chart(..., ["var(--chart-2)",
+    "var(--chart-4)"], ["Cash Sales", "Credit Given"])) rather than
+    inventing a new mapping, plus the remaining three chart tokens
+    reports_trends() also already uses for the same old hex values - so a
+    color means the same thing wherever it appears on this app's charts.
+
+    Zero-amount segments are dropped and the rest sorted largest first -
+    both the donut renderer and a legend list read better without a
+    scattering of empty slices."""
+    breakdown = sales_breakdown_for_date(entry_date)
+    product_revenue = float(
+        db.session.query(func.coalesce(func.sum(ProductSale.amount), 0))
+        .filter(ProductSale.entry_date == entry_date)
+        .scalar()
+    )
+    other_income_total = float(
+        db.session.query(func.coalesce(func.sum(OtherIncome.amount), 0))
+        .filter(OtherIncome.entry_date == entry_date)
+        .scalar()
+    )
+
+    segments = [
+        {"label": "Fuel - Cash", "amount": round(breakdown["cash"], 2), "color": "var(--chart-2)"},
+        {"label": "Fuel - Credit", "amount": round(breakdown["credit"], 2), "color": "var(--chart-4)"},
+        {"label": "Fuel - Bank", "amount": round(breakdown["bank"], 2), "color": "var(--chart-3)"},
+        {"label": "Products", "amount": round(product_revenue, 2), "color": "var(--chart-6)"},
+        {"label": "Other income", "amount": round(other_income_total, 2), "color": "var(--chart-1)"},
+    ]
+    segments = sorted((s for s in segments if s["amount"] > 0), key=lambda s: s["amount"], reverse=True)
+    return {"segments": segments, "total": round(sum(s["amount"] for s in segments), 2)}
+
+
+def _profit_series_for_window(start, end_date):
+    """Daily profit for [start, end_date] inclusive - the arithmetic
+    dashboard_trend_series() needs for its own current window AND
+    (Phase 2) an identical prior window for the profit chart's
+    compare-to-previous-period overlay. Factored out so there is exactly
+    ONE definition of "daily profit" backing both windows rather than a
+    second, hand-copied one that could quietly drift from the first.
+
+    Same net-revenue/COGS/expenses/salaries/product-margin/other-income
+    walk dashboard_trend_series() has always used - see that function's
+    own docstring for how this matches reports_trends()."""
+    all_dates = [start + timedelta(days=i) for i in range((end_date - start).days + 1)]
+
+    def group_sum(model, value_col, date_col="entry_date"):
+        rows = (
+            db.session.query(getattr(model, date_col), func.sum(value_col))
+            .filter(getattr(model, date_col) >= start, getattr(model, date_col) <= end_date)
+            .group_by(getattr(model, date_col))
+            .all()
+        )
+        return {r[0]: r[1] or 0 for r in rows}
+
+    sales_by_day = group_sum(Sale, Sale.total_amount)
+    for d, v in group_sum(DirectSale, DirectSale.total_amount).items():
+        sales_by_day[d] = sales_by_day.get(d, 0) + v
+    expenses_by_day = group_sum(Expense, Expense.amount)
+    salaries_by_day = group_sum(SalaryPayment, SalaryPayment.gross_amount)
+    returns_amount_by_day = group_sum(SalesReturn, SalesReturn.amount)
+    product_revenue_by_day = group_sum(ProductSale, ProductSale.amount)
+    other_income_by_day = group_sum(OtherIncome, OtherIncome.amount)
+    product_cost_by_day = {
+        r[0]: r[1] or 0
+        for r in (
+            db.session.query(ProductSale.entry_date, func.sum(ProductSale.quantity * ProductSale.purchase_rate))
+            .filter(ProductSale.entry_date >= start, ProductSale.entry_date <= end_date)
+            .group_by(ProductSale.entry_date)
+            .all()
+        )
+    }
+
+    unit_costs = {ft.id: weighted_avg_cost(ft, end_date) for ft in FuelType.query.all()}
+    sold_liters_by_day_fuel = {}
+    for entry_date_val, fuel_type_id, liters in (
+        db.session.query(Sale.entry_date, Tank.fuel_type_id, func.sum(Sale.liters))
+        .join(Nozzle, Sale.nozzle_id == Nozzle.id)
+        .join(Tank, Nozzle.tank_id == Tank.id)
+        .filter(Sale.entry_date >= start, Sale.entry_date <= end_date)
+        .group_by(Sale.entry_date, Tank.fuel_type_id)
+        .all()
+    ):
+        sold_liters_by_day_fuel[(entry_date_val, fuel_type_id)] = liters or 0
+    for entry_date_val, fuel_type_id, liters in (
+        db.session.query(DirectSale.entry_date, Tank.fuel_type_id, func.sum(DirectSale.liters))
+        .join(Tank, DirectSale.tank_id == Tank.id)
+        .filter(DirectSale.entry_date >= start, DirectSale.entry_date <= end_date)
+        .group_by(DirectSale.entry_date, Tank.fuel_type_id)
+        .all()
+    ):
+        key = (entry_date_val, fuel_type_id)
+        sold_liters_by_day_fuel[key] = sold_liters_by_day_fuel.get(key, 0) + (liters or 0)
+    returned_liters_by_day_fuel = {}
+    for entry_date_val, fuel_type_id, liters in (
+        db.session.query(SalesReturn.entry_date, SalesReturn.fuel_type_id, func.sum(SalesReturn.liters))
+        .filter(SalesReturn.entry_date >= start, SalesReturn.entry_date <= end_date)
+        .group_by(SalesReturn.entry_date, SalesReturn.fuel_type_id)
+        .all()
+    ):
+        returned_liters_by_day_fuel[(entry_date_val, fuel_type_id)] = liters or 0
+
+    cogs_by_day = {}
+    for key in set(sold_liters_by_day_fuel) | set(returned_liters_by_day_fuel):
+        entry_date_val, fuel_type_id = key
+        net_liters = sold_liters_by_day_fuel.get(key, 0) - returned_liters_by_day_fuel.get(key, 0)
+        cogs_by_day[entry_date_val] = round(
+            cogs_by_day.get(entry_date_val, 0) + net_liters * unit_costs.get(fuel_type_id, 0), 2
+        )
+
+    product_margin_series = [
+        round(product_revenue_by_day.get(d, 0) - product_cost_by_day.get(d, 0), 2) for d in all_dates
+    ]
+    profit_series = [
+        round(
+            (sales_by_day.get(d, 0) - returns_amount_by_day.get(d, 0))  # net fuel revenue
+            - cogs_by_day.get(d, 0)  # net fuel COGS
+            - expenses_by_day.get(d, 0)
+            - salaries_by_day.get(d, 0)
+            + product_margin_series[i]
+            + other_income_by_day.get(d, 0),
+            2,
+        )
+        for i, d in enumerate(all_dates)
+    ]
+    return profit_series, sales_by_day
+
+
+def dashboard_trend_series(end_date, days=30, include_previous=False):
+    """Daily profit, litres-by-fuel, rupees-by-fuel, and cash-vs-credit
+    over a FIXED `days`-day window ending on end_date (inclusive) - the
+    Dashboard's trend strip.
+
+    A small, standalone helper rather than a refactor of reports_trends()
+    (app.py): that function interleaves series-building with its own
+    chart rendering and totals for SEVEN-plus series (including
+    stock-per-tank and purchases this phase doesn't need), all implicitly
+    keyed off date.today() rather than an arbitrary end date. Threading an
+    end_date parameter through it, or extracting just the three series
+    this phase needs, would mean restructuring a function every other
+    page already depends on - out of scope for "share cleanly" per this
+    phase's brief. This instead re-runs the same grouped-query PATTERN
+    reports_trends() already demonstrates (its profit_series's net-revenue/
+    COGS/expenses/salaries/product-margin/other-income walk, and its
+    per-fuel-type litres grouping), scoped to its own end_date/day count.
+    reports_trends() itself is untouched.
+
+    Conventions deliberately match reports_trends() exactly, so the two
+    pages never quietly disagree about what the same word means:
+    litres-by-fuel (and Phase 2's rupees-by-fuel, same query, one extra
+    summed column - see below) are GROSS (Sale + DirectSale, NOT net of
+    returns) - the same "what moved across the counter" reading that
+    page's own Fuel Sold chart uses - while daily profit nets sales
+    returns into revenue and COGS the same way
+    cogs_for_period()/_reports_monthly_context() do, with product margin
+    and other income added on top exactly like reports_trends()'s own
+    profit_series.
+
+    include_previous=True (Phase 2's compare-to-previous-period toggle on
+    the profit chart) additionally computes the immediately PRECEDING
+    `days`-day window's profit series, via the same _profit_series_for_window()
+    the current window itself is built from - one extra set of the same
+    grouped queries, run once per Dashboard load, not per day."""
+    start = end_date - timedelta(days=days - 1)
+    all_dates = [start + timedelta(days=i) for i in range(days)]
+
+    profit_series, sales_by_day = _profit_series_for_window(start, end_date)
+
+    credit_by_day = {
+        r[0]: r[1] or 0
+        for r in (
+            db.session.query(CreditGiven.entry_date, func.sum(CreditGiven.amount))
+            .filter(CreditGiven.entry_date >= start, CreditGiven.entry_date <= end_date)
+            .group_by(CreditGiven.entry_date)
+            .all()
+        )
+    }
+
+    labels = [d.strftime("%b %d") for d in all_dates]
+    cash_series = [round(sales_by_day.get(d, 0) - credit_by_day.get(d, 0), 2) for d in all_dates]
+    credit_series = [round(credit_by_day.get(d, 0), 2) for d in all_dates]
+
+    fuel_types = FuelType.query.order_by(FuelType.name).all()
+    fuel_sold_by_day = {}
+    fuel_amount_by_day = {}
+    for ft in fuel_types:
+        rows = (
+            db.session.query(Sale.entry_date, func.sum(Sale.liters), func.sum(Sale.total_amount))
+            .join(Nozzle, Sale.nozzle_id == Nozzle.id)
+            .join(Tank, Nozzle.tank_id == Tank.id)
+            .filter(Tank.fuel_type_id == ft.id, Sale.entry_date >= start, Sale.entry_date <= end_date)
+            .group_by(Sale.entry_date)
+            .all()
+        )
+        by_day_liters = {r[0]: r[1] or 0 for r in rows}
+        by_day_amount = {r[0]: r[2] or 0 for r in rows}
+        # Same query shape as litres always used, with total_amount summed
+        # alongside liters in the SAME grouped query (not a second query) -
+        # this is what makes the rupee-valued series free per the Phase 2
+        # spec's performance note.
+        direct_rows = (
+            db.session.query(DirectSale.entry_date, func.sum(DirectSale.liters), func.sum(DirectSale.total_amount))
+            .join(Tank, DirectSale.tank_id == Tank.id)
+            .filter(Tank.fuel_type_id == ft.id, DirectSale.entry_date >= start, DirectSale.entry_date <= end_date)
+            .group_by(DirectSale.entry_date)
+            .all()
+        )
+        for d, liters, amount in direct_rows:
+            by_day_liters[d] = by_day_liters.get(d, 0) + (liters or 0)
+            by_day_amount[d] = by_day_amount.get(d, 0) + (amount or 0)
+        fuel_sold_by_day[ft.name] = by_day_liters
+        fuel_amount_by_day[ft.name] = by_day_amount
+
+    fuel_liters = {
+        ft.name: [round(fuel_sold_by_day[ft.name].get(d, 0), 2) for d in all_dates] for ft in fuel_types
+    }
+    fuel_amount = {
+        ft.name: [round(fuel_amount_by_day[ft.name].get(d, 0), 2) for d in all_dates] for ft in fuel_types
+    }
+
+    result = {
+        "dates": all_dates,
+        "labels": labels,
+        "profit": profit_series,
+        "cash": cash_series,
+        "credit": credit_series,
+        "fuel_liters": fuel_liters,
+        "fuel_amount": fuel_amount,
+        "fuel_types": [ft.name for ft in fuel_types],
+    }
+
+    if include_previous:
+        prev_end = start - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=days - 1)
+        prev_profit, _ = _profit_series_for_window(prev_start, prev_end)
+        result["profit_previous"] = prev_profit
+        result["previous_labels"] = [d.strftime("%b %d") for d in (
+            prev_start + timedelta(days=i) for i in range(days)
+        )]
+
+    return result
+
+
+def daily_totals_series(model, value_col, end_date, days=30, date_col="entry_date"):
+    """Generic O(1)-query per-day sum series for one model/column over the
+    `days`-day window ending on end_date (inclusive) - the shared plumbing
+    behind the Dashboard's Sales and Credit Given sparklines (Phase 2,
+    block A). One grouped query, not one query per day - the same PATTERN
+    dashboard_trend_series()'s own group_sum() uses, generalised so those
+    two single-value sparklines don't need their own copy of it."""
+    start = end_date - timedelta(days=days - 1)
+    rows = (
+        db.session.query(getattr(model, date_col), func.sum(value_col))
+        .filter(getattr(model, date_col) >= start, getattr(model, date_col) <= end_date)
+        .group_by(getattr(model, date_col))
+        .all()
+    )
+    by_day = {r[0]: (r[1] or 0) for r in rows}
+    return [round(by_day.get(start + timedelta(days=i), 0), 2) for i in range(days)]
+
+
+def sales_sparkline(end_date, days=30):
+    """Daily Sale+DirectSale total for the last `days` days ending on
+    end_date - block A's Sales card sparkline. Two grouped queries (one
+    per model), never a query per day."""
+    sale = daily_totals_series(Sale, Sale.total_amount, end_date, days)
+    direct = daily_totals_series(DirectSale, DirectSale.total_amount, end_date, days)
+    return [round(a + b, 2) for a, b in zip(sale, direct)]
+
+
+def credit_given_sparkline(end_date, days=30):
+    """Daily CreditGiven total for the last `days` days ending on
+    end_date - block A's Credit Given card sparkline. One grouped query."""
+    return daily_totals_series(CreditGiven, CreditGiven.amount, end_date, days)
+
+
+def cash_balance_sparkline(end_date, days=30):
+    """Daily cash-in-hand running balance for the last `days` days ending
+    on end_date - block A's Cash in Hand card sparkline.
+
+    _cash_daily_net_changes() already returns net change per date across
+    ALL history from a small FIXED number of grouped queries (not one per
+    date - see its own docstring). This anchors a running total at the
+    start of the window with one sum over that already-fetched dict (no
+    extra query) and walks it forward day by day in Python - so the whole
+    sparkline costs exactly what one call to _cash_daily_net_changes()
+    costs, regardless of `days`."""
+    changes = _cash_daily_net_changes()
+    start = end_date - timedelta(days=days - 1)
+    running = round(sum(v for d, v in changes.items() if d < start), 2)
+    series = []
+    for i in range(days):
+        d = start + timedelta(days=i)
+        running = round(running + changes.get(d, 0), 2)
+        series.append(running)
+    return series
+
+
+def stock_value_sparkline(end_date, tanks, costs, days=30):
+    """Total stock value across `tanks` for each of the last `days` days
+    ending on end_date, valued at TODAY's weighted-average cost per fuel
+    type (`costs`, e.g. from weighted_avg_costs()) held constant across
+    the window - the same simplification tank_stock_rows()'s single-day
+    stock-value figure already makes; recomputing a weighted cost for
+    every one of the 30 days would multiply that part of the query count
+    by 30 for a number that barely moves day to day.
+
+    Efficient because stock_series() is itself O(1) grouped queries PER
+    TANK - a running total, not a query per day (see its own docstring) -
+    so the query cost here is O(tanks), never O(tanks x days). Per the
+    Phase 2 spec's explicit performance gate, this is only wired into the
+    Dashboard if that per-tank cost, measured on a realistic tank count,
+    is actually cheap - see the Phase 2 verification notes for the
+    measured figure."""
+    start = end_date - timedelta(days=days - 1)
+    dates = [start + timedelta(days=i) for i in range(days)]
+    totals = [0.0] * days
+    for tank in tanks:
+        cost = costs.get(tank.fuel_type_id, 0.0)
+        for i, liters in enumerate(stock_series(tank, dates)):
+            totals[i] += liters * cost
+    return [round(v, 2) for v in totals]

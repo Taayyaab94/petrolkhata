@@ -143,7 +143,7 @@
       <h3>Nozzle Meter Readings</h3>
       {% if fuel_groups %}
       {% for group in fuel_groups %}
-      <div class="fuel-group" style="{% if not loop.first %}margin-top:20px; padding-top:16px; border-top:1px solid var(--border, #e5e7eb);{% endif %}">
+      <div class="fuel-group" style="{% if not loop.first %}margin-top:20px; padding-top:16px; border-top:1px solid var(--border);{% endif %}">
         <div class="fuel-group-head" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px;">
           <strong>{{ group.fuel_type.name }}</strong>
           {% if current_user.is_owner %}

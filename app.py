@@ -40,30 +40,47 @@ from extensions import db, login_manager, migrate
 from tenancy import current_pump_id, register_tenancy_events, unscoped
 from ledger_logic import (
     account_ledger_events,
+    account_positions,
     active_shifts,
     attendant_variance_summary,
     bank_account_balance_as_of,
     bank_account_ledger_events,
     book_stock,
+    break_even_liters,
     cash_account_balance,
     cash_account_balance_as_of,
     cash_account_ledger_events,
+    cash_balance_sparkline,
     cash_would_go_negative,
+    cash_movement_for_date,
     cogs_for_period,
     credit_aging,
+    credit_given_sparkline,
+    customer_concentration,
+    daily_margin,
+    dashboard_trend_series,
+    day_completeness,
+    dead_stock,
     default_shift,
+    dip_variance_for_date,
     first_negative_cash_date,
+    fuel_rate_cards,
     fuel_sales_for_date,
     handover_rows_for_date,
+    humanize_since,
+    last_activity_at,
     latest_reset_for,
     liters_from_dip_cm,
     max_cash_available_on,
     nearest_earlier_reading,
     next_sale_on_or_after,
+    nozzle_throughput,
+    payables_schedule,
     previous_reading_for,
     previous_slot,
     fuels_missing_price_on,
     price_on_date,
+    receivables_aging,
     reprice_entries,
     price_resolver,
     product_margin_for_period,
@@ -73,11 +90,22 @@ from ledger_logic import (
     product_stock_summary,
     record_fuel_price,
     record_product_rates,
+    revenue_mix_for_date,
     sales_breakdown_for_date,
+    sales_sparkline,
     split_combined_direct_sale,
     stock_series,
     sync_sale_testing,
+    tank_stock_rows,
     weighted_avg_cost,
+    weighted_avg_costs,
+    working_capital,
+    CONCENTRATION_PCT,
+    DEAD_STOCK_DAYS,
+    DIP_VARIANCE_MIN_LITERS,
+    DIP_VARIANCE_PCT,
+    HANDOVER_VARIANCE_TOLERANCE,
+    LOW_DAYS_OF_STOCK,
 )
 from models import (
     Account,
@@ -2565,8 +2593,9 @@ def ledger():
         # Date-aware closing balances for selected_date, not the all-time
         # figure cash_account_balance()/BankAccount.balance return - see
         # cash_account_balance_as_of()/bank_account_balance_as_of() in
-        # ledger_logic.py. Used ONLY here and on the Daily Report; every
-        # other page keeps showing the current/all-time figure.
+        # ledger_logic.py. Used here, on the Daily Report, and on the
+        # Dashboard; pages with no date to page against (Accounts,
+        # Settings, ...) keep showing the current/all-time figure.
         cash_balance = cash_account_balance_as_of(get_cash_account(), selected_date)
         bank_balances_by_id = {b.id: bank_account_balance_as_of(b, selected_date) for b in bank_accounts}
 
@@ -4318,73 +4347,518 @@ def entry_delete(kind, entry_id):
 
 # ------------------------------------------------------------ dashboard ---
 
+_ATTENTION_SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
+
+
+def attention_items(
+    entry_date,
+    *,
+    tank_rows,
+    dip_variance,
+    completeness,
+    fuel_rate_cards,
+    aging,
+    concentration,
+    handover_rows,
+    dead_stock_rows,
+    nozzle_rows,
+    bad_cash_date,
+):
+    """Everything about entry_date that an owner should look at, as a
+    ranked list (critical -> warning -> info) - Block F, "Needs attention".
+
+    Takes already-computed inputs rather than recomputing them: every one
+    of tank_rows/dip_variance/completeness/fuel_rate_cards/aging/
+    concentration/handover_rows/dead_stock_rows/nozzle_rows is a card the
+    Dashboard route has already built for its own section further down the
+    page - this only reads them a second time. bad_cash_date
+    (first_negative_cash_date()) is the one genuinely new call the route
+    makes for this block, and it's a single bounded pass over the cash
+    ledger, not an account walk - it doesn't reopen the Part 0 problem.
+
+    Every threshold below is a named constant imported from
+    ledger_logic.py (DIP_VARIANCE_PCT, DIP_VARIANCE_MIN_LITERS,
+    LOW_DAYS_OF_STOCK, CONCENTRATION_PCT, HANDOVER_VARIANCE_TOLERANCE,
+    DEAD_STOCK_DAYS) - that module owns them (dead_stock() and
+    customer_concentration() read the same two constants when building
+    dead_stock_rows/concentration in the first place) so there is exactly
+    ONE place to review and retune every judgment call this block makes.
+
+    Returns a list of {"severity": "critical"|"warning"|"info", "title":
+    str, "detail": str, "url": str|None} dicts, sorted critical -> warning
+    -> info (stable, so same-severity rules keep the order they were
+    appended in below - roughly "how bad" within a severity)."""
+    items = []
+
+    # ---------------------------------------------------------- critical --
+    for row in tank_rows:
+        if row["negative"]:
+            items.append(
+                {
+                    "severity": "critical",
+                    "title": f"{row['tank'].label}: negative stock",
+                    "detail": (
+                        f"Book stock is {row['stock']:.2f} L - a data-entry error "
+                        "(a missed purchase or an over-recorded sale), not a real dip below empty."
+                    ),
+                    "url": url_for("inventory"),
+                }
+            )
+        if row["over_capacity"]:
+            items.append(
+                {
+                    "severity": "critical",
+                    "title": f"{row['tank'].label}: stock above capacity",
+                    "detail": f"Book stock {row['stock']:.2f} L exceeds the tank's {row['capacity']:.2f} L capacity.",
+                    "url": url_for("inventory"),
+                }
+            )
+
+    if bad_cash_date:
+        items.append(
+            {
+                "severity": "critical",
+                "title": "Cash in hand has gone negative",
+                "detail": (
+                    f"Cash-in-hand first goes negative on {bad_cash_date.strftime('%d %b %Y')} "
+                    "- review entries on or after that date."
+                ),
+                "url": url_for("cash_account_detail"),
+            }
+        )
+
+    for card in fuel_rate_cards:
+        if card["cost_per_liter"] is not None and card["rate"] < card["cost_per_liter"]:
+            items.append(
+                {
+                    "severity": "critical",
+                    "title": f"{card['fuel_type'].name}: selling below cost",
+                    "detail": (
+                        f"Rate Rs {card['rate']:.2f}/L is below the weighted-average "
+                        f"cost Rs {card['cost_per_liter']:.2f}/L."
+                    ),
+                    "url": url_for("dashboard", date=entry_date.isoformat()),
+                }
+            )
+
+    # ----------------------------------------------------------- warning --
+    for row in dip_variance["rows"]:
+        book_stock_liters = row["dip"].dip_liters - row["variance_liters"]
+        threshold = max(DIP_VARIANCE_MIN_LITERS, DIP_VARIANCE_PCT * book_stock_liters)
+        if abs(row["variance_liters"]) > threshold:
+            items.append(
+                {
+                    "severity": "warning",
+                    "title": f"{row['tank'].label}: dip variance over threshold",
+                    "detail": (
+                        f"Variance {row['variance_liters']:.2f} L exceeds the "
+                        f"{threshold:.1f} L threshold for this tank's book stock."
+                    ),
+                    "url": url_for("reports", date=entry_date.isoformat()),
+                }
+            )
+
+    if aging["buckets"]["90+"] > 0:
+        items.append(
+            {
+                "severity": "warning",
+                "title": "Debt aged 90+ days",
+                "detail": f"Rs {aging['buckets']['90+']:.2f} has been outstanding for more than 90 days.",
+                "url": url_for("accounts", kind="debitors"),
+            }
+        )
+
+    if concentration["is_concentrated"]:
+        items.append(
+            {
+                "severity": "warning",
+                "title": "Customer concentration risk",
+                "detail": (
+                    f"Top 3 customers hold {concentration['top3_share_pct']:.1f}% of "
+                    f"receivables (Rs {concentration['total_receivable']:,.2f} total)."
+                ),
+                "url": url_for("accounts", kind="debitors"),
+            }
+        )
+
+    for row in tank_rows:
+        if row["days_of_stock"] is not None and row["days_of_stock"] < LOW_DAYS_OF_STOCK:
+            items.append(
+                {
+                    "severity": "warning",
+                    "title": f"{row['tank'].label}: low / near dry",
+                    "detail": f"Only {row['days_of_stock']:.1f} days of cover left at the current consumption rate.",
+                    "url": url_for("inventory"),
+                }
+            )
+
+    for c in completeness:
+        if c["kind"] == "unread_nozzles":
+            items.append(
+                {
+                    "severity": "warning",
+                    "title": "Unread nozzles",
+                    "detail": c["message"],
+                    "url": url_for("ledger", date=entry_date.isoformat()),
+                }
+            )
+        elif c["kind"] == "no_handover":
+            items.append(
+                {
+                    "severity": "warning",
+                    "title": "Shift not handed over",
+                    "detail": c["message"],
+                    "url": url_for("ledger", date=entry_date.isoformat()),
+                }
+            )
+
+    for row in handover_rows:
+        if row["variance"] is not None and abs(row["variance"]) > HANDOVER_VARIANCE_TOLERANCE:
+            items.append(
+                {
+                    "severity": "warning",
+                    "title": f"{row['shift'].name}: handover variance",
+                    "detail": f"Rs {row['variance']:.2f} variance against the expected cash for this shift.",
+                    "url": url_for("reports", date=entry_date.isoformat()),
+                }
+            )
+
+    # -------------------------------------------------------------- info --
+    dead_total = round(sum(r["value"] for r in dead_stock_rows), 2)
+    if dead_total > 0:
+        items.append(
+            {
+                "severity": "info",
+                "title": "Dead stock tying up cash",
+                "detail": (
+                    f"Rs {dead_total:,.2f} tied up in {len(dead_stock_rows)} product(s) "
+                    f"with no sale in {DEAD_STOCK_DAYS}+ days."
+                ),
+                "url": url_for("inventory"),
+            }
+        )
+
+    for row in nozzle_rows:
+        if row["underperforming"]:
+            items.append(
+                {
+                    "severity": "info",
+                    "title": f"{row['nozzle'].label}: underperforming",
+                    "detail": (
+                        f"{row['share'] * 100:.1f}% of its dispenser's throughput over the "
+                        f"last {row['days']} days - worth checking the meter or the attendant."
+                    ),
+                    "url": url_for("inventory"),
+                }
+            )
+
+    items.sort(key=lambda item: _ATTENTION_SEVERITY_ORDER[item["severity"]])
+    return items
+
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
     today = date.today()
+    selected_date = parse_date_param(request.args.get("date"))
 
-    today_sales_total = (
+    sales_total = (
         db.session.query(func.coalesce(func.sum(Sale.total_amount), 0))
-        .filter(Sale.entry_date == today)
+        .filter(Sale.entry_date == selected_date)
         .scalar()
     )
-    today_sales_total += (
+    sales_total += (
         db.session.query(func.coalesce(func.sum(DirectSale.total_amount), 0))
-        .filter(DirectSale.entry_date == today)
+        .filter(DirectSale.entry_date == selected_date)
         .scalar()
     )
-    today_liters = (
+    total_liters = (
         db.session.query(func.coalesce(func.sum(Sale.liters), 0))
-        .filter(Sale.entry_date == today)
+        .filter(Sale.entry_date == selected_date)
         .scalar()
     )
-    today_liters += (
+    total_liters += (
         db.session.query(func.coalesce(func.sum(DirectSale.liters), 0))
-        .filter(DirectSale.entry_date == today)
+        .filter(DirectSale.entry_date == selected_date)
         .scalar()
     )
-    today_sale_count = Sale.query.filter_by(entry_date=today).count() + DirectSale.query.filter_by(
-        entry_date=today
+    sale_count = Sale.query.filter_by(entry_date=selected_date).count() + DirectSale.query.filter_by(
+        entry_date=selected_date
     ).count()
 
-    tanks = Tank.query.order_by(Tank.number).all()
-    tank_rows = [{"tank": t, "stock": book_stock(t, today)} for t in tanks]
-    low_stock = [r for r in tank_rows if r["stock"] <= r["tank"].low_stock_threshold]
+    # Resolved ONCE and threaded through every helper below that needs a
+    # cost, rather than each one calling weighted_avg_cost() per tank/fuel
+    # in its own loop - see weighted_avg_costs()'s docstring.
+    costs = weighted_avg_costs(selected_date)
+
+    # Block C (tanks) is attendant-visible too, same as Block A's Sales
+    # card and Block B's rate cards - they already see stock day to day,
+    # so gating this by role would just be noise for no privacy benefit.
+    tank_rows = tank_stock_rows(selected_date, costs=costs)
+    low_stock = [r for r in tank_rows if r["is_low"]]
+    stock_value_total = round(sum(r["value"] for r in tank_rows), 2)
+    stock_liters_total = round(sum(r["stock"] for r in tank_rows), 2)
+
+    # Next-day paging is capped at today, matching the Ledger/Reports date
+    # nav - None here means "hide the next-day control", not "no page".
+    next_date = selected_date + timedelta(days=1) if selected_date < today else None
+
+    last_activity = last_activity_at()
+
+    # Computed once here (rather than inline in the context= dict below)
+    # because attention_items() (owner-only, further down) needs the same
+    # rows for its "selling below cost" rule and must not call this a
+    # second time.
+    fuel_rate_cards_rows = fuel_rate_cards(selected_date, costs=costs)
 
     context = dict(
-        today_total=today_sales_total,
-        today_liters=today_liters,
-        today_sale_count=today_sale_count,
+        selected_date=selected_date,
+        today=today,
+        prev_date=selected_date - timedelta(days=1),
+        next_date=next_date,
+        yesterday_date=today - timedelta(days=1),
+        sales_total=sales_total,
+        total_liters=total_liters,
+        sale_count=sale_count,
         tank_rows=tank_rows,
         low_stock=low_stock,
+        stock_value_total=stock_value_total,
+        stock_liters_total=stock_liters_total,
+        fuel_rate_cards=fuel_rate_cards_rows,
+        last_activity_at=last_activity,
+        freshness_text=(
+            f"Last entry {humanize_since(last_activity)}" if last_activity else "No entries recorded yet"
+        ),
+        # Sales is the one Block A card an attendant sees too (see the
+        # comment on tank_rows above), so its sparkline is built outside
+        # the owner-only block below - one grouped-query pair, always
+        # cheap regardless of role (see sales_sparkline()'s own docstring).
+        sales_spark=charts.sparkline(sales_sparkline(selected_date)),
     )
 
     if current_user.is_owner:
-        today_expenses = (
-            db.session.query(func.coalesce(func.sum(Expense.amount), 0))
-            .filter(Expense.entry_date == today)
-            .scalar()
-        )
-        today_credit_given = (
+        credit_given_total = (
             db.session.query(func.coalesce(func.sum(CreditGiven.amount), 0))
-            .filter(CreditGiven.entry_date == today)
+            .filter(CreditGiven.entry_date == selected_date)
             .scalar()
         )
-        # Debitors/creditors are now determined by each account's current
-        # balance sign, not by a fixed type label - an account can owe us
-        # money from one kind of entry while we owe it money from another.
-        all_balances = [a.balance for a in Account.query.all()]
-        outstanding_credit = sum(b for b in all_balances if b > 0)
-        outstanding_supplier = -sum(b for b in all_balances if b < 0)
+        credit_given_pct = round(credit_given_total / sales_total * 100, 1) if sales_total else None
+
         bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
+        bank_balances_by_id = {b.id: bank_account_balance_as_of(b, selected_date) for b in bank_accounts}
         cash_account = get_cash_account()
+        cash_balance = cash_account_balance_as_of(cash_account, selected_date)
+
+        margin = daily_margin(selected_date, costs=costs)
+        dip_variance = dip_variance_for_date(selected_date, costs=costs)
+        # Owner-only, computed here rather than left to the template to
+        # hide - an attendant seeing "no dip recorded" for a tank they
+        # don't manage is noise, not a useful signal. Also feeds
+        # attention_items() below (Block F), so it's a local variable
+        # rather than an inline kwarg in context.update().
+        completeness = day_completeness(selected_date)
+
+        # Part 0 (Phase 3): every account walked ONCE, eagerly loaded, and
+        # shared by every account-consuming helper below - receivables
+        # aging, working capital, customer concentration, and the payables
+        # schedule all take this SAME list rather than each re-walking
+        # Account.query.all() on its own. See account_positions()'s own
+        # docstring for the >97%-of-backend-time problem this replaces
+        # (previously: receivables_aging() and working_capital() each ran
+        # their own independent Account.query.all() + relationship walk).
+        positions = account_positions(selected_date)
+        # Receivables total sourced from aging (below) rather than a
+        # separate all_balances scan here - working_capital() computes the
+        # same figure independently for the working-capital sum, and the
+        # verification suite asserts the two agree exactly rather than
+        # this route silently trusting that they will.
+        aging = receivables_aging(selected_date, positions=positions)
+        wc = working_capital(selected_date, positions=positions)
+        # Phase 3 analytics that also read `positions` rather than walking
+        # accounts again (spec sections 5-6).
+        concentration = customer_concentration(positions)
+        payables = payables_schedule(positions, selected_date)
+
+        cash_movement = cash_movement_for_date(selected_date)
+        revenue_mix = revenue_mix_for_date(selected_date)
+        # include_previous=True additionally computes the preceding 30-day
+        # window's profit series (one more pass of the same grouped
+        # queries) for the profit chart's compare-to-previous-period
+        # "ghost" overlay - see dashboard_trend_series()'s own docstring.
+        trend = dashboard_trend_series(selected_date, days=30, include_previous=True)
+        # Per-shift cash reconciliation for the carried-over-from-Phase-1
+        # shift scorecard (spec section 0) - same data the Daily Report's
+        # own Cash Handover table already renders.
+        handover_rows = handover_rows_for_date(selected_date)
+
+        # Phase 3 analytics (spec sections 1-4) - none of these walk
+        # accounts, so they're independent of account_positions() above.
+        pace = month_to_date_pace(selected_date)
+        break_even = break_even_liters(selected_date, costs=costs)
+        dead_stock_rows = dead_stock(selected_date)
+        nozzle_data = nozzle_throughput(selected_date)
+
+        # Block F - "Needs attention" (spec section 7). Every input here
+        # is a card the rest of this route already built for its own
+        # section further down the page; bad_cash_date is the one
+        # genuinely new (and cheap, bounded) query this block adds.
+        bad_cash_date = first_negative_cash_date()
+        attention = attention_items(
+            selected_date,
+            tank_rows=tank_rows,
+            dip_variance=dip_variance,
+            completeness=completeness,
+            fuel_rate_cards=fuel_rate_cards_rows,
+            aging=aging,
+            concentration=concentration,
+            handover_rows=handover_rows,
+            dead_stock_rows=dead_stock_rows,
+            nozzle_rows=nozzle_data["rows"],
+            bad_cash_date=bad_cash_date,
+        )
+
+        # Chart colors are theme tokens (var(--chart-N)), not literal hex -
+        # see the matching comment in reports_trends() for the mapping.
+        tank_colors = [
+            "var(--chart-3)", "var(--chart-2)", "var(--chart-1)",
+            "var(--chart-4)", "var(--chart-6)", "var(--chart-5)",
+        ]
+        profit_chart = charts.line_chart(
+            [trend["profit"], trend["profit_previous"]],
+            trend["labels"],
+            ["var(--chart-2)", "var(--muted)"],
+            ["Profit", "Profit (previous 30 days)"],
+            interactive=True,
+            ghost_indices=(1,),
+        )
+        cash_credit_chart = charts.stacked_bar_chart(
+            trend["cash"], trend["credit"], trend["labels"], ["var(--chart-2)", "var(--chart-4)"], ["Cash Sales", "Credit Given"],
+            interactive=True,
+        )
+        fuel_liters_chart = (
+            charts.line_chart(
+                list(trend["fuel_liters"].values()),
+                trend["labels"],
+                [tank_colors[i % len(tank_colors)] for i in range(len(trend["fuel_types"]))],
+                trend["fuel_types"],
+                interactive=True,
+            )
+            if trend["fuel_types"]
+            else ""
+        )
+        # Rupee-valued twin of the litres chart above (same window, same
+        # per-fuel-type colours) for the litres/rupees unit toggle - both
+        # render server-side (spec section 8: no client-side re-rendering),
+        # the client only ever flips which one is visible.
+        fuel_amount_chart = (
+            charts.line_chart(
+                list(trend["fuel_amount"].values()),
+                trend["labels"],
+                [tank_colors[i % len(tank_colors)] for i in range(len(trend["fuel_types"]))],
+                trend["fuel_types"],
+                interactive=True,
+            )
+            if trend["fuel_types"]
+            else ""
+        )
+        revenue_mix_donut = charts.donut_chart(revenue_mix["segments"])
+
+        # Block A sparklines (Phase 2): Sales is built outside this
+        # owner-only block (see context= above, staff sees it too).
+        # Margin's sparkline reuses dashboard_trend_series()'s own profit
+        # series unchanged, exactly as the spec directs, rather than
+        # computing a second one - it already matches Total Margin's
+        # definition ("fuel + products + other income"). Cash/Credit are
+        # each one more cheap grouped-query helper (measured: 16 and 1
+        # extra SQL statements respectively on a 10-tank/20-account scratch
+        # DB - see the Phase 2 verification notes).
+        #
+        # Stock Value DELIBERATELY has NO sparkline, despite
+        # stock_value_sparkline() existing and being correctly O(tanks) not
+        # O(tanks x days) (stock_series() is a running total, not a
+        # query-per-day - see its docstring). Measured on the same 10-tank
+        # scratch DB: 80 SQL statements (~110-250ms depending on cache
+        # warmth) for that ONE sparkline - roughly DOUBLING the Dashboard's
+        # existing tank-related query volume (tank_stock_rows() itself is
+        # 44 queries for 10 tanks) for one decorative trend squiggle. That
+        # clears the spec's literal "not a query storm" bar but still isn't
+        # a good trade against the ~1s page-budget this phase is required
+        # to protect, so it's shipped in ledger_logic.py (importable,
+        # tested) but not wired into this route. See the Phase 2 report for
+        # the full measurement.
+        margin_spark = charts.sparkline(trend["profit"])
+        cash_spark = charts.sparkline(cash_balance_sparkline(selected_date))
+        credit_spark = charts.sparkline(credit_given_sparkline(selected_date))
+
+        # The nine-value "At a glance" rail (Phase 2 makes it sticky): a
+        # deliberate mix of figures that already headline elsewhere on the
+        # page (cash, receivables) alongside ones with no other card
+        # (bank total, payables, net working capital, blended margin/
+        # litre, credit % of sales, today's dip variance) - built entirely
+        # from values already computed above, so it costs zero extra
+        # queries. Phase 2 adds an optional "href" per item (spec section
+        # 5's drill-down table) - only the values that table actually
+        # names get one; the rest render as plain text same as before.
+        kpi_rail = [
+            {"label": "Cash in hand", "value": f"Rs {wc['cash']:,.2f}", "href": url_for("cash_account_detail")},
+            {"label": "Bank balance", "value": f"Rs {wc['bank']:,.2f}"},
+            {
+                "label": "Receivables (all-time)",
+                "value": f"Rs {wc['receivables']:,.2f}",
+                "href": url_for("accounts"),
+            },
+            {"label": "Payables (all-time)", "value": f"Rs {wc['payables']:,.2f}", "href": url_for("accounts")},
+            {"label": "Net working capital", "value": f"Rs {wc['net']:,.2f}", "href": url_for("accounts")},
+            {"label": "Stock value", "value": f"Rs {stock_value_total:,.2f}", "href": url_for("inventory")},
+            {
+                "label": "Fuel margin / litre",
+                "value": (
+                    f"Rs {margin['margin_per_liter']:.2f}" if margin["margin_per_liter"] is not None else "-"
+                ),
+            },
+            {
+                "label": "Credit as % of sales",
+                "value": f"{credit_given_pct:.1f}%" if credit_given_pct is not None else "-",
+            },
+            {
+                "label": "Dip variance today",
+                "value": f"Rs {dip_variance['total_value']:,.2f}",
+                "href": url_for("reports", date=selected_date.isoformat()),
+            },
+        ]
+
         context.update(
-            today_expenses=today_expenses,
-            today_credit_given=today_credit_given,
-            outstanding_credit=outstanding_credit,
-            outstanding_supplier=outstanding_supplier,
+            credit_given_total=credit_given_total,
+            credit_given_pct=credit_given_pct,
             bank_accounts=bank_accounts,
-            cash_balance=cash_account_balance(cash_account),
+            bank_balances_by_id=bank_balances_by_id,
+            cash_balance=cash_balance,
+            completeness=completeness,
+            margin=margin,
+            dip_variance=dip_variance,
+            aging=aging,
+            working_capital=wc,
+            cash_movement=cash_movement,
+            revenue_mix=revenue_mix,
+            handover_rows=handover_rows,
+            profit_chart=profit_chart,
+            cash_credit_chart=cash_credit_chart,
+            fuel_liters_chart=fuel_liters_chart,
+            fuel_amount_chart=fuel_amount_chart,
+            revenue_mix_donut=revenue_mix_donut,
+            kpi_rail=kpi_rail,
+            margin_spark=margin_spark,
+            cash_spark=cash_spark,
+            credit_spark=credit_spark,
+            # ---------------------------------------------- Phase 3 ----
+            attention_items=attention,
+            pace=pace,
+            break_even=break_even,
+            dead_stock_rows=dead_stock_rows,
+            dead_stock_total=round(sum(r["value"] for r in dead_stock_rows), 2),
+            nozzle_throughput=nozzle_data,
+            concentration=concentration,
+            payables=payables,
         )
 
     return render_template("dashboard.html", **context)
@@ -5539,12 +6013,12 @@ def _reports_context(selected_date):
     outstanding_credit = sum((b for a in Account.query.all() if (b := a.balance) > 0), 0.0)
     # Date-aware closing balances for the SELECTED date, not the all-time
     # figure cash_account_balance()/BankAccount.balance return - the
-    # Ledger/Daily Report pages are date-driven, so paging back to an
-    # older date must show cash-in-hand and each bank's balance as they
-    # stood at the END of that date (see cash_account_balance_as_of() and
-    # bank_account_balance_as_of() in ledger_logic.py). Every other page
-    # (dashboard, Accounts, bank account detail, Settings) keeps calling
-    # the plain all-time functions, unchanged.
+    # Ledger/Daily Report/Dashboard pages are date-driven, so paging back
+    # to an older date must show cash-in-hand and each bank's balance as
+    # they stood at the END of that date (see cash_account_balance_as_of()
+    # and bank_account_balance_as_of() in ledger_logic.py). Pages with no
+    # date to page against (Accounts, bank account detail, Settings) keep
+    # calling the plain all-time functions, unchanged.
     cash_balance = cash_account_balance_as_of(get_cash_account(), selected_date)
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
     bank_balances_by_id = {b.id: bank_account_balance_as_of(b, selected_date) for b in bank_accounts}
@@ -5971,6 +6445,92 @@ def _reports_monthly_context(start, end):
     }
 
 
+def month_to_date_pace(as_of_date):
+    """MTD revenue/profit pace for the Dashboard's "This month so far"
+    card: what's happened this month, what the SAME number of days into
+    last month looked like (a fair comparison - 18 partial days of August
+    against all 31 days of July would always look like August is losing,
+    even at an identical daily run rate), last month's full total (to
+    answer "will we beat last month?"), and a straight-line projection to
+    month end.
+
+    Built entirely from _reports_monthly_context() - called up to three
+    times (this month to date, last month to the same day-count, last
+    month in full) rather than reimplementing any margin/COGS/sales-returns
+    arithmetic here. That function's own docstring documents the
+    sales-returns double-count bug this phase must not reopen; three calls
+    to it (a handful of grouped, bounded queries each) is a completely
+    different order of cost from the O(accounts) problem Part 0 exists to
+    fix, so this stays well inside the "bounded queries" constraint.
+
+    revenue/profit figures used throughout are the NET ones
+    (_reports_monthly_context()'s "net_revenue"/"net_profit" - already net
+    of sales returns) rather than the gross "revenue" key, so the pace
+    comparison and the projection are never contaminated by a return that
+    hasn't been netted out yet.
+
+    days_elapsed is 1..days_in_month, inclusive of as_of_date itself (day 1
+    of the month has days_elapsed == 1, not 0), so the projection formula
+    (mtd / days_elapsed * days_in_month) is never a divide-by-zero."""
+    month_start = as_of_date.replace(day=1)
+    days_elapsed = (as_of_date - month_start).days + 1
+    month_end = (month_start + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+    days_in_month = month_end.day
+
+    prior_month_end = month_start - timedelta(days=1)
+    prior_month_start = prior_month_end.replace(day=1)
+    prior_days_in_month = prior_month_end.day
+    # Clamped so e.g. "day 31" of a 31-day month doesn't overrun a 28/29/30
+    # day February when walking back one month - the comparison then uses
+    # as many days as the prior month actually has, which is the fairest
+    # number available rather than an out-of-range date.
+    prior_same_day_count = min(days_elapsed, prior_days_in_month)
+    prior_mtd_end = prior_month_start + timedelta(days=prior_same_day_count - 1)
+
+    mtd_ctx = _reports_monthly_context(month_start, as_of_date)
+    prior_mtd_ctx = _reports_monthly_context(prior_month_start, prior_mtd_end)
+    prior_full_ctx = _reports_monthly_context(prior_month_start, prior_month_end)
+
+    mtd_revenue = mtd_ctx["net_revenue"]
+    mtd_profit = mtd_ctx["net_profit"]
+    prior_mtd_revenue = prior_mtd_ctx["net_revenue"]
+    prior_mtd_profit = prior_mtd_ctx["net_profit"]
+    prior_full_revenue = prior_full_ctx["net_revenue"]
+    prior_full_profit = prior_full_ctx["net_profit"]
+
+    projected_revenue = round(mtd_revenue / days_elapsed * days_in_month, 2)
+    projected_profit = round(mtd_profit / days_elapsed * days_in_month, 2)
+
+    def _delta_pct(current, prior):
+        # abs(prior) as the denominator keeps the sign of the delta
+        # meaningful even when prior itself was a loss (a negative
+        # prior_mtd_profit that improves toward zero should read as a
+        # POSITIVE delta, not a confusing negative-over-negative).
+        if not prior:
+            return None
+        return round((current - prior) / abs(prior) * 100, 1)
+
+    revenue_delta_pct = _delta_pct(mtd_revenue, prior_mtd_revenue)
+    profit_delta_pct = _delta_pct(mtd_profit, prior_mtd_profit)
+
+    return {
+        "month_start": month_start,
+        "days_elapsed": days_elapsed,
+        "days_in_month": days_in_month,
+        "mtd_revenue": mtd_revenue,
+        "mtd_profit": mtd_profit,
+        "prior_mtd_revenue": prior_mtd_revenue,
+        "prior_mtd_profit": prior_mtd_profit,
+        "prior_full_revenue": prior_full_revenue,
+        "prior_full_profit": prior_full_profit,
+        "projected_revenue": projected_revenue,
+        "projected_profit": projected_profit,
+        "revenue_delta_pct": revenue_delta_pct,
+        "profit_delta_pct": profit_delta_pct,
+        "ahead": profit_delta_pct is not None and profit_delta_pct >= 0,
+    }
+
+
 @app.route("/reports/monthly")
 @login_required
 @owner_required
@@ -6243,17 +6803,27 @@ def reports_trends():
         for i, d in enumerate(all_dates)
     ]
 
+    # Chart colors are theme tokens (var(--chart-N)), not literal hex, so
+    # every chart re-themes with the rest of the app. The mapping keeps
+    # each old hex's "identity" wherever it appeared (green=cash-positive
+    # -> chart-2, red=credit/expense -> chart-4, indigo=neutral secondary
+    # series -> chart-3) so a color still means the same thing across every
+    # chart on this page, same intent as revenue_mix_for_date()'s own
+    # docstring in ledger_logic.py.
     sales_chart = charts.stacked_bar_chart(
-        cash_series, credit_series, labels, ["#059669", "#dc2626"], ["Cash Sales", "Credit Given"]
+        cash_series, credit_series, labels, ["var(--chart-2)", "var(--chart-4)"], ["Cash Sales", "Credit Given"]
     )
     cashflow_chart = charts.line_chart(
-        [receipts_series, expenses_series], labels, ["#4f46e5", "#dc2626"], ["Receipts", "Expenses"]
+        [receipts_series, expenses_series], labels, ["var(--chart-3)", "var(--chart-4)"], ["Receipts", "Expenses"]
     )
-    purchases_chart = charts.bar_chart(purchases_series, labels, "#4f46e5")
-    profit_chart = charts.line_chart([profit_series], labels, ["#059669"], ["Profit (Est.)"])
+    purchases_chart = charts.bar_chart(purchases_series, labels, "var(--chart-3)")
+    profit_chart = charts.line_chart([profit_series], labels, ["var(--chart-2)"], ["Profit (Est.)"])
 
     tanks = Tank.query.order_by(Tank.number).all()
-    tank_colors = ["#4f46e5", "#059669", "#d97706", "#dc2626", "#0891b2", "#7c3aed"]
+    tank_colors = [
+        "var(--chart-3)", "var(--chart-2)", "var(--chart-1)",
+        "var(--chart-4)", "var(--chart-6)", "var(--chart-5)",
+    ]
     stock_series_list = [stock_series(t, all_dates) for t in tanks]
     stock_chart = (
         charts.line_chart(
