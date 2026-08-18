@@ -76,18 +76,16 @@
 {{ change_table(preview.credits, "Credit sales", "Customer") }}
 {{ change_table(preview.returns, "Sales returns", "Tank") }}
 
-{% if preview.skipped_credits %}
+{% macro skipped_table(rows, heading, what, note) %}
+{% if rows %}
 <div class="panel">
-  <div class="panel-head"><h3>Left alone - look like deliberate discounts ({{ preview.skipped_credits|length }})</h3></div>
-  <p class="hint">These credit entries have an amount that doesn't equal litres &times; price, which is the signature of
-  an entry made in "By Amount" mode - i.e. a price deliberately agreed with the customer. Re-pricing them would
-  silently overwrite that discount, so they are <strong>not</strong> being changed. Review them by hand if any of
-  these actually should be re-priced.</p>
+  <div class="panel-head"><h3>{{ heading }} ({{ rows|length }})</h3></div>
+  <p class="hint">{{ note|safe }}</p>
   <div class="table-wrap">
   <table class="table">
-    <thead><tr><th>Date</th><th>Customer</th><th>Fuel</th><th>Litres</th><th>Amount (kept)</th><th>Would have been</th></tr></thead>
+    <thead><tr><th>Date</th><th>{{ what }}</th><th>Fuel</th><th>Litres</th><th>Amount (kept)</th><th>Would have been</th></tr></thead>
     <tbody>
-      {% for c in preview.skipped_credits %}
+      {% for c in rows %}
       <tr>
         <td>{{ c.obj.entry_date.isoformat() }}</td>
         <td>{{ c.label }}</td>
@@ -102,6 +100,27 @@
   </div>
 </div>
 {% endif %}
+{% endmacro %}
+
+{{ skipped_table(
+  preview.skipped_credits, "Left alone - look like deliberate discounts", "Customer",
+  "These credit entries have an amount that doesn't equal litres &times; price, which is the signature of "
+  ~ "an entry made in \"By Amount\" mode - i.e. a price deliberately agreed with the customer. Re-pricing them "
+  ~ "would silently overwrite that discount, so they are not being changed. Review them by hand if any of these "
+  ~ "actually should be re-priced."
+) }}
+{{ skipped_table(
+  preview.skipped_sales, "Left alone - nozzle sales entered at an overridden price", "Nozzle",
+  "These nozzle readings were saved with a deliberately overridden price (not the date's default). Re-pricing "
+  ~ "them would silently overwrite that override, so they are not being changed. Review them by hand if any of "
+  ~ "these actually should be re-priced."
+) }}
+{{ skipped_table(
+  preview.skipped_direct_sales, "Left alone - direct sales entered at an overridden price", "Tank",
+  "These direct sales entries were saved with a deliberately overridden price (not the date's default). "
+  ~ "Re-pricing them would silently overwrite that override, so they are not being changed. Review them by hand "
+  ~ "if any of these actually should be re-priced."
+) }}
 
 {% if preview.count %}
 <div class="panel">

@@ -2981,8 +2981,27 @@ def ledger_readings():
         # Price as of entry_date, not today's current price - so backfilling
         # or correcting an old date re-prices at the rate that was actually
         # in effect then, never at whatever the price happens to be today.
-        price = price_on_date(nozzle.fuel_type, entry_date)
+        default_price = price_on_date(nozzle.fuel_type, entry_date)
+        raw_price = request.form.get(f"price_{nozzle.id}", "").strip()
+        if raw_price:
+            try:
+                price = float(raw_price)
+            except ValueError:
+                errors.append(f"{nozzle.label}: price is not a valid number.")
+                continue
+            if price <= 0:
+                errors.append(f"{nozzle.label}: price must be a positive number.")
+                continue
+        else:
+            price = default_price
         total_amount = round(liters * price, 2)
+        # Decided once, here, while today's default is known with zero
+        # ambiguity - reprice_entries() (ledger_logic.py) reads this flag
+        # forever after rather than re-guessing it from a possibly-corrected
+        # price history. Applies ONLY to this current-date row - never to
+        # the backfilled prior-slot row below, which belongs to a different
+        # date than the one this override was typed for.
+        overridden = abs(price - default_price) > 0.0001
 
         if backfill_prior:
             bf_price = price_on_date(nozzle.fuel_type, backfill_prior["entry_date"])
@@ -3005,6 +3024,10 @@ def ledger_readings():
                     testing_liters=0,
                     price_per_liter=bf_price,
                     total_amount=round(bf_liters * bf_price, 2),
+                    # Never the current row's override - the backfilled row
+                    # is a different date than the one the owner typed a
+                    # price for; it always prices at its OWN date's default.
+                    price_overridden=False,
                     user_id=current_user.id,
                 )
             )
@@ -3016,6 +3039,7 @@ def ledger_readings():
             existing.testing_liters = 0
             existing.price_per_liter = price
             existing.total_amount = total_amount
+            existing.price_overridden = overridden
             existing.user_id = current_user.id
         else:
             db.session.add(
@@ -3029,6 +3053,7 @@ def ledger_readings():
                     testing_liters=0,
                     price_per_liter=price,
                     total_amount=total_amount,
+                    price_overridden=overridden,
                     user_id=current_user.id,
                 )
             )
@@ -3122,7 +3147,27 @@ def ledger_direct_sale():
     # Price as of entry_date, not today's current price - so backfilling
     # or correcting an old date re-prices at the rate that was actually in
     # effect then, exactly like nozzle readings already do.
-    price = price_on_date(fuel_type, entry_date)
+    default_price = price_on_date(fuel_type, entry_date)
+    raw_price = request.form.get("price_override", "").strip()
+    price_error = None
+    if raw_price:
+        try:
+            price = float(raw_price)
+        except ValueError:
+            price = None
+            price_error = f"{fuel_type.name}: price is not a valid number."
+        if price is not None and price <= 0:
+            price = None
+            price_error = f"{fuel_type.name}: price must be a positive number."
+    else:
+        price = default_price
+    if price_error:
+        flash(price_error, "error")
+        return redirect(url_for("ledger", date=entry_date, shift=shift.id))
+    # One price/verdict for the whole submission - every DirectSale row it
+    # creates or updates shares the same date and fuel type, so they all
+    # share the same default and the same override outcome.
+    price_overridden = abs(price - default_price) > 0.0001
     combine = fuel_type.direct_entry_combined and len(tanks) > 1
 
     liters_by_tank_id = {}
@@ -3174,6 +3219,7 @@ def ledger_direct_sale():
             existing.liters = liters
             existing.price_per_liter = price
             existing.total_amount = total_amount
+            existing.price_overridden = price_overridden
             existing.user_id = current_user.id
         else:
             db.session.add(
@@ -3184,6 +3230,7 @@ def ledger_direct_sale():
                     liters=liters,
                     price_per_liter=price,
                     total_amount=total_amount,
+                    price_overridden=price_overridden,
                     user_id=current_user.id,
                 )
             )
@@ -3902,6 +3949,17 @@ def ledger_product_sale():
     method, bank_account, account, method_error = resolve_return_method(request.form)
     product, product_error = resolve_product(request.form, entry_date)
 
+    raw_retail_override = request.form.get("retail_rate_override", "").strip()
+    retail_override = None
+    retail_override_error = None
+    if raw_retail_override:
+        try:
+            retail_override = float(raw_retail_override)
+        except ValueError:
+            retail_override_error = "Retail rate override is not a valid number."
+        if retail_override is not None and retail_override <= 0:
+            retail_override_error = "Retail rate override must be a positive number."
+
     if product_error:
         db.session.rollback()
         flash(product_error, "error")
@@ -3911,11 +3969,18 @@ def ledger_product_sale():
     elif method_error:
         db.session.rollback()
         flash(method_error, "error")
+    elif retail_override_error:
+        db.session.rollback()
+        flash(retail_override_error, "error")
     else:
         # Resolved for entry_date, never read from the product's cached
         # rate directly - a backdated sale has to snapshot the rates that
         # were actually in effect on ITS date (see product_rates_on_date()).
+        # purchase_rate is NEVER touched by the override below - cost keeps
+        # coming from product_rates_on_date() unconditionally.
         purchase_rate, retail_rate = product_rates_on_date(product, entry_date)
+        if retail_override is not None:
+            retail_rate = retail_override
         amount = round(quantity * retail_rate, 2)
         # Computed BEFORE the new row is added, so it reflects stock as it
         # stood going into this sale.

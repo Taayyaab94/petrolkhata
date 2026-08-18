@@ -209,6 +209,10 @@
                 {% endif %}
                 <input type="number" step="0.01" min="0" id="reading_{{ row.nozzle.id }}" name="reading_{{ row.nozzle.id }}" class="nz-current-input"
                        placeholder="This date's reading" value="{{ row.existing_reading if row.existing_reading is not none else '' }}">
+                <label class="nz-price-manual" title="Override this date's default price for this nozzle only - leave blank to use the default.">Price/L
+                  <input type="number" step="0.01" min="0.01" name="price_{{ row.nozzle.id }}" class="nz-price-input"
+                         placeholder="{{ "%.2f"|format(row.price) }}">
+                </label>
                 <div class="calc-preview" id="calc_{{ row.nozzle.id }}">{% if row.previous_is_auto %}Enter this date's reading{% else %}No entry for the day before - enter both readings{% endif %}</div>
               </div>
               {% endfor %}
@@ -246,6 +250,12 @@
                 {% endfor %}
               </div>
               {% endif %}
+              <div class="form-grid">
+                <label title="Override this date's default price for this fuel type - leave blank to use the default.">Price/L override (optional)
+                  <input type="number" step="0.01" min="0.01" class="direct-price-input" name="price_override"
+                         placeholder="{{ "%.2f"|format(fuel_prices_by_id.get(group.fuel_type.id)) }}">
+                </label>
+              </div>
               <div class="calc-preview">Amount will be calculated automatically</div>
             </div>
             <div style="margin-top:14px;">
@@ -385,6 +395,9 @@
           </label>
           <label>Quantity
             <input type="number" step="0.01" min="0.01" name="quantity" id="product_sale_quantity" required>
+          </label>
+          <label title="Override the selected product's default retail rate for this sale only - leave blank to use the default.">Retail rate override (optional)
+            <input type="number" step="0.01" min="0.01" name="retail_rate_override" id="product_sale_price_override">
           </label>
           <label>Received via
             <select name="method" class="paidvia-select" data-scope="product_sale" id="product_sale_method">
@@ -1307,7 +1320,8 @@ function fmtMoney(v) {
 document.querySelectorAll('.nozzle-row').forEach(function (row) {
   const input = row.querySelector('.nz-current-input');
   const preview = row.querySelector('.calc-preview');
-  const price = parseFloat(row.dataset.price);
+  const defaultPrice = parseFloat(row.dataset.price);
+  const priceInput = row.querySelector('.nz-price-input');
   const manualPrev = row.querySelector('.nz-previous-input');
   const existingTesting = parseFloat(row.dataset.testing) || 0;
 
@@ -1317,6 +1331,17 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
       return isNaN(v) ? null : v;
     }
     return parseFloat(row.dataset.last);
+  }
+
+  // Live preview reads whatever is CURRENTLY in the price field - the
+  // override, if one is typed, otherwise the pre-filled default - so it
+  // always matches what the server will actually price the row at.
+  function getPrice() {
+    if (priceInput && priceInput.value !== '') {
+      const v = parseFloat(priceInput.value);
+      if (!isNaN(v) && v > 0) return v;
+    }
+    return defaultPrice;
   }
 
   function update() {
@@ -1338,6 +1363,7 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
     // reports over_by) via sync_sale_testing() once this is saved.
     const testing = Math.min(existingTesting, gross);
     const liters = gross - testing;
+    const price = getPrice();
     const amount = liters * price;
     if (testing > 0) {
       preview.innerHTML = gross.toFixed(2) + ' L &minus; ' + testing.toFixed(2) + ' L testing = ' + liters.toFixed(2) +
@@ -1349,6 +1375,7 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
   }
   input.addEventListener('input', update);
   if (manualPrev) manualPrev.addEventListener('input', update);
+  if (priceInput) priceInput.addEventListener('input', update);
   update();
 });
 
@@ -1357,10 +1384,19 @@ document.querySelectorAll('.nozzle-row').forEach(function (row) {
 // across that group's field(s) (one combined field, or one per tank) x
 // that fuel's price on the selected date.
 document.querySelectorAll('.fuel-group-body').forEach(function (body) {
-  const price = parseFloat(body.dataset.price) || 0;
+  const defaultPrice = parseFloat(body.dataset.price) || 0;
   const inputs = body.querySelectorAll('.direct-liters-input');
+  const priceInput = body.querySelector('.direct-price-input');
   const preview = body.querySelector('.calc-preview');
   if (!preview) return;
+
+  function getPrice() {
+    if (priceInput && priceInput.value !== '') {
+      const v = parseFloat(priceInput.value);
+      if (!isNaN(v) && v > 0) return v;
+    }
+    return defaultPrice;
+  }
 
   function update() {
     let total = 0;
@@ -1377,11 +1413,13 @@ document.querySelectorAll('.fuel-group-body').forEach(function (body) {
       preview.className = 'calc-preview';
       return;
     }
+    const price = getPrice();
     const amount = total * price;
     preview.innerHTML = total.toFixed(2) + ' L &times; Rs ' + price.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
     preview.className = 'calc-preview has-value';
   }
   inputs.forEach(function (inp) { inp.addEventListener('input', update); });
+  if (priceInput) priceInput.addEventListener('input', update);
   update();
 });
 
@@ -1790,12 +1828,18 @@ function initProductPicker(scope, onChange) {
 // blocking) ---
 const productSaleHidden = document.querySelector('.product-picker[data-scope="product_sale"] .product-id-input');
 const productSaleQuantity = document.getElementById('product_sale_quantity');
+const productSalePriceOverride = document.getElementById('product_sale_price_override');
 const productSaleCalc = document.getElementById('product_sale_calc');
 function findProduct(id) {
   if (!id || id === '__new__') return null;
   const numId = parseInt(id, 10);
   return PRODUCTS.find(function (p) { return p.id === numId; }) || null;
 }
+// Reads the override field's CURRENT value when one is typed, otherwise
+// the selected product's default retail rate - mirrors what the server
+// does with retail_rate_override in ledger_product_sale(). purchase_rate
+// is never overridden, so the commission preview keeps using
+// product.purchase directly, unaffected by this.
 function updateProductSaleCalc() {
   if (productSaleHidden.value === '__new__') {
     productSaleCalc.textContent = 'New product - amount will be calculated once it is saved';
@@ -1809,10 +1853,15 @@ function updateProductSaleCalc() {
     productSaleCalc.className = 'calc-preview';
     return;
   }
-  const amount = qty * product.retail;
-  const commissionPerUnit = product.retail - product.purchase;
+  let retailRate = product.retail;
+  if (productSalePriceOverride && productSalePriceOverride.value !== '') {
+    const overrideVal = parseFloat(productSalePriceOverride.value);
+    if (!isNaN(overrideVal) && overrideVal > 0) retailRate = overrideVal;
+  }
+  const amount = qty * retailRate;
+  const commissionPerUnit = retailRate - product.purchase;
   const commission = qty * commissionPerUnit;
-  let msg = qty.toFixed(2) + ' x Rs ' + product.retail.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
+  let msg = qty.toFixed(2) + ' x Rs ' + retailRate.toFixed(2) + ' = <strong>Rs ' + fmtMoney(amount) + '</strong>';
   msg += ' &middot; commission Rs ' + commissionPerUnit.toFixed(2) + '/unit = Rs ' + fmtMoney(commission);
   let cls = 'has-value';
   msg += ' &middot; ' + product.stock.toFixed(2) + ' in stock';
@@ -1823,10 +1872,26 @@ function updateProductSaleCalc() {
   productSaleCalc.innerHTML = msg;
   productSaleCalc.className = 'calc-preview ' + cls;
 }
+// Whenever the product PICKER selection itself changes (not just quantity
+// or the override field), reset the override to blank so a discount typed
+// for a previously-selected product never lingers onto a newly-selected
+// one - the placeholder/preview should always start from the new
+// product's own default until the owner types a fresh override.
+function onProductSaleSelectionChange() {
+  if (productSalePriceOverride) {
+    productSalePriceOverride.value = '';
+    const product = findProduct(productSaleHidden.value);
+    productSalePriceOverride.placeholder = product ? product.retail.toFixed(2) : '';
+  }
+  updateProductSaleCalc();
+}
 if (productSaleQuantity) {
   productSaleQuantity.addEventListener('input', updateProductSaleCalc);
 }
-initProductPicker('product_sale', updateProductSaleCalc);
+if (productSalePriceOverride) {
+  productSalePriceOverride.addEventListener('input', updateProductSaleCalc);
+}
+initProductPicker('product_sale', onProductSaleSelectionChange);
 updateProductSaleCalc();
 
 // --- Non-Fuel Sale: "On customer's account" reveals the customer picker,

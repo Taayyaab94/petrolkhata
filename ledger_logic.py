@@ -489,7 +489,10 @@ def reprice_entries(start, end, apply_changes=False):
     fuel_types = FuelType.query.all()
     resolve = price_resolver(fuel_types)
 
-    changes = {"sales": [], "direct_sales": [], "credits": [], "returns": [], "skipped_credits": []}
+    changes = {
+        "sales": [], "direct_sales": [], "credits": [], "returns": [],
+        "skipped_credits": [], "skipped_sales": [], "skipped_direct_sales": [],
+    }
 
     sales = (
         Sale.query.filter(Sale.entry_date >= start, Sale.entry_date <= end)
@@ -501,6 +504,18 @@ def reprice_entries(start, end, apply_changes=False):
         fuel = s.nozzle.tank.fuel_type
         new_price = resolve(fuel, s.entry_date)
         new_total = round(s.liters * new_price, 2)
+        if s.price_overridden:
+            # Deliberately priced away from the default at save time (see
+            # Sale.price_overridden's docstring in models.py) - re-pricing
+            # would silently overwrite that discount, so it's left alone
+            # and just reported, mirroring skipped_credits below.
+            changes["skipped_sales"].append({
+                "obj": s, "fuel": fuel.name, "label": s.nozzle.label,
+                "liters": s.liters, "old_price": s.price_per_liter,
+                "new_price": new_price,
+                "old_amount": s.total_amount, "new_amount": s.total_amount,
+            })
+            continue
         if abs(new_price - s.price_per_liter) < 0.0001 and abs(new_total - s.total_amount) < 0.01:
             continue
         changes["sales"].append({
@@ -527,6 +542,17 @@ def reprice_entries(start, end, apply_changes=False):
         fuel = ds.tank.fuel_type
         new_price = resolve(fuel, ds.entry_date)
         new_total = round(ds.liters * new_price, 2)
+        if ds.price_overridden:
+            # Same reasoning as the Sale loop above - a deliberate override
+            # at save time, so it's left alone rather than silently
+            # re-priced.
+            changes["skipped_direct_sales"].append({
+                "obj": ds, "fuel": fuel.name, "label": ds.tank.label,
+                "liters": ds.liters, "old_price": ds.price_per_liter,
+                "new_price": new_price,
+                "old_amount": ds.total_amount, "new_amount": ds.total_amount,
+            })
+            continue
         if abs(new_price - ds.price_per_liter) < 0.0001 and abs(new_total - ds.total_amount) < 0.01:
             continue
         changes["direct_sales"].append({

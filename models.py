@@ -412,6 +412,13 @@ class Sale(TenantScoped, db.Model):
     testing_liters = db.Column(db.Float, nullable=False, default=0)
     price_per_liter = db.Column(db.Float, nullable=False)
     total_amount = db.Column(db.Float, nullable=False)
+    # Set once, at save time, by comparing the submitted price against
+    # price_on_date()'s answer for this exact row at that moment - never
+    # re-derived afterwards. reprice_entries() (ledger_logic.py) reads this
+    # to tell "deliberately discounted" apart from "needs correcting after
+    # a price-history fix", which look identical from price_per_liter alone
+    # once a price history correction could exist.
+    price_overridden = db.Column(db.Boolean, nullable=False, default=False)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
@@ -459,6 +466,11 @@ class DirectSale(TenantScoped, db.Model):
     liters = db.Column(db.Float, nullable=False)
     price_per_liter = db.Column(db.Float, nullable=False)
     total_amount = db.Column(db.Float, nullable=False)
+    # Same flag as Sale.price_overridden, and for the same reason - set
+    # once at save time, read by reprice_entries() to skip rows that were
+    # deliberately priced away from that date's default rather than ones
+    # left stale by a later price-history correction.
+    price_overridden = db.Column(db.Boolean, nullable=False, default=False)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     recorded_at = db.Column(db.DateTime, default=datetime.now)
 
