@@ -1603,6 +1603,63 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
 
 .concentration-block { margin-top: var(--s4); }
 
+/* ---------- monthly report (Phase 4) ---------- */
+
+/* Big litre figure on a fuel/stock card - same scale as .stat-card .value
+   but inside a .tank-card, which has no .value rule of its own. */
+.fuel-figure { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.01em;
+               margin: var(--s2) 0; font-variant-numeric: tabular-nums;
+               font-feature-settings: "tnum"; }
+.fuel-unit { font-size: 0.9rem; font-weight: 600; color: var(--muted); }
+
+/* Step-by-step profit walk. A vertical <ol>: label | signed amount |
+   running total, with the note spanning underneath. No chart code - the
+   whole thing is grid + borders. */
+.profit-steps { list-style: none; margin: 0; padding: 0;
+                display: flex; flex-direction: column; gap: 2px; }
+.profit-step { display: grid;
+               grid-template-columns: minmax(0, 1fr) auto auto;
+               grid-template-areas: "label amount running" "note note note";
+               align-items: baseline; gap: var(--s2) var(--s4);
+               padding: var(--s2) var(--s3);
+               border-left: 3px solid var(--border);
+               background: var(--surface); }
+.profit-step .step-label   { grid-area: label; }
+.profit-step .step-amount  { grid-area: amount; font-variant-numeric: tabular-nums;
+                             font-feature-settings: "tnum"; white-space: nowrap; }
+.profit-step .step-running { grid-area: running; min-width: 9ch; text-align: right;
+                             color: var(--muted); font-variant-numeric: tabular-nums;
+                             font-feature-settings: "tnum"; white-space: nowrap; }
+.profit-step .step-note    { grid-area: note; color: var(--muted); font-size: 0.8rem; }
+.profit-step .step-amount.pos { color: var(--pos); }
+.profit-step .step-amount.neg { color: var(--neg); }
+.profit-step.memo { background: transparent; border-left-color: transparent;
+                    color: var(--muted); font-size: 0.9rem; }
+.profit-step.start,
+.profit-step.subtotal { background: var(--surface-2); font-weight: 600;
+                        border-left-color: var(--border-strong); }
+.profit-step.total { background: var(--surface-2); font-weight: 700;
+                     font-size: 1.05rem; border-left-color: var(--accent); }
+.profit-step.total .step-running { color: var(--ink); }
+@media (max-width: 700px) {
+  .profit-step { grid-template-columns: minmax(0, 1fr) auto;
+                 grid-template-areas: "label amount" "running running" "note note"; }
+  .profit-step .step-running { text-align: left; }
+}
+
+/* Payables / receivables expander. Native <details> - no JS, and it is
+   rendered open by default so print and PDF never lose the rows. */
+.acct-details > summary { cursor: pointer; list-style: revert;
+                          padding: var(--s2) 0 var(--s3);
+                          display: flex; align-items: baseline;
+                          gap: var(--s3); flex-wrap: wrap; }
+.acct-details > summary::-webkit-details-marker { color: var(--muted); }
+.acct-total { font-size: 1.5rem; font-weight: 700;
+              font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.acct-total.accent-pos { color: var(--pos); }
+.acct-total.accent-neg { color: var(--neg); }
+.acct-caption { color: var(--muted); font-size: 0.85rem; }
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 860px) {
@@ -1788,4 +1845,6 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
      literal black-on-white. This is the one literal hex pair the spec
      exempts from the "no literals" sweep in section 2. */
   body { background: #fff; color: #000; }
+  .profit-steps, .profit-step, .tank-card, .acct-details { break-inside: avoid; }
+  details > summary { list-style: none; }
 }

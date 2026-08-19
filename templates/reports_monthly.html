@@ -25,77 +25,268 @@
   </form>
 </div>
 
-<div class="subtitle" style="margin:-4px 0 10px;">Presented as an income statement - each figure below feeds the next: Fuel Revenue, gross &rarr; less Sales Returns &rarr; Net Fuel Revenue &rarr; less Cost of Fuel Sold &rarr; Fuel Gross Margin &rarr; plus Product Gross Margin &rarr; Total Gross Margin &rarr; plus Other Income &rarr; less Expenses &amp; Salaries &rarr; Net Profit.</div>
+<!-- This page deliberately does NOT use the Dashboard's .dash-card /
+     .card-toggle / .chevron / dashboard.js drag-reorder machinery:
+     (a) that machinery is Dashboard-specific interactive state persisted
+     per user by static/dashboard.js, keyed to data-card ids on that page;
+     (b) this page is printed (Print button above) and exported to
+     PDF/Excel, and a JS-collapsed section prints as a bare heading,
+     silently losing data from a statement; (c) the visual language -
+     .panel, .panel-head, .stat-card + accent classes, .badge*,
+     .tank-fill-*, .chart-wrap.donut-wrap, .attention-list - is fully
+     available without it. The only expand/collapse on this page is the
+     two native <details> elements below (Payables/Receivables), rendered
+     open by default so print and screen both show the rows. -->
+
+<!-- ===================================================== B1: Month at a Glance === -->
 <div class="stat-row">
-  <div class="stat-card accent-brand">
-    <div class="label">Fuel Revenue, Gross</div>
-    <div class="value">Rs {{ "%.2f"|format(revenue) }}</div>
-    <div class="sub">{{ "%.2f"|format(liters_sold) }} L sold &middot; {{ "%.2f"|format(testing_liters) }} L testing</div>
-  </div>
-  <div class="stat-card accent-red">
-    <div class="label">Less: Sales Returns</div>
-    <div class="value">Rs {{ "%.2f"|format(sales_returns_amount) }}</div>
-    <div class="sub">{{ "%.2f"|format(sales_returns_liters) }} L returned, any refund method</div>
+  <div class="stat-card {{ 'accent-green' if net_profit >= 0 else 'accent-red' }}">
+    <div class="label">Net Profit</div>
+    <div class="value">Rs {{ "%.2f"|format(net_profit) }}</div>
+    <div class="sub">{{ prior_month_label }}: Rs {{ "%.2f"|format(prior_ctx.net_profit) }}</div>
   </div>
   <div class="stat-card accent-brand">
-    <div class="label">Net Fuel Revenue</div>
-    <div class="value">Rs {{ "%.2f"|format(net_revenue) }}</div>
-    <div class="sub">Gross revenue less sales returns</div>
-  </div>
-  <div class="stat-card accent-red">
-    <div class="label">Total Discounts Given</div>
-    <div class="value">Rs {{ "%.2f"|format(total_discounts) }}</div>
-    <div class="sub">Credit sales billed below list price - already netted out of Fuel Revenue, Gross above</div>
-  </div>
-  <div class="stat-card accent-red">
-    <div class="label">Less: Cost of Fuel Sold</div>
-    <div class="value">Rs {{ "%.2f"|format(cogs) }}</div>
-    <div class="sub">Net liters sold &times; avg purchase cost</div>
-  </div>
-  <div class="stat-card accent-green">
-    <div class="label">Fuel Gross Margin</div>
-    <div class="value">Rs {{ "%.2f"|format(gross_margin) }}</div>
-    <div class="sub">{{ "%.1f"|format(gross_margin / net_revenue * 100 if net_revenue else 0) }}% of net fuel revenue</div>
-  </div>
-  <div class="stat-card accent-brand">
-    <div class="label">Product Revenue</div>
-    <div class="value">Rs {{ "%.2f"|format(product_revenue) }}</div>
-  </div>
-  <div class="stat-card accent-red">
-    <div class="label">Less: Cost of Products Sold</div>
-    <div class="value">Rs {{ "%.2f"|format(product_cost) }}</div>
-    <div class="sub">Exact per line - snapshotted rate, not a weighted average</div>
-  </div>
-  <div class="stat-card accent-green">
-    <div class="label">Product Gross Margin</div>
-    <div class="value">Rs {{ "%.2f"|format(product_commission) }}</div>
-    <div class="sub">{{ "%.1f"|format(product_commission / product_revenue * 100 if product_revenue else 0) }}% of product revenue</div>
+    <div class="label">Fuel Sold</div>
+    <div class="value">{{ "%.2f"|format(liters_sold) }} L</div>
+    <div class="sub">Rs {{ "%.2f"|format(net_revenue) }} net revenue</div>
   </div>
   <div class="stat-card accent-green">
     <div class="label">Total Gross Margin</div>
     <div class="value">Rs {{ "%.2f"|format(total_gross_margin) }}</div>
-    <div class="sub">Fuel + product gross margin</div>
+    <div class="sub">Fuel + product</div>
+  </div>
+  <div class="stat-card accent-brand">
+    <div class="label">Stock Ordered</div>
+    <div class="value">{{ "%.2f"|format(purchases_liters) }} L</div>
+    <div class="sub">Rs {{ "%.2f"|format(purchases_cost) }}</div>
   </div>
   <div class="stat-card accent-green">
-    <div class="label">Other Income</div>
-    <div class="value">Rs {{ "%.2f"|format(other_income_total) }}</div>
+    <a class="stat-link" href="{{ url_for('cash_account_detail') }}">
+      <div class="label">Closing Cash in Hand</div>
+      <div class="value">Rs {{ "%.2f"|format(cash_period.closing) }}</div>
+      <div class="sub">Opening Rs {{ "%.2f"|format(cash_period.opening) }}</div>
+    </a>
   </div>
-  <div class="stat-card accent-red">
-    <div class="label">Less: Expenses</div>
-    <div class="value">Rs {{ "%.2f"|format(expenses_total) }}</div>
-  </div>
-  <div class="stat-card accent-red">
-    <div class="label">Less: Salaries</div>
-    <div class="value">Rs {{ "%.2f"|format(salaries_total) }}</div>
-    <div class="sub">Full salary earned, before deductions</div>
-  </div>
-  <div class="stat-card {{ 'accent-green' if net_profit >= 0 else 'accent-red' }}">
-    <div class="label">Net Profit</div>
-    <div class="value">Rs {{ "%.2f"|format(net_profit) }}</div>
-    <div class="sub">Total gross margin + other income &minus; expenses &minus; salaries</div>
+  <div class="stat-card">
+    <div class="label">Receivables &minus; Payables</div>
+    <div class="value">Rs {{ "%.2f"|format(receivables_total - payables_total) }}</div>
+    <div class="sub">Rs {{ "%.2f"|format(receivables_total) }} owed to you &middot; Rs {{ "%.2f"|format(payables_total) }} owed by you</div>
   </div>
 </div>
 
+<!-- ===================================================== B2: How the Month Went === -->
+<div class="panel">
+  <div class="panel-head"><h3>How the Month Went</h3></div>
+  {% if narrative %}
+  <ul class="attention-list">
+    {% for item in narrative %}
+    <li class="attention-row">
+      <span class="badge {{ 'badge-low' if item.severity == 'critical' else ('badge-warn' if item.severity == 'warning' else ('badge-ok' if item.severity == 'good' else '')) }}">{{ item.severity }}</span>
+      {% if item.url %}<a href="{{ item.url }}" class="attention-title">{{ item.title }}</a>{% else %}<span class="attention-title">{{ item.title }}</span>{% endif %}
+      <span class="attention-detail">{{ item.detail }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <span class="badge">Nothing notable to report for this month</span>
+  {% endif %}
+</div>
+
+<!-- ===================================================== B3: Fuel Sold === -->
+<div class="panel">
+  <div class="panel-head"><h3>Fuel Sold</h3></div>
+  <div class="two-col">
+    <div>
+      <div class="chart-wrap donut-wrap">{{ fuel_sold_donut|safe }}</div>
+      <p class="hint">Share of net fuel revenue this month, by fuel type.</p>
+    </div>
+    <div>
+      {% if cogs_detail %}
+      <div class="tank-grid">
+        {% for r in cogs_detail %}
+        {% set mpl = (r.margin / r.liters) if r.liters else 0 %}
+        {% set share = (r.liters / liters_sold * 100) if liters_sold else 0 %}
+        {% set bar_width = [[share, 100]|min, 0]|max %}
+        {% set bar_class = 'neg' if mpl <= 0 else ('warn' if mpl < thin_margin_per_liter else 'pos') %}
+        <div class="tank-card">
+          <div class="tank-card-head">
+            <strong>{{ r.fuel }}</strong>
+            <span class="badge {{ 'badge-low' if mpl <= 0 else ('badge-warn' if mpl < thin_margin_per_liter else 'badge-ok') }}">Rs {{ "%.2f"|format(mpl) }}/L</span>
+          </div>
+          <div class="fuel-figure">{{ "%.2f"|format(r.liters) }} <span class="fuel-unit">L</span></div>
+          <div class="tank-fill-track"><div class="tank-fill-bar {{ bar_class }}" style="width: {{ bar_width }}%;"></div></div>
+          <div class="sub">{{ "%.1f"|format(share) }}% of the month's litres</div>
+          <div class="sub">Rs {{ "%.2f"|format(r.revenue) }} net revenue</div>
+          <div class="sub">Rs {{ "%.2f"|format(r.margin) }} margin &middot; Rs {{ "%.4f"|format(r.unit_cost) }}/L cost</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <span class="badge">No fuel sold in this month.</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ===================================================== B4: Stock Ordered === -->
+<div class="panel">
+  <div class="panel-head"><h3>Stock Ordered</h3></div>
+  <div class="two-col">
+    <div>
+      <div class="chart-wrap donut-wrap">{{ stock_ordered_donut|safe }}</div>
+      <p class="hint">Share of this month's fuel-purchase spend, by fuel type.</p>
+    </div>
+    <div>
+      {% if purchases_by_fuel %}
+      <div class="tank-grid">
+        {% for p in purchases_by_fuel %}
+        {% set sold = (cogs_detail | selectattr('fuel','equalto',p.fuel) | map(attribute='liters') | sum) %}
+        {% set cover = (p.liters / sold * 100) if sold else 100 %}
+        {% set bar_width = [[cover, 100]|min, 0]|max %}
+        {% set bar_class = 'pos' if cover >= 100 else ('warn' if cover >= 50 else 'neg') %}
+        <div class="tank-card">
+          <div class="tank-card-head">
+            <strong>{{ p.fuel }}</strong>
+            <span class="badge">Rs {{ "%.4f"|format(p.avg_cost_per_liter) }}/L</span>
+          </div>
+          <div class="fuel-figure">{{ "%.2f"|format(p.liters) }} <span class="fuel-unit">L</span></div>
+          <div class="tank-fill-track"><div class="tank-fill-bar {{ bar_class }}" style="width: {{ bar_width }}%;"></div></div>
+          <div class="sub">Rs {{ "%.2f"|format(p.cost) }} total cost</div>
+          <div class="sub">Rs {{ "%.4f"|format(p.avg_cost_per_liter) }} average order cost per litre</div>
+          <div class="sub">{% if sold %}{{ "%.1f"|format(cover) }}% of the {{ "%.2f"|format(sold) }} L sold{% else %}no sales of this fuel this month{% endif %}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <span class="badge">No fuel received in this month.</span>
+      {% endif %}
+      <p class="hint">Fuel received this month against what was sold: a bar under 100% means the month ate into tank stock. Cost of Fuel Sold in the profit walk below is what went OUT of the tanks; this is what came IN - they differ by whatever is still sitting in the tanks.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ===================================================== B5: Monthly Profit, Step by Step === -->
+<div class="panel">
+  <div class="panel-head"><h3>Monthly Profit, Step by Step</h3></div>
+  <p class="hint">Every figure feeds the next. Grey lines are explanatory only and don't move the running total.</p>
+  <ol class="profit-steps">
+    {% for s in profit_steps %}
+    <li class="profit-step {{ s.kind }}">
+      <span class="step-label">
+        {%- if s.kind == 'less' -%}Less: {% elif s.kind == 'add' %}Plus: {% endif -%}
+        {{ s.label }}
+      </span>
+      <span class="step-amount {{ 'neg' if s.kind == 'less' else ('pos' if s.kind == 'add' else '') }}">
+        {%- if s.kind == 'less' %}&minus; {% elif s.kind == 'add' %}+ {% endif -%}
+        Rs {{ "%.2f"|format(s.amount) }}
+      </span>
+      <span class="step-running">{% if s.running is not none %}Rs {{ "%.2f"|format(s.running) }}{% endif %}</span>
+      {% if s.note %}<span class="step-note">{{ s.note }}</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+</div>
+
+<!-- ===================================================== B6: Cash Summary + Credit & Stock Movement === -->
+<div class="two-col">
+  <div class="panel">
+    <div class="panel-head"><h3>Cash Summary</h3></div>
+    <div class="table-wrap">
+    <table class="table">
+      <tbody>
+        <tr class="recon-anchor"><td>Opening cash in hand</td><td>Rs {{ "%.2f"|format(cash_period.opening) }}</td></tr>
+        {% for row in cash_period.inflows %}
+        <tr><td>+ {{ row.label }}</td><td>Rs {{ "%.2f"|format(row.amount) }}</td></tr>
+        {% endfor %}
+        <tr class="recon-anchor"><td>Total cash received</td><td>Rs {{ "%.2f"|format(cash_period.total_in) }}</td></tr>
+        {% for row in cash_period.outflows %}
+        <tr><td>&minus; {{ row.label }}</td><td>Rs {{ "%.2f"|format(row.amount) }}</td></tr>
+        {% endfor %}
+        <tr class="recon-anchor"><td>Total cash paid</td><td>Rs {{ "%.2f"|format(cash_period.total_out) }}</td></tr>
+        <tr class="recon-anchor"><td>Closing cash in hand</td><td>Rs {{ "%.2f"|format(cash_period.closing) }}</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="recon-formula">
+      Opening (Rs {{ "%.2f"|format(cash_period.opening) }}) + Received (Rs {{ "%.2f"|format(cash_period.total_in) }}) &minus; Paid (Rs {{ "%.2f"|format(cash_period.total_out) }}) = Closing (Rs {{ "%.2f"|format(cash_period.closing) }})
+    </div>
+    <p class="hint">Cash only - bank movements are not counted here. Closing cash in hand is the balance at the end of {{ end.strftime('%d %b %Y') }}.</p>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Credit &amp; Stock Movement</h3></div>
+    <div class="table-wrap">
+    <table class="table">
+      <tbody>
+        <tr><td>Credit given to customers</td><td>Rs {{ "%.2f"|format(credit_given) }}</td></tr>
+        <tr><td>Payments received</td><td>Rs {{ "%.2f"|format(receipts_total) }}</td></tr>
+        <tr><td>Fuel purchased</td><td>{{ "%.2f"|format(purchases_liters) }} L</td></tr>
+        <tr><td>Spent on fuel purchases</td><td>Rs {{ "%.2f"|format(purchases_cost) }}</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="hint">Credit given is what customers took on account this month; payments received is what came back in against any account, from any month.</p>
+  </div>
+</div>
+
+<!-- ===================================================== B7: Payables / Receivables === -->
+<div class="two-col">
+  <div class="panel">
+    <div class="panel-head"><h3>Payables</h3></div>
+    <details class="acct-details" open>
+      <summary>
+        <span class="acct-total accent-neg">Rs {{ "%.2f"|format(payables_total) }}</span>
+        <span class="acct-caption">owed to {{ payables_rows|length }} account(s)</span>
+      </summary>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>Account</th><th>Owed (Rs)</th><th>Oldest Credit Purchase</th><th>Days Outstanding</th></tr></thead>
+          <tbody>
+            {% for row in payables_rows %}
+            <tr>
+              <td><a href="{{ url_for('account_detail', account_id=row.account.id) }}">{{ row.account.name }}</a></td>
+              <td>{{ "%.2f"|format(row.amount_owed) }}</td>
+              <td>{{ row.oldest_purchase_date.strftime('%d %b %Y') if row.oldest_purchase_date else "-" }}</td>
+              <td>{{ row.days_outstanding if row.days_outstanding is not none else "-" }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4">Nothing owed to any account.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+    <p class="hint">Balance as of today ({{ balances_as_of.strftime('%d %b %Y') }}), not as of month end - account balances in this ledger are running all-time totals with no as-of-date variant, so this is the honest figure available. Aged by the oldest credit purchase on file per supplier, not a FIFO settlement walk.</p>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Receivables</h3></div>
+    <details class="acct-details" open>
+      <summary>
+        <span class="acct-total accent-pos">Rs {{ "%.2f"|format(receivables_total) }}</span>
+        <span class="acct-caption">owed by {{ receivable_rows|length }} account(s)</span>
+      </summary>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>Account</th><th>Owed to You (Rs)</th></tr></thead>
+          <tbody>
+            {% for row in receivable_rows %}
+            <tr>
+              <td><a href="{{ url_for('account_detail', account_id=row.account.id) }}">{{ row.account.name }}</a></td>
+              <td>{{ "%.2f"|format(row.balance) }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="2">No account owes the pump anything.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+    <p class="hint">Balance as of today ({{ balances_as_of.strftime('%d %b %Y') }}), not as of month end - same limitation as Payables. Sorted largest first.</p>
+  </div>
+</div>
+
+<!-- ===================================================== B8: Margin by Fuel Type (kept verbatim) === -->
 <div class="panel">
   <div class="panel-head"><h3>Margin by Fuel Type</h3></div>
   <div class="table-wrap">
@@ -129,6 +320,7 @@
   <p class="hint">"Net Liters Sold" and "Net Revenue" (gross minus that fuel's own returns) are what Cost and Margin are actually computed from - a returned liter didn't stay sold, so it isn't costed or credited as revenue here, only shown separately so the deduction stays visible. Cost per liter is the weighted average of every purchase of that fuel up to the end of this month - a stable, explainable approximation rather than strict per-delivery (FIFO) lot tracking.</p>
 </div>
 
+<!-- ===================================================== B9: Margin by Product Category (kept verbatim) === -->
 <div class="panel">
   <div class="panel-head"><h3>Margin by Product Category</h3></div>
   <div class="table-wrap">
@@ -155,6 +347,7 @@
   <p class="hint">Shop items are kept as their own line here, separate from lubricants and filters, the same way fuel is broken out by type above - each line's cost is exact (the rate snapshotted at the moment of that sale), never a weighted average.</p>
 </div>
 
+<!-- ===================================================== B10: Expenses by Category + Cash Variance by Attendant === -->
 <div class="two-col">
   <div class="panel">
     <div class="panel-head"><h3>Expenses by Category</h3></div>
@@ -173,40 +366,25 @@
   </div>
 
   <div class="panel">
-    <div class="panel-head"><h3>Credit &amp; Stock Movement</h3></div>
+    <div class="panel-head"><h3>Cash Variance by Attendant</h3></div>
+    <p class="hint">Across every reconciled shift this month. A repeated shortfall is worth investigating; an occasional small one either way is normal.</p>
     <div class="table-wrap">
     <table class="table">
+      <thead><tr><th>Attendant</th><th>Shifts Reconciled</th><th>Shifts Short</th><th>Net Variance (Rs)</th></tr></thead>
       <tbody>
-        <tr><td>Credit given to customers</td><td>Rs {{ "%.2f"|format(credit_given) }}</td></tr>
-        <tr><td>Payments received</td><td>Rs {{ "%.2f"|format(receipts_total) }}</td></tr>
-        <tr><td>Fuel purchased</td><td>{{ "%.2f"|format(purchases_liters) }} L</td></tr>
-        <tr><td>Spent on fuel purchases</td><td>Rs {{ "%.2f"|format(purchases_cost) }}</td></tr>
+        {% for r in attendant_variances %}
+        <tr class="{{ 'row-low' if r.total_variance < -0.01 else '' }}">
+          <td>{% if r.account %}<a href="{{ url_for('account_detail', account_id=r.account.id) }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</td>
+          <td>{{ r.shifts }}</td>
+          <td>{{ r.shortfalls }}</td>
+          <td>{{ "+" if r.total_variance > 0 }}{{ "%.2f"|format(r.total_variance) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4">No shifts reconciled this month - record a cash handover on the Ledger to start tracking this.</td></tr>
+        {% endfor %}
       </tbody>
     </table>
     </div>
-    <p class="hint">Fuel purchased is what came in this month; Cost of Fuel Sold above is what went out. They differ by whatever is still sitting in the tanks.</p>
-  </div>
-</div>
-
-<div class="panel">
-  <div class="panel-head"><h3>Cash Variance by Attendant</h3></div>
-  <p class="hint">Across every reconciled shift this month. A repeated shortfall is worth investigating; an occasional small one either way is normal.</p>
-  <div class="table-wrap">
-  <table class="table">
-    <thead><tr><th>Attendant</th><th>Shifts Reconciled</th><th>Shifts Short</th><th>Net Variance (Rs)</th></tr></thead>
-    <tbody>
-      {% for r in attendant_variances %}
-      <tr class="{{ 'row-low' if r.total_variance < -0.01 else '' }}">
-        <td>{% if r.account %}<a href="{{ url_for('account_detail', account_id=r.account.id) }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</td>
-        <td>{{ r.shifts }}</td>
-        <td>{{ r.shortfalls }}</td>
-        <td>{{ "+" if r.total_variance > 0 }}{{ "%.2f"|format(r.total_variance) }}</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="4">No shifts reconciled this month - record a cash handover on the Ledger to start tracking this.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
   </div>
 </div>
 

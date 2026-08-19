@@ -53,6 +53,8 @@ from ledger_logic import (
     cash_balance_sparkline,
     cash_would_go_negative,
     cash_movement_for_date,
+    cash_movement_for_period,
+    best_sales_day_for_period,
     cogs_for_period,
     credit_aging,
     credit_discounts_for_period,
@@ -95,6 +97,7 @@ from ledger_logic import (
     sales_breakdown_for_date,
     sales_sparkline,
     split_combined_direct_sale,
+    stock_purchases_by_fuel_for_period,
     stock_series,
     sync_sale_testing,
     tank_stock_rows,
@@ -107,6 +110,8 @@ from ledger_logic import (
     DIP_VARIANCE_PCT,
     HANDOVER_VARIANCE_TOLERANCE,
     LOW_DAYS_OF_STOCK,
+    MONTHLY_SHORTFALL_TOLERANCE,
+    THIN_MARGIN_PER_LITER,
 )
 from models import (
     Account,
@@ -4383,6 +4388,7 @@ def entry_delete(kind, entry_id):
 # ------------------------------------------------------------ dashboard ---
 
 _ATTENTION_SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
+_NARRATIVE_SEVERITY_ORDER = {"critical": 0, "warning": 1, "good": 2, "info": 3}
 
 
 def attention_items(
@@ -4589,6 +4595,264 @@ def attention_items(
 
     items.sort(key=lambda item: _ATTENTION_SEVERITY_ORDER[item["severity"]])
     return items
+
+
+def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
+    """Rule-based, deterministic observations about one month - the
+    Monthly Report's counterpart to attention_items(), same return shape
+    (severity/title/detail/url) so it reuses the Dashboard's
+    .attention-list markup verbatim. Every number quoted comes from
+    ctx/prior_ctx/best_day, which the caller has already computed; this
+    function issues ZERO queries of its own. Adds one severity value
+    attention_items() doesn't have - "good" - because unlike "Needs
+    Attention" this list is also meant to say what went right. Thresholds
+    come from the named constants in ledger_logic.py."""
+    items = []
+    detail = ctx["cogs_detail"]
+
+    def mpl(r):
+        return r["margin"] / r["liters"] if r["liters"] else 0.0
+
+    # R1 - loss-making month (critical).
+    if ctx["net_profit"] < 0:
+        items.append(
+            {
+                "severity": "critical",
+                "title": "The month closed at a loss",
+                "detail": (
+                    f"Net profit for {start.strftime('%B %Y')} is Rs {ctx['net_profit']:,.2f}. "
+                    f"Total gross margin Rs {ctx['total_gross_margin']:,.2f} plus other income "
+                    f"Rs {ctx['other_income_total']:,.2f} did not cover Rs {ctx['expenses_total']:,.2f} "
+                    f"of expenses and Rs {ctx['salaries_total']:,.2f} of salaries."
+                ),
+                "url": None,
+            }
+        )
+
+    # R2 - a fuel sold below cost (critical).
+    for r in detail:
+        if r["liters"] > 0 and mpl(r) < 0:
+            items.append(
+                {
+                    "severity": "critical",
+                    "title": f"{r['fuel']}: sold below cost this month",
+                    "detail": (
+                        f"Rs {mpl(r):,.2f} margin per litre across {r['liters']:,.2f} L - net revenue "
+                        f"Rs {r['revenue']:,.2f} against Rs {r['cost']:,.2f} of cost at the "
+                        "weighted-average purchase price."
+                    ),
+                    "url": None,
+                }
+            )
+
+    # R3 - thin margin (warning).
+    for r in detail:
+        if r["liters"] > 0 and 0 <= mpl(r) < THIN_MARGIN_PER_LITER:
+            items.append(
+                {
+                    "severity": "warning",
+                    "title": f"{r['fuel']}: thin margin",
+                    "detail": (
+                        f"Only Rs {mpl(r):,.2f} margin per litre this month, under the "
+                        f"Rs {THIN_MARGIN_PER_LITER:,.2f}/L mark - Rs {r['margin']:,.2f} earned on "
+                        f"{r['liters']:,.2f} L."
+                    ),
+                    "url": None,
+                }
+            )
+
+    # R4 - profit against the prior full month (good/warning/info).
+    if prior_ctx["net_profit"] != 0:
+        delta = round(ctx["net_profit"] - prior_ctx["net_profit"], 2)
+        pct = round(delta / abs(prior_ctx["net_profit"]) * 100, 1)
+        if delta >= 0:
+            items.append(
+                {
+                    "severity": "good",
+                    "title": "Profit is up on last month",
+                    "detail": (
+                        f"Rs {ctx['net_profit']:,.2f} this month against Rs {prior_ctx['net_profit']:,.2f} "
+                        f"in {prior_month_label} - up Rs {delta:,.2f} ({pct:+.1f}%)."
+                    ),
+                    "url": None,
+                }
+            )
+        else:
+            items.append(
+                {
+                    "severity": "warning",
+                    "title": "Profit is down on last month",
+                    "detail": (
+                        f"Rs {ctx['net_profit']:,.2f} this month against Rs {prior_ctx['net_profit']:,.2f} "
+                        f"in {prior_month_label} - down Rs {abs(delta):,.2f} ({pct:+.1f}%)."
+                    ),
+                    "url": None,
+                }
+            )
+    else:
+        items.append(
+            {
+                "severity": "info",
+                "title": "No comparable prior month",
+                "detail": f"{prior_month_label} recorded no net profit figure to compare against.",
+                "url": None,
+            }
+        )
+
+    # R5 - best fuel by revenue (good).
+    total_net_fuel_revenue = sum(r["revenue"] for r in detail)
+    if detail and total_net_fuel_revenue > 0:
+        top = max(detail, key=lambda r: r["revenue"])
+        share = top["revenue"] / total_net_fuel_revenue * 100
+        items.append(
+            {
+                "severity": "good",
+                "title": f"{top['fuel']} led the month",
+                "detail": (
+                    f"{top['liters']:,.2f} L sold for Rs {top['revenue']:,.2f} - {share:.1f}% of net "
+                    f"fuel revenue, at Rs {mpl(top):,.2f} margin per litre."
+                ),
+                "url": None,
+            }
+        )
+
+    # R6 - best single sales day (good).
+    if best_day is not None:
+        items.append(
+            {
+                "severity": "good",
+                "title": f"Best day: {best_day['date'].strftime('%d %b %Y')}",
+                "detail": f"Rs {best_day['amount']:,.2f} of fuel sold that day, the highest of the month.",
+                "url": url_for("reports", date=best_day["date"].isoformat()),
+            }
+        )
+
+    # R7 - attendant cash shortfall (warning). Only the single worst
+    # attendant is reported - the full table is right below on the page.
+    if ctx["attendant_variances"]:
+        w = ctx["attendant_variances"][0]
+        if w["total_variance"] < -MONTHLY_SHORTFALL_TOLERANCE:
+            items.append(
+                {
+                    "severity": "warning",
+                    "title": f"{w['name']}: cash short this month",
+                    "detail": (
+                        f"Rs {abs(w['total_variance']):,.2f} net short across {w['shifts']} reconciled "
+                        f"shift(s), {w['shortfalls']} of them short."
+                    ),
+                    "url": url_for("account_detail", account_id=w["account"].id) if w["account"] else None,
+                }
+            )
+
+    # R8 - stock cover vs sales (info).
+    if ctx["purchases_liters"] > 0 or ctx["liters_sold"] > 0:
+        if ctx["purchases_liters"] < ctx["liters_sold"]:
+            items.append(
+                {
+                    "severity": "info",
+                    "title": "Sold more than was received",
+                    "detail": (
+                        f"{ctx['liters_sold']:,.2f} L sold against {ctx['purchases_liters']:,.2f} L "
+                        "received - the difference came out of tank stock."
+                    ),
+                    "url": url_for("inventory"),
+                }
+            )
+        else:
+            items.append(
+                {
+                    "severity": "info",
+                    "title": "Received more than was sold",
+                    "detail": (
+                        f"{ctx['purchases_liters']:,.2f} L received against {ctx['liters_sold']:,.2f} L "
+                        "sold - the difference is still in the tanks."
+                    ),
+                    "url": url_for("inventory"),
+                }
+            )
+
+    items.sort(key=lambda i: _NARRATIVE_SEVERITY_ORDER[i["severity"]])
+    return items
+
+
+def profit_walkthrough(ctx):
+    """The income-statement figures already in ctx, re-expressed as an
+    ordered walk with a running total, so the page can show HOW net
+    profit was reached instead of a flat row of cards. Adds no arithmetic
+    of its own beyond the running total - every `amount` is a ctx value
+    read verbatim, and the walk's final `running` MUST equal
+    ctx["net_profit"] to 2dp; if it ever doesn't,
+    _reports_monthly_context()'s own sales-returns double-count invariant
+    (see its docstring) has been broken. Deliberately assertion-free (a
+    report must render, not 500) - the equality above is restated here as
+    the thing to check, not enforced with an assert."""
+    r = ctx
+    rows = []
+    running = 0.0
+
+    def start_row(label, amount, note):
+        nonlocal running
+        running = amount
+        rows.append({"kind": "start", "label": label, "amount": amount, "running": running, "note": note})
+
+    def memo_row(label, amount, note):
+        rows.append({"kind": "memo", "label": label, "amount": amount, "running": None, "note": note})
+
+    def less_row(label, amount, note):
+        nonlocal running
+        running = round(running - amount, 2)
+        rows.append({"kind": "less", "label": label, "amount": amount, "running": running, "note": note})
+
+    def add_row(label, amount, note):
+        nonlocal running
+        running = round(running + amount, 2)
+        rows.append({"kind": "add", "label": label, "amount": amount, "running": running, "note": note})
+
+    def subtotal_row(label, amount, note):
+        rows.append({"kind": "subtotal", "label": label, "amount": amount, "running": running, "note": note})
+
+    def total_row(label, amount, note):
+        rows.append({"kind": "total", "label": label, "amount": amount, "running": amount, "note": note})
+
+    start_row(
+        "Fuel Revenue, Gross", r["revenue"],
+        f"{r['liters_sold']:,.2f} L sold · {r['testing_liters']:,.2f} L testing",
+    )
+    memo_row(
+        "Discounts already netted out above", r["total_discounts"],
+        "Credit sales billed below list price - subtracted from Fuel Revenue, Gross, not again below.",
+    )
+    less_row(
+        "Sales Returns", r["sales_returns_amount"],
+        f"{r['sales_returns_liters']:,.2f} L returned, any refund method",
+    )
+    subtotal_row("Net Fuel Revenue", r["net_revenue"], "Gross revenue less sales returns")
+    less_row("Cost of Fuel Sold", r["cogs"], "Net litres sold × weighted-average purchase cost")
+    subtotal_row(
+        "Fuel Gross Margin", r["gross_margin"],
+        f"{(r['gross_margin'] / r['net_revenue'] * 100) if r['net_revenue'] else 0:.1f}% of net fuel revenue",
+    )
+    memo_row("Product Revenue", r["product_revenue"], "")
+    memo_row(
+        "Less: Cost of Products Sold", r["product_cost"],
+        "Exact per line - the rate snapshotted at the moment of that sale, not a weighted average",
+    )
+    add_row(
+        "Product Gross Margin", r["product_commission"],
+        f"{(r['product_commission'] / r['product_revenue'] * 100) if r['product_revenue'] else 0:.1f}% of product revenue",
+    )
+    subtotal_row("Total Gross Margin", r["total_gross_margin"], "Fuel + product gross margin")
+    add_row(
+        "Other Income", r["other_income_total"],
+        "Rent, side-business share and similar - no associated cost",
+    )
+    less_row("Expenses", r["expenses_total"], "")
+    less_row("Salaries", r["salaries_total"], "Full salary earned, before deductions")
+    total_row(
+        "Net Profit", r["net_profit"],
+        "Total gross margin + other income − expenses − salaries",
+    )
+    return rows
 
 
 @app.route("/dashboard")
@@ -6431,6 +6695,9 @@ def _reports_monthly_context(start, end):
         .filter(StockPurchase.entry_date >= start, StockPurchase.entry_date <= end)
         .scalar()
     )
+    # Per-fuel breakdown of those same two all-fuel totals - purchases_liters
+    # and purchases_cost above must equal the sum of this list's liters/cost.
+    purchases_by_fuel = stock_purchases_by_fuel_for_period(start, end)
     sales_returns_liters = float(
         db.session.query(func.coalesce(func.sum(SalesReturn.liters), 0))
         .filter(SalesReturn.entry_date >= start, SalesReturn.entry_date <= end)
@@ -6496,9 +6763,112 @@ def _reports_monthly_context(start, end):
         "receipts_total": receipts_total,
         "purchases_liters": purchases_liters,
         "purchases_cost": purchases_cost,
+        "purchases_by_fuel": purchases_by_fuel,
         "sales_returns_liters": sales_returns_liters,
         "sales_returns_amount": sales_returns_amount,
         "attendant_variances": attendant_variance_summary(start, end),
+    }
+
+
+def _fuel_color_map(cogs_detail, purchases_by_fuel):
+    """The SAME fuel must be the SAME colour in both Monthly Report donuts
+    and both card grids, so colour is keyed on the fuel NAME in a stable
+    alphabetical order, not on per-donut rank (where the 2nd-biggest fuel
+    in one donut could otherwise land on a different colour than the
+    2nd-biggest in the other). Palette and ordering match
+    revenue_mix_for_date()'s (chart-2, chart-4, chart-3, chart-6,
+    chart-1), with chart-5 appended for a 6th fuel type."""
+    palette = [
+        "var(--chart-2)", "var(--chart-4)", "var(--chart-3)",
+        "var(--chart-6)", "var(--chart-1)", "var(--chart-5)",
+    ]
+    names = sorted({r["fuel"] for r in cogs_detail} | {r["fuel"] for r in purchases_by_fuel})
+    return {name: palette[i % len(palette)] for i, name in enumerate(names)}
+
+
+def _reports_monthly_extras(start, end, ctx):
+    """Everything the redesigned Monthly Report page needs that is
+    deliberately NOT in _reports_monthly_context() - because
+    month_to_date_pace() calls that context function three times on every
+    Dashboard load, and account_positions() / _cash_daily_net_changes() /
+    a prior-month context call are each far too expensive to run 3x for a
+    card that only reads net_revenue/net_profit. This function is called
+    exactly twice: once by reports_monthly(), once (partially) by
+    reports_monthly_export()."""
+    today = date.today()
+
+    # 1. Period cash summary (month-scoped, honest).
+    cash_period = cash_movement_for_period(start, end)
+
+    # 2. Payables / receivables. ONE account walk, shared by both.
+    positions = account_positions(today, include_aging=False)
+    wc = working_capital(today, positions=positions)
+    payables_rows = payables_schedule(positions, today)
+    receivable_rows = sorted(
+        (
+            {"account": p["account"], "balance": round(p["balance"], 2)}
+            for p in positions
+            if p["balance"] > 0
+        ),
+        key=lambda r: r["balance"],
+        reverse=True,
+    )
+
+    # 3. Prior FULL month context, for the profit-vs-last-month narrative rule.
+    prior_end = start - timedelta(days=1)
+    prior_start = prior_end.replace(day=1)
+    prior_ctx = _reports_monthly_context(prior_start, prior_end)
+    prior_month_label = prior_start.strftime("%B %Y")
+
+    # 4. Best sales day inside the month.
+    best_day = best_sales_day_for_period(start, end)
+
+    # 5. Stable per-fuel colour map, shared by both donuts and both card grids.
+    fuel_colors = _fuel_color_map(ctx["cogs_detail"], ctx["purchases_by_fuel"])
+
+    # 6. Donut segments (money-valued only - donut_chart() prints "Rs").
+    fuel_sold_segments = sorted(
+        (
+            {"label": r["fuel"], "amount": round(r["revenue"], 2), "color": fuel_colors[r["fuel"]]}
+            for r in ctx["cogs_detail"]
+            if r["revenue"] > 0
+        ),
+        key=lambda s: s["amount"],
+        reverse=True,
+    )
+    stock_ordered_segments = sorted(
+        (
+            {"label": r["fuel"], "amount": round(r["cost"], 2), "color": fuel_colors[r["fuel"]]}
+            for r in ctx["purchases_by_fuel"]
+            if r["cost"] > 0
+        ),
+        key=lambda s: s["amount"],
+        reverse=True,
+    )
+
+    # 7. Narrative.
+    narrative = monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day)
+
+    # 8. Step-by-step profit walk.
+    profit_steps = profit_walkthrough(ctx)
+
+    return {
+        "cash_period": cash_period,
+        "wc": wc,
+        "payables_rows": payables_rows,
+        "payables_total": wc["payables"],
+        "receivable_rows": receivable_rows,
+        "receivables_total": wc["receivables"],
+        "balances_as_of": today,
+        "prior_ctx": prior_ctx,
+        "prior_month_label": prior_month_label,
+        "best_day": best_day,
+        "fuel_colors": fuel_colors,
+        "fuel_sold_donut": charts.donut_chart(fuel_sold_segments),
+        "stock_ordered_donut": charts.donut_chart(stock_ordered_segments),
+        "narrative": narrative,
+        "profit_steps": profit_steps,
+        "thin_margin_per_liter": THIN_MARGIN_PER_LITER,
     }
 
 
@@ -6599,6 +6969,7 @@ def reports_monthly():
     today = date.today()
     start, end = _month_range_from_param(request.args.get("month", ""))
     ctx = _reports_monthly_context(start, end)
+    extras = _reports_monthly_extras(start, end, ctx)
 
     # Previous/next month links, capped so you can't page into the future.
     prev_month = (start - timedelta(days=1)).replace(day=1)
@@ -6612,6 +6983,7 @@ def reports_monthly():
         next_month=next_month.strftime("%Y-%m") if next_month <= today else None,
         today=today,
         **ctx,
+        **extras,
     )
 
 
@@ -6624,6 +6996,7 @@ def reports_monthly_export():
     fmt = _resolve_export_format()
     start, end = _month_range_from_param(request.args.get("month", ""))
     ctx = _reports_monthly_context(start, end)
+    cash_period = cash_movement_for_period(start, end)
 
     blocks = [
         {
@@ -6680,6 +7053,16 @@ def reports_monthly_export():
         },
         {
             "type": "table",
+            "heading": "Stock Ordered by Fuel Type",
+            "columns": ["Fuel", "Litres Received", "Total Cost (Rs)", "Avg Cost / L"],
+            "rows": [
+                [r["fuel"], r["liters"], r["cost"], r["avg_cost_per_liter"]]
+                for r in ctx["purchases_by_fuel"]
+            ],
+            "align": ["left", "right", "right", "right"],
+        },
+        {
+            "type": "table",
             "heading": "Expenses by Category",
             "columns": ["Category", "Amount (Rs)"],
             "rows": [[category, amount] for category, amount in ctx["expenses_by_category"]],
@@ -6695,6 +7078,22 @@ def reports_monthly_export():
                 ["Fuel purchased (L)", ctx["purchases_liters"]],
                 ["Spent on fuel purchases (Rs)", ctx["purchases_cost"]],
             ],
+            "align": ["left", "right"],
+        },
+        {
+            "type": "table",
+            "heading": "Cash Summary",
+            "columns": ["Line", "Amount (Rs)"],
+            "rows": (
+                [["Opening cash in hand", cash_period["opening"]]]
+                + [[f"+ {row['label']}", row["amount"]] for row in cash_period["inflows"]]
+                + [["Total cash received", cash_period["total_in"]]]
+                + [[f"- {row['label']}", row["amount"]] for row in cash_period["outflows"]]
+                + [
+                    ["Total cash paid", cash_period["total_out"]],
+                    ["Closing cash in hand", cash_period["closing"]],
+                ]
+            ),
             "align": ["left", "right"],
         },
         {

@@ -60,6 +60,8 @@ LOW_DAYS_OF_STOCK = 3  # tank flagged "low / near dry" once projected cover drop
 CONCENTRATION_PCT = 50  # top-3-customers-share-of-receivables flagged past this percent
 HANDOVER_VARIANCE_TOLERANCE = 100  # shift handover cash variance (Rs) flagged past this
 DEAD_STOCK_DAYS = 60  # a product with stock on hand and no sale in this many days is "dead"
+THIN_MARGIN_PER_LITER = 2.0   # fuel margin per litre below this reads as "thin" on the Monthly Report
+MONTHLY_SHORTFALL_TOLERANCE = 500  # an attendant's NET cash variance across a whole month flagged past this (Rs); deliberately larger than the per-shift HANDOVER_VARIANCE_TOLERANCE above
 # --------------------------------------------------------------------------
 
 
@@ -1093,6 +1095,93 @@ def cogs_for_period(start, end):
                 }
             )
     return round(total, 2), detail
+
+
+def stock_purchases_by_fuel_for_period(start, end):
+    """Litres and cost of fuel RECEIVED in [start, end] inclusive, broken
+    out per fuel type - the purchase-side counterpart to
+    cogs_for_period()'s sale-side per-fuel detail. StockPurchase is
+    tank-keyed, so fuel type comes from Tank.fuel_type_id (the same join
+    cogs_for_period() uses for DirectSale). StockPurchase.cost is
+    nullable, so it is coalesced to 0 - a delivery logged without a cost
+    contributes litres but no money, and the average per litre it
+    produces is therefore honestly lower, not a crash. Unlike
+    cogs_for_period() this is a single grouped query, not one query per
+    fuel type."""
+    rows = (
+        db.session.query(
+            FuelType.name,
+            func.coalesce(func.sum(StockPurchase.liters), 0),
+            func.coalesce(func.sum(StockPurchase.cost), 0),
+        )
+        .join(Tank, StockPurchase.tank_id == Tank.id)
+        .join(FuelType, Tank.fuel_type_id == FuelType.id)
+        .filter(StockPurchase.entry_date >= start, StockPurchase.entry_date <= end)
+        .group_by(FuelType.id, FuelType.name)
+        .order_by(FuelType.name)
+        .all()
+    )
+    result = []
+    for name, liters, cost in rows:
+        liters = float(liters or 0)
+        cost = float(cost or 0)
+        if liters == 0 and cost == 0:
+            continue
+        result.append(
+            {
+                "fuel": name,
+                "liters": round(liters, 2),
+                "cost": round(cost, 2),
+                "avg_cost_per_liter": round(cost / liters, 4) if liters else 0.0,
+            }
+        )
+    return result
+
+
+def best_sales_day_for_period(start, end):
+    """The single highest fuel-sales day in [start, end], by net fuel
+    sales value. Built from grouped queries (one per model, plus one
+    row-by-row CreditGiven pass) exactly the way _profit_series_for_window()
+    builds its own per-day dicts - never one query per day.
+
+    Ties break on the earlier date: by_day.items() is walked in date
+    order (sorted) and only a strictly greater amount replaces the
+    current best, so the earliest of any tied days wins."""
+    by_day = {}
+    for d, v in (
+        db.session.query(Sale.entry_date, func.sum(Sale.total_amount))
+        .filter(Sale.entry_date >= start, Sale.entry_date <= end)
+        .group_by(Sale.entry_date)
+        .all()
+    ):
+        by_day[d] = by_day.get(d, 0.0) + float(v or 0)
+    for d, v in (
+        db.session.query(DirectSale.entry_date, func.sum(DirectSale.total_amount))
+        .filter(DirectSale.entry_date >= start, DirectSale.entry_date <= end)
+        .group_by(DirectSale.entry_date)
+        .all()
+    ):
+        by_day[d] = by_day.get(d, 0.0) + float(v or 0)
+    for d, liters, price, amount in (
+        db.session.query(
+            CreditGiven.entry_date, CreditGiven.liters, CreditGiven.price_per_liter, CreditGiven.amount
+        )
+        .filter(CreditGiven.entry_date >= start, CreditGiven.entry_date <= end)
+        .all()
+    ):
+        list_amount = round(liters * price, 2)
+        if abs(amount - list_amount) > 0.01:
+            by_day[d] = by_day.get(d, 0.0) - (list_amount - amount)
+
+    if not by_day:
+        return None
+    best_date, best_amount = None, None
+    for d, v in sorted(by_day.items()):
+        if best_amount is None or v > best_amount:
+            best_date, best_amount = d, v
+    if best_amount is None or best_amount <= 0:
+        return None
+    return {"date": best_date, "amount": round(best_amount, 2)}
 
 
 def credit_aging(account, as_of_date):
@@ -3269,6 +3358,141 @@ def cash_movement_for_date(entry_date):
     prev_date = entry_date - timedelta(days=1)
     opening = round(sum(v for d, v in changes.items() if d <= prev_date), 2)
     closing = round(sum(v for d, v in changes.items() if d <= entry_date), 2)
+
+    return {
+        "opening": opening,
+        "closing": closing,
+        "inflows": [row for row in inflows if row["amount"]],
+        "outflows": [row for row in outflows if row["amount"]],
+        "total_in": total_in,
+        "total_out": total_out,
+        "net": round(total_in - total_out, 2),
+    }
+
+
+def cash_movement_for_period(start, end):
+    """A direct generalization of cash_movement_for_date() from one day to
+    [start, end] inclusive. The category list is not independently chosen
+    here either - it is cash_movement_for_date()'s list, which is itself
+    _cash_daily_net_changes() read line for line; if a category is ever
+    added to either, it must be added here in the same change.
+
+    Opening/closing are read off ONE _cash_daily_net_changes() call,
+    sliced twice in Python (d < start for opening, d <= end for closing) -
+    the same slice cash_movement_for_date() does with d <= prev_date /
+    d <= entry_date.
+
+    INVARIANT: opening + total_in - total_out == closing, exactly, once
+    both sides are rounded to 2dp - same as cash_movement_for_date().
+
+    KNOWN EDGE CASE (same one cash_movement_for_date() documents): a
+    CashAccount.opening_balance dated INSIDE [start, end] lands in
+    `closing` but in none of the itemized categories (it isn't a month's
+    business activity, it's the register's own initial funding), so the
+    invariant can appear off by exactly that opening balance for the
+    month that contains it."""
+    def scalar(query):
+        return float(query.scalar() or 0)
+
+    gross = scalar(
+        db.session.query(func.coalesce(func.sum(Sale.total_amount), 0))
+        .filter(Sale.entry_date >= start, Sale.entry_date <= end)
+    )
+    gross += scalar(
+        db.session.query(func.coalesce(func.sum(DirectSale.total_amount), 0))
+        .filter(DirectSale.entry_date >= start, DirectSale.entry_date <= end)
+    )
+    gross = round(gross - credit_discounts_for_period(start, end), 2)
+    credit = scalar(
+        db.session.query(func.coalesce(func.sum(CreditGiven.amount), 0))
+        .filter(CreditGiven.entry_date >= start, CreditGiven.entry_date <= end)
+    )
+    bank = scalar(
+        db.session.query(func.coalesce(func.sum(BankSale.amount), 0))
+        .filter(BankSale.entry_date >= start, BankSale.entry_date <= end)
+    )
+    cash_sales = round(gross - credit - bank, 2)
+
+    cash_receipts = scalar(
+        db.session.query(func.coalesce(func.sum(Receipt.amount), 0))
+        .filter(Receipt.entry_date >= start, Receipt.entry_date <= end, Receipt.method == "cash")
+    )
+    cash_product_sales = scalar(
+        db.session.query(func.coalesce(func.sum(ProductSale.amount), 0))
+        .filter(ProductSale.entry_date >= start, ProductSale.entry_date <= end, ProductSale.method == "cash")
+    )
+    cash_other_income = scalar(
+        db.session.query(func.coalesce(func.sum(OtherIncome.amount), 0))
+        .filter(OtherIncome.entry_date >= start, OtherIncome.entry_date <= end, OtherIncome.method == "cash")
+    )
+
+    cash_expenses = scalar(
+        db.session.query(func.coalesce(func.sum(Expense.amount), 0))
+        .filter(Expense.entry_date >= start, Expense.entry_date <= end, Expense.method == "cash")
+    )
+    cash_fuel_purchases = scalar(
+        db.session.query(func.coalesce(func.sum(StockPurchase.cost), 0))
+        .filter(
+            StockPurchase.entry_date >= start,
+            StockPurchase.entry_date <= end,
+            StockPurchase.payment_type == "cash",
+            StockPurchase.method == "cash",
+        )
+    )
+    cash_supplier_payments = scalar(
+        db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0))
+        .filter(SupplierPayment.entry_date >= start, SupplierPayment.entry_date <= end, SupplierPayment.method == "cash")
+    )
+    cash_employee_loans = scalar(
+        db.session.query(func.coalesce(func.sum(EmployeeLoan.amount), 0))
+        .filter(EmployeeLoan.entry_date >= start, EmployeeLoan.entry_date <= end, EmployeeLoan.method == "cash")
+    )
+    cash_salaries = scalar(
+        db.session.query(
+            func.coalesce(func.sum(SalaryPayment.gross_amount - SalaryPayment.deduction_amount), 0)
+        ).filter(SalaryPayment.entry_date >= start, SalaryPayment.entry_date <= end, SalaryPayment.method == "cash")
+    )
+    cash_deposits = scalar(
+        db.session.query(func.coalesce(func.sum(CashDeposit.amount), 0))
+        .filter(CashDeposit.entry_date >= start, CashDeposit.entry_date <= end)
+    )
+    cash_sales_returns = scalar(
+        db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0))
+        .filter(SalesReturn.entry_date >= start, SalesReturn.entry_date <= end, SalesReturn.method == "cash")
+    )
+    cash_product_purchases = scalar(
+        db.session.query(func.coalesce(func.sum(ProductPurchase.total_cost), 0))
+        .filter(
+            ProductPurchase.entry_date >= start,
+            ProductPurchase.entry_date <= end,
+            ProductPurchase.payment_type == "cash",
+            ProductPurchase.method == "cash",
+        )
+    )
+
+    inflows = [
+        {"label": "Cash sales", "amount": round(cash_sales, 2)},
+        {"label": "Receipts", "amount": round(cash_receipts, 2)},
+        {"label": "Product sales", "amount": round(cash_product_sales, 2)},
+        {"label": "Other income", "amount": round(cash_other_income, 2)},
+    ]
+    outflows = [
+        {"label": "Expenses", "amount": round(cash_expenses, 2)},
+        {"label": "Fuel purchases", "amount": round(cash_fuel_purchases, 2)},
+        {"label": "Supplier payments", "amount": round(cash_supplier_payments, 2)},
+        {"label": "Employee loans / drawings", "amount": round(cash_employee_loans, 2)},
+        {"label": "Salaries paid", "amount": round(cash_salaries, 2)},
+        {"label": "Deposited to bank", "amount": round(cash_deposits, 2)},
+        {"label": "Sales returns refunded", "amount": round(cash_sales_returns, 2)},
+        {"label": "Product purchases", "amount": round(cash_product_purchases, 2)},
+    ]
+
+    total_in = round(sum(row["amount"] for row in inflows), 2)
+    total_out = round(sum(row["amount"] for row in outflows), 2)
+
+    changes = _cash_daily_net_changes()
+    opening = round(sum(v for d, v in changes.items() if d < start), 2)
+    closing = round(sum(v for d, v in changes.items() if d <= end), 2)
 
     return {
         "opening": opening,
