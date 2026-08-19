@@ -82,8 +82,8 @@
         <div class="stat-card accent-brand">
           <a class="stat-link" href="{{ url_for('reports', date=selected_date.isoformat()) }}">
             <div class="label">Sales</div>
-            <div class="value">Rs {{ "%.2f"|format(sales_total) }}</div>
-            <div class="sub">{{ sale_count }} nozzle reading(s) &middot; {{ "%.2f"|format(total_liters) }} L</div>
+            <div class="value">Rs {{ (sales_total)|fmt }}</div>
+            <div class="sub">{{ sale_count }} nozzle reading(s) &middot; {{ (total_liters)|fmt }} L</div>
             {% if sales_spark %}<div class="stat-spark">{{ sales_spark|safe }}</div>{% endif %}
           </a>
         </div>
@@ -92,7 +92,7 @@
         <div class="stat-card {{ 'accent-green' if margin.total_margin >= 0 else 'accent-red' }}">
           <a class="stat-link" href="{{ url_for('reports_monthly', month=selected_date.strftime('%Y-%m')) }}">
             <div class="label">Total Margin</div>
-            <div class="value">Rs {{ "%.2f"|format(margin.total_margin) }}</div>
+            <div class="value">Rs {{ (margin.total_margin)|fmt }}</div>
             <div class="sub">Fuel + products + other income</div>
             {% if margin_spark %}<div class="stat-spark">{{ margin_spark|safe }}</div>{% endif %}
           </a>
@@ -100,14 +100,14 @@
         <div class="stat-card accent-green">
           <a class="stat-link" href="{{ url_for('cash_account_detail') }}">
             <div class="label">Cash in Hand</div>
-            <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
+            <div class="value">Rs {{ (cash_balance)|fmt }}</div>
             {% if cash_spark %}<div class="stat-spark">{{ cash_spark|safe }}</div>{% endif %}
           </a>
         </div>
         <div class="stat-card accent-red">
           <a class="stat-link" href="{{ url_for('reports', date=selected_date.isoformat()) }}">
             <div class="label">Credit Given</div>
-            <div class="value">Rs {{ "%.2f"|format(credit_given_total) }}</div>
+            <div class="value">Rs {{ (credit_given_total)|fmt }}</div>
             <div class="sub">{% if credit_given_pct is not none %}{{ "%.1f"|format(credit_given_pct) }}% of sales{% else %}no sales today{% endif %}</div>
             {% if credit_spark %}<div class="stat-spark">{{ credit_spark|safe }}</div>{% endif %}
           </a>
@@ -115,15 +115,15 @@
         <div class="stat-card">
           <a class="stat-link" href="{{ url_for('accounts') }}">
             <div class="label">Receivables</div>
-            <div class="value">Rs {{ "%.2f"|format(aging.total) }}</div>
+            <div class="value">Rs {{ (aging.total)|fmt }}</div>
             <div class="sub">{{ aging.account_count }} account(s) owe you</div>
           </a>
         </div>
         <div class="stat-card">
           <a class="stat-link" href="{{ url_for('inventory') }}">
             <div class="label">Stock Value</div>
-            <div class="value">Rs {{ "%.2f"|format(stock_value_total) }}</div>
-            <div class="sub">{{ "%.2f"|format(stock_liters_total) }} L across {{ tank_rows|length }} tank(s)</div>
+            <div class="value">Rs {{ (stock_value_total)|fmt }}</div>
+            <div class="sub">{{ (stock_liters_total)|fmt }} L across {{ tank_rows|length }} tank(s)</div>
           </a>
         </div>
         {% endif %}
@@ -174,7 +174,7 @@
           {% for b in bank_accounts %}
           <tr>
             <td>{{ b.name }}</td>
-            <td>{{ "%.2f"|format(bank_balances_by_id[b.id]) }}</td>
+            <td>{{ (bank_balances_by_id[b.id])|fmt }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -197,7 +197,7 @@
         {% for card in fuel_rate_cards %}
         <div class="stat-card">
           <div class="label">{{ card.fuel_type.name }}</div>
-          <div class="value">Rs {{ "%.2f"|format(card.rate) }}</div>
+          <div class="value">Rs {{ (card.rate)|fmt }}</div>
           <div class="sub">{%- if card.rate_age_days is none -%}
             no rate history
           {%- elif card.rate_age_days == 0 -%}
@@ -207,8 +207,8 @@
           {%- else -%}
             changed {{ card.rate_age_days }} days ago
           {%- endif %}</div>
-          <div class="sub">{{ "%.2f"|format(card.liters) }} L &middot; Rs {{ "%.2f"|format(card.amount) }}</div>
-          <div class="sub">{% if card.margin_per_liter is not none %}Rs {{ "%.2f"|format(card.margin_per_liter) }}/L margin{% else %}no cost history{% endif %}</div>
+          <div class="sub">{{ (card.liters)|fmt }} L &middot; Rs {{ (card.amount)|fmt }}</div>
+          <div class="sub">{% if card.margin_per_liter is not none %}Rs {{ (card.margin_per_liter)|fmt }}/L margin{% else %}no cost history{% endif %}</div>
         </div>
         {% endfor %}
       </div>
@@ -241,7 +241,7 @@
             <div class="tank-fill-track">
               <div class="tank-fill-bar {{ bar_class }}" style="width: {{ bar_width }}%;"></div>
             </div>
-            <div class="sub">{% if row.fill_pct is not none %}{{ "%.1f"|format(row.fill_pct) }}%{% else %}-{% endif %} &middot; {{ "%.2f"|format(row.stock) }} / {{ "%.2f"|format(row.capacity) }} L</div>
+            <div class="sub">{% if row.fill_pct is not none %}{{ "%.1f"|format(row.fill_pct) }}%{% else %}-{% endif %} &middot; {{ (row.stock)|fmt }} / {{ (row.capacity)|fmt }} L</div>
             <div class="sub">{% if row.days_of_stock is not none %}{{ "%.1f"|format(row.days_of_stock) }} days of cover{% else %}no recent sales rate{% endif %}</div>
             <div class="sub">{% if row.reorder_on %}Reorder by {{ row.reorder_on.strftime('%d %b %Y') }}{% else %}no reorder projection{% endif %}</div>
           </a>
@@ -275,15 +275,15 @@
           {% for row in dip_variance.rows %}
           <tr class="{{ 'row-low' if row.variance_liters < 0 else '' }}">
             <td>{{ row.tank.label }}</td>
-            <td>{{ "%.2f"|format(row.dip.dip_liters) }}</td>
-            <td>{{ "%.2f"|format(row.dip.dip_liters - row.variance_liters) }}</td>
-            <td>{{ "%.2f"|format(row.variance_liters) }}</td>
-            <td>{{ "%.2f"|format(row.variance_value) }}</td>
+            <td>{{ (row.dip.dip_liters)|fmt }}</td>
+            <td>{{ (row.dip.dip_liters - row.variance_liters)|fmt }}</td>
+            <td>{{ (row.variance_liters)|fmt }}</td>
+            <td>{{ (row.variance_value)|fmt }}</td>
           </tr>
           {% endfor %}
         </tbody>
         <tfoot>
-          <tr><td colspan="3">Total</td><td>{{ "%.2f"|format(dip_variance.total_liters) }}</td><td>{{ "%.2f"|format(dip_variance.total_value) }}</td></tr>
+          <tr><td colspan="3">Total</td><td>{{ (dip_variance.total_liters)|fmt }}</td><td>{{ (dip_variance.total_value)|fmt }}</td></tr>
         </tfoot>
       </table>
       </div>
@@ -303,19 +303,19 @@
       <div class="table-wrap">
       <table class="table">
         <tbody>
-          <tr class="recon-anchor"><td>Opening cash</td><td>Rs {{ "%.2f"|format(cash_movement.opening) }}</td></tr>
+          <tr class="recon-anchor"><td>Opening cash</td><td>Rs {{ (cash_movement.opening)|fmt }}</td></tr>
           {% for row in cash_movement.inflows %}
-          <tr><td>+ {{ row.label }}</td><td>Rs {{ "%.2f"|format(row.amount) }}</td></tr>
+          <tr><td>+ {{ row.label }}</td><td>Rs {{ (row.amount)|fmt }}</td></tr>
           {% endfor %}
           {% for row in cash_movement.outflows %}
-          <tr><td>&minus; {{ row.label }}</td><td>Rs {{ "%.2f"|format(row.amount) }}</td></tr>
+          <tr><td>&minus; {{ row.label }}</td><td>Rs {{ (row.amount)|fmt }}</td></tr>
           {% endfor %}
-          <tr class="recon-anchor"><td>Closing cash</td><td>Rs {{ "%.2f"|format(cash_movement.closing) }}</td></tr>
+          <tr class="recon-anchor"><td>Closing cash</td><td>Rs {{ (cash_movement.closing)|fmt }}</td></tr>
         </tbody>
       </table>
       </div>
       <div class="recon-formula">
-        Opening (Rs {{ "%.2f"|format(cash_movement.opening) }}) + Money in (Rs {{ "%.2f"|format(cash_movement.total_in) }}) &minus; Money out (Rs {{ "%.2f"|format(cash_movement.total_out) }}) = Closing (Rs {{ "%.2f"|format(cash_movement.closing) }})
+        Opening (Rs {{ (cash_movement.opening)|fmt }}) + Money in (Rs {{ (cash_movement.total_in)|fmt }}) &minus; Money out (Rs {{ (cash_movement.total_out)|fmt }}) = Closing (Rs {{ (cash_movement.closing)|fmt }})
       </div>
       </div>
     </section>
@@ -336,12 +336,12 @@
           {% for row in handover_rows %}
           <tr class="{{ 'row-low' if row.variance is not none and row.variance < -1 else '' }}">
             <td>{{ row.shift.name }}</td>
-            <td>{{ "%.2f"|format(row.expected) }}</td>
-            <td>{{ "%.2f"|format(row.declared) if row.declared is not none else "-" }}</td>
+            <td>{{ (row.expected)|fmt }}</td>
+            <td>{{ (row.declared)|fmt if row.declared is not none else "-" }}</td>
             <td>
               {% if row.variance is none %}<span class="badge">Not reconciled</span>
-              {% elif row.variance < -1 %}<span class="badge badge-low">Short {{ "%.2f"|format(-row.variance) }}</span>
-              {% elif row.variance > 1 %}<span class="badge badge-warn">Over {{ "%.2f"|format(row.variance) }}</span>
+              {% elif row.variance < -1 %}<span class="badge badge-low">Short {{ (-row.variance)|fmt }}</span>
+              {% elif row.variance > 1 %}<span class="badge badge-warn">Over {{ (row.variance)|fmt }}</span>
               {% else %}<span class="badge badge-ok">Matches</span>{% endif %}
             </td>
             <td>{{ row.handover.attendant.name if row.handover and row.handover.attendant else "-" }}</td>
@@ -379,12 +379,12 @@
       <table class="table">
         <thead><tr><th>Bucket</th><th>Amount (Rs)</th></tr></thead>
         <tbody>
-          <tr><td>0-30 days</td><td>{{ "%.2f"|format(aging.buckets['0-30']) }}</td></tr>
-          <tr><td>31-60 days</td><td>{{ "%.2f"|format(aging.buckets['31-60']) }}</td></tr>
-          <tr><td>61-90 days</td><td>{{ "%.2f"|format(aging.buckets['61-90']) }}</td></tr>
-          <tr><td>90+ days</td><td>{{ "%.2f"|format(aging.buckets['90+']) }}</td></tr>
+          <tr><td>0-30 days</td><td>{{ (aging.buckets['0-30'])|fmt }}</td></tr>
+          <tr><td>31-60 days</td><td>{{ (aging.buckets['31-60'])|fmt }}</td></tr>
+          <tr><td>61-90 days</td><td>{{ (aging.buckets['61-90'])|fmt }}</td></tr>
+          <tr><td>90+ days</td><td>{{ (aging.buckets['90+'])|fmt }}</td></tr>
         </tbody>
-        <tfoot><tr><td>Total</td><td>{{ "%.2f"|format(aging.total) }}</td></tr></tfoot>
+        <tfoot><tr><td>Total</td><td>{{ (aging.total)|fmt }}</td></tr></tfoot>
       </table>
       </div>
       {% if concentration.top %}
@@ -402,7 +402,7 @@
             {% for row in concentration.top %}
             <tr>
               <td><a href="{{ url_for('account_detail', account_id=row.account.id) }}">{{ row.account.name }}</a></td>
-              <td>{{ "%.2f"|format(row.balance) }}</td>
+              <td>{{ (row.balance)|fmt }}</td>
               <td>{{ "%.1f"|format(row.share_pct) if row.share_pct is not none else "-" }}%</td>
             </tr>
             {% endfor %}
@@ -429,7 +429,7 @@
             {% for entry in aging.chase_list %}
             <tr>
               <td><a href="{{ url_for('account_detail', account_id=entry.account.id) }}">{{ entry.account.name }}</a></td>
-              <td>{{ "%.2f"|format(entry.outstanding) }}</td>
+              <td>{{ (entry.outstanding)|fmt }}</td>
               <td>{{ entry.oldest_days if entry.oldest_days is not none else "-" }}</td>
             </tr>
             {% endfor %}
@@ -454,36 +454,36 @@
       <div class="stat-row">
         <div class="stat-card">
           <div class="label">MTD Revenue</div>
-          <div class="value">Rs {{ "%.2f"|format(pace.mtd_revenue) }}</div>
-          <div class="sub">Rs {{ "%.2f"|format(pace.prior_mtd_revenue) }} at day {{ pace.days_elapsed }} last month{% if pace.revenue_delta_pct is not none %} &middot; {{ "%+.1f"|format(pace.revenue_delta_pct) }}%{% endif %}</div>
+          <div class="value">Rs {{ (pace.mtd_revenue)|fmt }}</div>
+          <div class="sub">Rs {{ (pace.prior_mtd_revenue)|fmt }} at day {{ pace.days_elapsed }} last month{% if pace.revenue_delta_pct is not none %} &middot; {{ "%+.1f"|format(pace.revenue_delta_pct) }}%{% endif %}</div>
         </div>
         <div class="stat-card {{ 'accent-green' if pace.ahead else 'accent-red' }}">
           <div class="label">MTD Profit</div>
-          <div class="value">Rs {{ "%.2f"|format(pace.mtd_profit) }}</div>
-          <div class="sub">Rs {{ "%.2f"|format(pace.prior_mtd_profit) }} at day {{ pace.days_elapsed }} last month{% if pace.profit_delta_pct is not none %} &middot; {{ "%+.1f"|format(pace.profit_delta_pct) }}%{% endif %}</div>
+          <div class="value">Rs {{ (pace.mtd_profit)|fmt }}</div>
+          <div class="sub">Rs {{ (pace.prior_mtd_profit)|fmt }} at day {{ pace.days_elapsed }} last month{% if pace.profit_delta_pct is not none %} &middot; {{ "%+.1f"|format(pace.profit_delta_pct) }}%{% endif %}</div>
           {% if pace.profit_delta_pct is not none %}
           <span class="badge {{ 'badge-ok' if pace.ahead else 'badge-low' }}">{{ 'Ahead' if pace.ahead else 'Behind' }} of last month's pace</span>
           {% endif %}
         </div>
         <div class="stat-card">
           <div class="label">Projected Revenue</div>
-          <div class="value">Rs {{ "%.2f"|format(pace.projected_revenue) }}</div>
+          <div class="value">Rs {{ (pace.projected_revenue)|fmt }}</div>
           <div class="sub">{{ pace.days_elapsed }} of {{ pace.days_in_month }} days elapsed, straight-line</div>
         </div>
         <div class="stat-card">
           <div class="label">Projected Profit</div>
-          <div class="value">Rs {{ "%.2f"|format(pace.projected_profit) }}</div>
-          <div class="sub">Last month's full total: Rs {{ "%.2f"|format(pace.prior_full_profit) }}</div>
+          <div class="value">Rs {{ (pace.projected_profit)|fmt }}</div>
+          <div class="sub">Last month's full total: Rs {{ (pace.prior_full_profit)|fmt }}</div>
         </div>
       </div>
       <div class="recon-formula">
-        Break-even (based on the last {{ break_even.lookback_days }} days of expenses and salaries): daily fixed cost Rs {{ "%.2f"|format(break_even.daily_fixed_cost) }}
+        Break-even (based on the last {{ break_even.lookback_days }} days of expenses and salaries): daily fixed cost Rs {{ (break_even.daily_fixed_cost)|fmt }}
         {% if break_even.margin_per_liter is none %}
         &divide; no fuel margin data for today - break-even litres can't be shown.
         {% elif break_even.margin_per_liter <= 0 %}
-        &divide; margin per litre is Rs {{ "%.2f"|format(break_even.margin_per_liter) }} (zero or negative) - selling more fuel today would lose more money, so a break-even litre figure isn't meaningful.
+        &divide; margin per litre is Rs {{ (break_even.margin_per_liter)|fmt }} (zero or negative) - selling more fuel today would lose more money, so a break-even litre figure isn't meaningful.
         {% else %}
-        &divide; Rs {{ "%.2f"|format(break_even.margin_per_liter) }} margin/L = {{ "%.1f"|format(break_even.break_even_liters) }} L needed today.
+        &divide; Rs {{ (break_even.margin_per_liter)|fmt }} margin/L = {{ "%.1f"|format(break_even.break_even_liters) }} L needed today.
         Actual: {{ "%.1f"|format(break_even.actual_liters) }} L
         ({{ "%+.1f"|format(break_even.surplus_liters) }} L {{ 'surplus' if break_even.surplus_liters >= 0 else 'shortfall' }}).
         {% endif %}
@@ -507,13 +507,13 @@
           {% for row in dead_stock_rows %}
           <tr>
             <td>{{ row.product.label }}</td>
-            <td>{{ "%.2f"|format(row.stock) }}</td>
+            <td>{{ (row.stock)|fmt }}</td>
             <td>{{ row.days_since_last_sale if row.days_since_last_sale is not none else "never sold" }}</td>
-            <td>{{ "%.2f"|format(row.value) }}</td>
+            <td>{{ (row.value)|fmt }}</td>
           </tr>
           {% endfor %}
         </tbody>
-        <tfoot><tr><td colspan="3">Cash tied up in dead stock</td><td>{{ "%.2f"|format(dead_stock_total) }}</td></tr></tfoot>
+        <tfoot><tr><td colspan="3">Cash tied up in dead stock</td><td>{{ (dead_stock_total)|fmt }}</td></tr></tfoot>
       </table>
       </div>
       </div>
@@ -540,8 +540,8 @@
           <tr class="{{ 'row-low' if row.underperforming else '' }}">
             <td>{{ row.nozzle.label }}</td>
             <td>{{ row.fuel_type.name }}</td>
-            <td>{{ "%.2f"|format(row.liters) }}</td>
-            <td>{{ "%.2f"|format(row.liters_per_day) }}</td>
+            <td>{{ (row.liters)|fmt }}</td>
+            <td>{{ (row.liters_per_day)|fmt }}</td>
             <td>{{ "%.1f"|format(row.share * 100) if row.share is not none else "-" }}%</td>
             <td>{% if row.underperforming %}<span class="badge">Underperforming</span>{% endif %}</td>
           </tr>
@@ -572,7 +572,7 @@
           {% for row in payables %}
           <tr>
             <td><a href="{{ url_for('account_detail', account_id=row.account.id) }}">{{ row.account.name }}</a></td>
-            <td>{{ "%.2f"|format(row.amount_owed) }}</td>
+            <td>{{ (row.amount_owed)|fmt }}</td>
             <td>{{ row.oldest_purchase_date.strftime('%d %b %Y') if row.oldest_purchase_date else "-" }}</td>
             <td>{{ row.days_outstanding if row.days_outstanding is not none else "-" }}</td>
           </tr>

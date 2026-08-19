@@ -23,7 +23,7 @@
 <div class="stat-row">
   <div class="stat-card {{ 'accent-green' if account.balance == 0 else 'accent-red' }}">
     <div class="label">{% if account.balance > 0 %}Owed To You{% elif account.balance < 0 %}You Owe{% else %}Settled{% endif %}</div>
-    <div class="value">Rs {{ "%.2f"|format(account.balance|abs) }}</div>
+    <div class="value">Rs {{ (account.balance|abs)|fmt }}</div>
   </div>
   {% if aging and aging.outstanding %}
   <div class="stat-card {{ 'accent-red' if aging.buckets['90+'] else '' }}">
@@ -33,19 +33,19 @@
   </div>
   <div class="stat-card">
     <div class="label">0-30 days</div>
-    <div class="value">Rs {{ "%.2f"|format(aging.buckets["0-30"]) }}</div>
+    <div class="value">Rs {{ (aging.buckets["0-30"])|fmt }}</div>
   </div>
   <div class="stat-card">
     <div class="label">31-60 days</div>
-    <div class="value">Rs {{ "%.2f"|format(aging.buckets["31-60"]) }}</div>
+    <div class="value">Rs {{ (aging.buckets["31-60"])|fmt }}</div>
   </div>
   <div class="stat-card">
     <div class="label">61-90 days</div>
-    <div class="value">Rs {{ "%.2f"|format(aging.buckets["61-90"]) }}</div>
+    <div class="value">Rs {{ (aging.buckets["61-90"])|fmt }}</div>
   </div>
   <div class="stat-card {{ 'accent-red' if aging.buckets['90+'] else '' }}">
     <div class="label">Over 90 days</div>
-    <div class="value">Rs {{ "%.2f"|format(aging.buckets["90+"]) }}</div>
+    <div class="value">Rs {{ (aging.buckets["90+"])|fmt }}</div>
   </div>
   {% endif %}
 </div>
@@ -112,50 +112,50 @@
         {% if e.kind == "opening" %}
         <td><span class="badge">Opening Balance</span></td>
         <td>Balance as of {{ e.entry_date.strftime("%Y-%m-%d") }}</td>
-        <td>{{ "+" if e.delta >= 0 }}{{ "%.2f"|format(e.delta) }}</td>
+        <td>{{ "+" if e.delta >= 0 }}{{ (e.delta)|fmt }}</td>
         {% elif e.kind == "credit" %}
         <td><span class="badge badge-low">Credit Given</span></td>
-        <td>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }}{% if e.obj.vehicle_number %} &middot; {{ e.obj.vehicle_number }}{% endif %}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>{{ (e.obj.liters)|fmt }} L {{ e.obj.fuel_type.name }}{% if e.obj.vehicle_number %} &middot; {{ e.obj.vehicle_number }}{% endif %}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>+{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "receipt" %}
         <td><span class="badge badge-ok">Receipt</span></td>
         <td>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>-{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "purchase" %}
         <td><span class="badge badge-low">Purchase (Credit)</span></td>
-        <td>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.tank.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>-{{ "%.2f"|format(e.obj.cost or 0) }}</td>
+        <td>{{ (e.obj.liters)|fmt }} L {{ e.obj.tank.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>-{{ (e.obj.cost or 0)|fmt }}</td>
         {% elif e.kind == "supplier_payment" %}
         <td><span class="badge badge-ok">Payment Made</span></td>
         <td>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>+{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "employee_loan" %}
         <td><span class="badge badge-low">Loan / Advance</span></td>
         <td>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>+{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "salary" %}
         <td><span class="badge badge-ok">Salary</span></td>
         <td>
-          {% if e.obj.period_label %}{{ e.obj.period_label }} &middot; {% endif %}Rs {{ "%.2f"|format(e.obj.gross_amount) }} salary,
-          Rs {{ "%.2f"|format(e.obj.net_paid) }} paid {{ "via " + e.obj.bank_account.name if e.obj.method == "bank" else "in cash" }}
-          {%- if e.obj.deduction_amount %}, Rs {{ "%.2f"|format(e.obj.deduction_amount) }} held against advance{% endif %}
+          {% if e.obj.period_label %}{{ e.obj.period_label }} &middot; {% endif %}Rs {{ (e.obj.gross_amount)|fmt }} salary,
+          Rs {{ (e.obj.net_paid)|fmt }} paid {{ "via " + e.obj.bank_account.name if e.obj.method == "bank" else "in cash" }}
+          {%- if e.obj.deduction_amount %}, Rs {{ (e.obj.deduction_amount)|fmt }} held against advance{% endif %}
           {%- if e.obj.note %} - {{ e.obj.note }}{% endif %}
         </td>
-        <td>{% if e.obj.deduction_amount %}-{{ "%.2f"|format(e.obj.deduction_amount) }}{% else %}0.00{% endif %}</td>
+        <td>{% if e.obj.deduction_amount %}-{{ (e.obj.deduction_amount)|fmt }}{% else %}0.00{% endif %}</td>
         {% elif e.kind == "sales_return" %}
         <td><span class="badge badge-ok">Sales Return</span></td>
-        <td>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }} &middot; {{ e.obj.tank.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>{{ (e.obj.liters)|fmt }} L {{ e.obj.fuel_type.name }} &middot; {{ e.obj.tank.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>-{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "product_sale" %}
         <td><span class="badge badge-low">Non-Fuel Sale</span></td>
-        <td>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>{{ (e.obj.quantity)|fmt }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>+{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "product_purchase" %}
         <td><span class="badge badge-low">Product Purchase (Credit)</span></td>
-        <td>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>{{ "+" if -e.obj.total_cost >= 0 }}{{ "%.2f"|format(-e.obj.total_cost) }}</td>
+        <td>{{ (e.obj.quantity)|fmt }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>{{ "+" if -e.obj.total_cost >= 0 }}{{ (-e.obj.total_cost)|fmt }}</td>
         {% endif %}
-        <td>{{ "%.2f"|format(e.running_balance) }}</td>
+        <td>{{ (e.running_balance)|fmt }}</td>
         <td>{{ e.obj.user.label if e.obj and e.obj.user else "-" }}</td>
         {% if current_user.is_owner %}
         <td>{% if e.kind not in ("opening", "sales_return", "product_sale", "product_purchase") %}<a href="#" class="edit-toggle">Edit</a>{% endif %}</td>
@@ -184,7 +184,7 @@
             <label>Fuel <span class="hint-sm">rate as of {{ e.obj.entry_date.strftime("%d %b %Y") }} - editing the date above re-prices to that date's rate on save</span>
               <select name="fuel_type_id" required>
                 {% for f in fuel_types %}
-                <option value="{{ f.id }}" {{ "selected" if f.id == e.obj.fuel_type_id }}>{{ f.name }} (Rs {{ "%.2f"|format(e.fuel_prices.get(f.id)) }}/L)</option>
+                <option value="{{ f.id }}" {{ "selected" if f.id == e.obj.fuel_type_id }}>{{ f.name }} (Rs {{ (e.fuel_prices.get(f.id))|fmt }}/L)</option>
                 {% endfor %}
               </select>
             </label>
@@ -322,7 +322,11 @@ document.querySelectorAll('.edit-toggle').forEach(function (link) {
 });
 
 function fmtMoney(v) {
-  return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // Same rule as formatting.py's format_number(): comma thousands
+  // separators, but no trailing .00 on a whole number.
+  var rounded = Math.round(v * 100) / 100;
+  var decimals = rounded === Math.trunc(rounded) ? 0 : 2;
+  return rounded.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 // Credit entry edit: same By Litres / By Amount toggle as the Ledger's
 // Credit-to-a-Customer form - each row's own form is looked up via

@@ -25,88 +25,88 @@
 <div class="stat-row">
   <div class="stat-card accent-brand">
     <div class="label">Total Sales</div>
-    <div class="value">Rs {{ "%.2f"|format(total_sales) }}</div>
-    <div class="sub">{{ "%.2f"|format(total_liters) }} L sold</div>
+    <div class="value">Rs {{ (total_sales)|fmt }}</div>
+    <div class="sub">{{ (total_liters)|fmt }} L sold</div>
   </div>
   <div class="stat-card">
     <div class="label">Testing</div>
-    <div class="value">{{ "%.2f"|format(total_testing_liters) }} L</div>
+    <div class="value">{{ (total_testing_liters)|fmt }} L</div>
     <div class="sub">Not billed - returns to the tank</div>
   </div>
   <div class="stat-card accent-green">
     <div class="label">Cash Sales</div>
-    <div class="value">Rs {{ "%.2f"|format(cash_sales) }}</div>
+    <div class="value">Rs {{ (cash_sales)|fmt }}</div>
     <div class="sub">Total - credit - bank</div>
   </div>
   <div class="stat-card">
     <div class="label">Bank Sales</div>
-    <div class="value">Rs {{ "%.2f"|format(total_bank_sales) }}</div>
+    <div class="value">Rs {{ (total_bank_sales)|fmt }}</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Credit Given</div>
-    <div class="value">Rs {{ "%.2f"|format(total_credit_given) }}</div>
+    <div class="value">Rs {{ (total_credit_given)|fmt }}</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Total Discounts Given</div>
-    <div class="value">Rs {{ "%.2f"|format(total_discounts) }}</div>
+    <div class="value">Rs {{ (total_discounts)|fmt }}</div>
     <div class="sub">Credit sales billed below list price</div>
   </div>
   <div class="stat-card accent-green">
     <div class="label">Receipts from Customers</div>
-    <div class="value">Rs {{ "%.2f"|format(total_payments) }}</div>
+    <div class="value">Rs {{ (total_payments)|fmt }}</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Sales Returns</div>
-    <div class="value">Rs {{ "%.2f"|format(total_sales_returns_amount) }}</div>
-    <div class="sub">{{ "%.2f"|format(total_sales_returns_liters) }} L returned</div>
+    <div class="value">Rs {{ (total_sales_returns_amount)|fmt }}</div>
+    <div class="sub">{{ (total_sales_returns_liters)|fmt }} L returned</div>
   </div>
   <div class="stat-card accent-green">
     <div class="label">Non-Fuel Sales</div>
-    <div class="value">Rs {{ "%.2f"|format(total_product_sales_amount) }}</div>
-    <div class="sub">{{ "%.2f"|format(total_product_sales_units) }} units sold</div>
+    <div class="value">Rs {{ (total_product_sales_amount)|fmt }}</div>
+    <div class="sub">{{ (total_product_sales_units)|fmt }} units sold</div>
   </div>
   <div class="stat-card accent-green">
     <div class="label">Other Income</div>
-    <div class="value">Rs {{ "%.2f"|format(total_other_income) }}</div>
+    <div class="value">Rs {{ (total_other_income)|fmt }}</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Product Purchases</div>
-    <div class="value">Rs {{ "%.2f"|format(total_product_purchases_cost) }}</div>
-    <div class="sub">{{ "%.2f"|format(total_product_purchases_units) }} units received</div>
+    <div class="value">Rs {{ (total_product_purchases_cost)|fmt }}</div>
+    <div class="sub">{{ (total_product_purchases_units)|fmt }} units received</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Expenses</div>
-    <div class="value">Rs {{ "%.2f"|format(total_expenses) }}</div>
+    <div class="value">Rs {{ (total_expenses)|fmt }}</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Payments to Suppliers</div>
-    <div class="value">Rs {{ "%.2f"|format(total_supplier_payments) }}</div>
+    <div class="value">Rs {{ (total_supplier_payments)|fmt }}</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Salaries Paid Out</div>
-    <div class="value">Rs {{ "%.2f"|format(total_salaries_net) }}</div>
+    <div class="value">Rs {{ (total_salaries_net)|fmt }}</div>
     <div class="sub">Net of any advance deductions</div>
   </div>
   <div class="stat-card accent-brand">
     <div class="label">Net Cash Flow</div>
-    <div class="value">Rs {{ "%.2f"|format(net_cash_flow) }}</div>
+    <div class="value">Rs {{ (net_cash_flow)|fmt }}</div>
   </div>
   <div class="stat-card">
     <div class="label">Outstanding Receivables (Owed To You)</div>
-    <div class="value">Rs {{ "%.2f"|format(outstanding_credit) }}</div>
+    <div class="value">Rs {{ (outstanding_credit)|fmt }}</div>
   </div>
 </div>
 
 <div class="stat-row">
   <div class="stat-card accent-green">
     <div class="label">Cash in Hand</div>
-    <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
+    <div class="value">Rs {{ (cash_balance)|fmt }}</div>
     <div class="sub">As of {{ selected_date.strftime("%d %b %Y") }}</div>
   </div>
   {% for b in bank_accounts %}
   <div class="stat-card">
     <div class="label">{{ b.name }}</div>
-    <div class="value">Rs {{ "%.2f"|format(bank_balances_by_id[b.id]) }}</div>
+    <div class="value">Rs {{ (bank_balances_by_id[b.id])|fmt }}</div>
   </div>
   {% endfor %}
 </div>
@@ -120,9 +120,9 @@
       {% for name, d in by_fuel.items() %}
       <tr>
         <td>{{ name }}</td>
-        <td>{{ "%.2f"|format(d.liters) }}</td>
-        <td>{{ "%.2f"|format(testing_by_fuel.get(name, 0)) }}</td>
-        <td>{{ "%.2f"|format(d.revenue) }}</td>
+        <td>{{ (d.liters)|fmt }}</td>
+        <td>{{ (testing_by_fuel.get(name, 0))|fmt }}</td>
+        <td>{{ (d.revenue)|fmt }}</td>
       </tr>
       {% else %}
       <tr><td colspan="4">No sales on this date.</td></tr>
@@ -142,9 +142,9 @@
       <tr>
         <td>{{ row.tank.label }}</td>
         <td>{{ row.tank.fuel_type.name }}</td>
-        <td>{{ "%.2f"|format(row.book_stock) }}</td>
-        <td>{{ "%.2f"|format(row.dip) if row.dip is not none else "-" }}</td>
-        <td>{% if row.variance is not none %}{{ "+" if row.variance >= 0 }}{{ "%.2f"|format(row.variance) }} L{% else %}-{% endif %}</td>
+        <td>{{ (row.book_stock)|fmt }}</td>
+        <td>{{ (row.dip)|fmt if row.dip is not none else "-" }}</td>
+        <td>{% if row.variance is not none %}{{ "+" if row.variance >= 0 }}{{ (row.variance)|fmt }} L{% else %}-{% endif %}</td>
         <td>
           {% if row.water_cm %}{{ "%.1f"|format(row.water_cm) }} <span class="badge badge-low">Water</span>
           {% elif row.water_cm == 0 %}0.0
@@ -167,8 +167,8 @@
       <tr>
         <td>{{ sr.fuel_type.name }}</td>
         <td>{{ sr.tank.label }}</td>
-        <td>{{ "%.2f"|format(sr.liters) }}</td>
-        <td>{{ "%.2f"|format(sr.amount) }}</td>
+        <td>{{ (sr.liters)|fmt }}</td>
+        <td>{{ (sr.amount)|fmt }}</td>
         <td>
           {% if sr.method == "bank" %}Via {{ sr.bank_account.name }}
           {% elif sr.method == "credit" %}On account ({{ sr.account.name }})
@@ -193,9 +193,9 @@
         {% for ps in product_sales %}
         <tr>
           <td>{{ ps.product.label }}</td>
-          <td>{{ "%.2f"|format(ps.quantity) }}</td>
-          <td>{{ "%.2f"|format(ps.retail_rate) }}</td>
-          <td>{{ "%.2f"|format(ps.amount) }}</td>
+          <td>{{ (ps.quantity)|fmt }}</td>
+          <td>{{ (ps.retail_rate)|fmt }}</td>
+          <td>{{ (ps.amount)|fmt }}</td>
           <td>
             {% if ps.method == "bank" %}Via {{ ps.bank_account.name }}
             {% elif ps.method == "credit" %}On account ({{ ps.account.name }})
@@ -220,7 +220,7 @@
         <tr>
           <td>{{ oi.description }}</td>
           <td>{{ "Via " + oi.bank_account.name if oi.method == "bank" else "Cash" }}</td>
-          <td>{{ "%.2f"|format(oi.amount) }}</td>
+          <td>{{ (oi.amount)|fmt }}</td>
         </tr>
         {% else %}
         <tr><td colspan="3">No other income on this date.</td></tr>
@@ -241,9 +241,9 @@
         {% for pp in product_purchases %}
         <tr>
           <td>{{ pp.product.label }}</td>
-          <td>{{ "%.2f"|format(pp.quantity) }}</td>
-          <td>{{ "%.2f"|format(pp.unit_cost) }}</td>
-          <td>{{ "%.2f"|format(pp.total_cost) }}</td>
+          <td>{{ (pp.quantity)|fmt }}</td>
+          <td>{{ (pp.unit_cost)|fmt }}</td>
+          <td>{{ (pp.total_cost)|fmt }}</td>
           <td>{{ "Credit" if pp.payment_type == "credit" else "Cash" }}</td>
         </tr>
         {% else %}
@@ -265,7 +265,7 @@
         {% for p in purchases %}
         <tr>
           <td>{{ p.tank.label }}</td>
-          <td>{{ "%.2f"|format(p.liters) }}</td>
+          <td>{{ (p.liters)|fmt }}</td>
           <td>{{ p.payment_type }}</td>
         </tr>
         {% else %}
@@ -285,7 +285,7 @@
         {% for e in expenses %}
         <tr>
           <td>{{ e.category }}</td>
-          <td>{{ "%.2f"|format(e.amount) }}</td>
+          <td>{{ (e.amount)|fmt }}</td>
         </tr>
         {% else %}
         <tr><td colspan="2">No expenses on this date.</td></tr>
@@ -305,12 +305,12 @@
       {% for row in handover_rows %}
       <tr class="{{ 'row-low' if row.variance is not none and row.variance < -0.01 else '' }}">
         <td>{{ row.shift.name }}</td>
-        <td>{{ "%.2f"|format(row.expected) }}</td>
-        <td>{{ "%.2f"|format(row.declared) if row.declared is not none else "-" }}</td>
+        <td>{{ (row.expected)|fmt }}</td>
+        <td>{{ (row.declared)|fmt if row.declared is not none else "-" }}</td>
         <td>
           {% if row.variance is none %}<span class="badge">Not reconciled</span>
-          {% elif row.variance < -0.01 %}<span class="badge badge-low">Short {{ "%.2f"|format(-row.variance) }}</span>
-          {% elif row.variance > 0.01 %}<span class="badge">Over {{ "%.2f"|format(row.variance) }}</span>
+          {% elif row.variance < -0.01 %}<span class="badge badge-low">Short {{ (-row.variance)|fmt }}</span>
+          {% elif row.variance > 0.01 %}<span class="badge">Over {{ (row.variance)|fmt }}</span>
           {% else %}<span class="badge badge-ok">Matches</span>{% endif %}
         </td>
         <td>{{ row.handover.attendant.name if row.handover and row.handover.attendant else "-" }}</td>
@@ -333,9 +333,9 @@
       <tr>
         <td><a href="{{ url_for('account_detail', account_id=s.account_id) }}">{{ s.account.name }}</a></td>
         <td>{{ s.period_label or "-" }}</td>
-        <td>{{ "%.2f"|format(s.gross_amount) }}</td>
-        <td>{{ "%.2f"|format(s.deduction_amount) }}</td>
-        <td>{{ "%.2f"|format(s.net_paid) }}</td>
+        <td>{{ (s.gross_amount)|fmt }}</td>
+        <td>{{ (s.deduction_amount)|fmt }}</td>
+        <td>{{ (s.net_paid)|fmt }}</td>
         <td>{{ "Via " + s.bank_account.name if s.method == "bank" else "Cash" }}</td>
       </tr>
       {% endfor %}
@@ -354,7 +354,7 @@
       {% for b in bank_sales %}
       <tr>
         <td>{{ b.bank_account.name }}</td>
-        <td>{{ "%.2f"|format(b.amount) }}</td>
+        <td>{{ (b.amount)|fmt }}</td>
       </tr>
       {% else %}
       <tr><td colspan="2">No bank sales on this date.</td></tr>

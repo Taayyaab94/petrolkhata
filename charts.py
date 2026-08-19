@@ -19,6 +19,8 @@ itself stays framework-free and knows nothing about that script.
 
 import math
 
+from formatting import format_number
+
 PAD_LEFT = 46
 PAD_RIGHT = 16
 PAD_TOP = 16
@@ -305,18 +307,18 @@ def donut_chart(segments, width=240, height=240, thickness=34):
                 f'stroke-dasharray="{dash:.3f} {gap:.3f}" '
                 f'stroke-dashoffset="{-offset:.3f}" '
                 f'transform="rotate(-90 {cx} {cy})">'
-                f'<title>{seg["label"]}: Rs {amount:,.2f}</title>'
+                f'<title>{seg["label"]}: Rs {format_number(amount)}</title>'
                 f"</circle>"
             )
             offset += dash
 
     svg.append(f'<text x="{cx}" y="{cy - 6:.1f}" text-anchor="middle" class="donut-total-label">Total</text>')
-    svg.append(f'<text x="{cx}" y="{cy + 16:.1f}" text-anchor="middle" class="donut-total-value">Rs {total:,.0f}</text>')
+    svg.append(f'<text x="{cx}" y="{cy + 16:.1f}" text-anchor="middle" class="donut-total-value">Rs {format_number(total)}</text>')
     svg.append("</svg>")
 
     legend = "".join(
         f'<span class="chart-legend-item"><span class="dot" style="background:{s["color"]}"></span>'
-        f'{s["label"]} (Rs {s["amount"]:,.2f})</span>'
+        f'{s["label"]} (Rs {format_number(s["amount"])})</span>'
         for s in segments
     )
     return f'<div class="chart-legend">{legend}</div>' + "".join(svg)

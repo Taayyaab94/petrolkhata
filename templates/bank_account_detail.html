@@ -12,7 +12,7 @@
 <div class="stat-row">
   <div class="stat-card accent-green">
     <div class="label">Current Balance</div>
-    <div class="value">Rs {{ "%.2f"|format(bank_account.balance) }}</div>
+    <div class="value">Rs {{ (bank_account.balance)|fmt }}</div>
   </div>
 </div>
 
@@ -69,57 +69,57 @@
         {% if e.kind == "opening" %}
         <td><span class="badge">Opening Balance</span></td>
         <td>Balance as of {{ e.entry_date.strftime("%Y-%m-%d") }}</td>
-        <td>{{ "+" if e.delta >= 0 }}{{ "%.2f"|format(e.delta) }}</td>
+        <td>{{ "+" if e.delta >= 0 }}{{ (e.delta)|fmt }}</td>
         {% elif e.kind == "bank_sale" %}
         <td><span class="badge badge-ok">Bank Sale</span></td>
         <td>{{ e.obj.note or "-" }}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>+{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "deposit" %}
         <td><span class="badge badge-ok">Cash Deposit</span></td>
         <td>{{ e.obj.note or "-" }}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>+{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "receipt" %}
         <td><span class="badge badge-ok">Receipt &middot; <a href="{{ url_for('account_detail', account_id=e.obj.account_id) }}">{{ e.obj.account.name }}</a></span></td>
         <td>{{ e.obj.note or "-" }}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>+{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "employee_loan" %}
         <td><span class="badge badge-low">Loan &middot; <a href="{{ url_for('account_detail', account_id=e.obj.account_id) }}">{{ e.obj.account.name }}</a></span></td>
         <td>{{ e.obj.note or "-" }}</td>
-        <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>-{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "supplier_payment" %}
         <td><span class="badge badge-low">Payment &middot; <a href="{{ url_for('account_detail', account_id=e.obj.account_id) }}">{{ e.obj.account.name }}</a></span></td>
         <td>{{ e.obj.note or "-" }}</td>
-        <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>-{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "expense" %}
         <td><span class="badge badge-low">Expense</span></td>
         <td>{{ e.obj.category }}{% if e.obj.description %} - {{ e.obj.description }}{% endif %}</td>
-        <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>-{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "fuel_purchase" %}
         <td><span class="badge badge-low">Fuel Purchase</span></td>
-        <td>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.tank.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>-{{ "%.2f"|format(e.obj.cost or 0) }}</td>
+        <td>{{ (e.obj.liters)|fmt }} L {{ e.obj.tank.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>-{{ (e.obj.cost or 0)|fmt }}</td>
         {% elif e.kind == "salary" %}
         <td><span class="badge badge-low">Salary &middot; <a href="{{ url_for('account_detail', account_id=e.obj.account_id) }}">{{ e.obj.account.name }}</a></span></td>
-        <td>{% if e.obj.period_label %}{{ e.obj.period_label }}{% else %}Salary{% endif %}{% if e.obj.deduction_amount %} &middot; Rs {{ "%.2f"|format(e.obj.deduction_amount) }} held against advance{% endif %}</td>
-        <td>-{{ "%.2f"|format(e.obj.net_paid) }}</td>
+        <td>{% if e.obj.period_label %}{{ e.obj.period_label }}{% else %}Salary{% endif %}{% if e.obj.deduction_amount %} &middot; Rs {{ (e.obj.deduction_amount)|fmt }} held against advance{% endif %}</td>
+        <td>-{{ (e.obj.net_paid)|fmt }}</td>
         {% elif e.kind == "sales_return" %}
         <td><span class="badge badge-low">Sales Return</span></td>
-        <td>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }} &middot; {{ e.obj.tank.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>-{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>{{ (e.obj.liters)|fmt }} L {{ e.obj.fuel_type.name }} &middot; {{ e.obj.tank.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>-{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "product_sale" %}
         <td><span class="badge badge-ok">Non-Fuel Sale</span></td>
-        <td>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>{{ (e.obj.quantity)|fmt }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>+{{ (e.obj.amount)|fmt }}</td>
         {% elif e.kind == "product_purchase" %}
         <td><span class="badge badge-low">Product Purchase</span></td>
-        <td>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
-        <td>{{ "+" if -e.obj.total_cost >= 0 }}{{ "%.2f"|format(-e.obj.total_cost) }}</td>
+        <td>{{ (e.obj.quantity)|fmt }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>{{ "+" if -e.obj.total_cost >= 0 }}{{ (-e.obj.total_cost)|fmt }}</td>
         {% elif e.kind == "other_income" %}
         <td><span class="badge badge-ok">Other Income</span></td>
         <td>{{ e.obj.description }}</td>
-        <td>+{{ "%.2f"|format(e.obj.amount) }}</td>
+        <td>+{{ (e.obj.amount)|fmt }}</td>
         {% endif %}
-        <td>{{ "%.2f"|format(e.running_balance) }}</td>
+        <td>{{ (e.running_balance)|fmt }}</td>
         <td>{{ e.obj.user.label if e.obj and e.obj.user else "-" }}</td>
         {% if current_user.is_owner %}
         <td>{% if e.kind in ("bank_sale", "deposit", "expense", "fuel_purchase") %}<a href="#" class="edit-toggle">Edit</a>{% endif %}</td>
@@ -234,7 +234,11 @@ document.querySelectorAll('.edit-toggle').forEach(function (link) {
 });
 
 function fmtMoney(v) {
-  return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // Same rule as formatting.py's format_number(): comma thousands
+  // separators, but no trailing .00 on a whole number.
+  var rounded = Math.round(v * 100) / 100;
+  var decimals = rounded === Math.trunc(rounded) ? 0 : 2;
+  return rounded.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 document.querySelectorAll('.purchase-edit-liters').forEach(function (litersInput) {
   const form = litersInput.closest('form');

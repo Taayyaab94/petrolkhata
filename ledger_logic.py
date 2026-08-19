@@ -13,6 +13,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload, selectinload
 
 from extensions import db
+from formatting import format_number
 from models import (
     Account,
     BankAccount,
@@ -3134,7 +3135,7 @@ def inventory_insights(as_of_date, tank_rows, variance_rows, product_rows):
                 {
                     "severity": "high",
                     "title": f"{row['tank'].label}: low stock",
-                    "detail": f"{row['stock']:.2f} L is at or below the {row['tank'].low_stock_threshold:.2f} L threshold.",
+                    "detail": f"{format_number(row['stock'])} L is at or below the {format_number(row['tank'].low_stock_threshold)} L threshold.",
                     "url": None,
                 }
             )
@@ -3160,7 +3161,7 @@ def inventory_insights(as_of_date, tank_rows, variance_rows, product_rows):
                     "title": f"{row['tank'].label}: book vs actual variance",
                     "detail": (
                         f"Dip on {row['dip_date'].strftime('%d %b %Y')} shows "
-                        f"{row['variance_liters']:.2f} L variance (Rs {row['variance_value']:.2f})."
+                        f"{format_number(row['variance_liters'])} L variance (Rs {format_number(row['variance_value'])})."
                     ),
                     "url": None,
                 }
@@ -3194,7 +3195,7 @@ def inventory_insights(as_of_date, tank_rows, variance_rows, product_rows):
                     "severity": "high",
                     "title": f"{row['tank'].label}: {what}",
                     "detail": (
-                        f"Book stock is {row['stock']:.2f} L against a {row['capacity']:.2f} L "
+                        f"Book stock is {format_number(row['stock'])} L against a {format_number(row['capacity'])} L "
                         "capacity - a data-entry error, not a real reading."
                     ),
                     "url": None,
@@ -3207,7 +3208,7 @@ def inventory_insights(as_of_date, tank_rows, variance_rows, product_rows):
                 {
                     "severity": "medium",
                     "title": f"{row['product'].label}: low stock",
-                    "detail": f"{row['on_hand']:.2f} {row['product'].unit} on hand, at or below the {row['product'].low_stock_threshold:.2f} threshold.",
+                    "detail": f"{format_number(row['on_hand'])} {row['product'].unit} on hand, at or below the {format_number(row['product'].low_stock_threshold)} threshold.",
                     "url": None,
                 }
             )

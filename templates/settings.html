@@ -128,8 +128,8 @@
       <tr>
         <td>Tank {{ t.number }}</td>
         <td>{{ t.fuel_type.name }}</td>
-        <td>{{ "%.2f"|format(t.starting_stock_liters) }}</td>
-        <td>{{ "%.2f"|format(t.starting_stock_cost_per_liter) if t.starting_stock_cost_per_liter is not none else "unknown" }}</td>
+        <td>{{ (t.starting_stock_liters)|fmt }}</td>
+        <td>{{ (t.starting_stock_cost_per_liter)|fmt if t.starting_stock_cost_per_liter is not none else "unknown" }}</td>
         <td>{{ t.starting_stock_date.isoformat() if t.starting_stock_date else "from the beginning" }}</td>
         <td>
           <form method="post" action="{{ url_for('settings_edit_tank', tank_id=t.id) }}" class="inline-edit-form">
@@ -213,11 +213,11 @@
         <td>{{ p.label }}</td>
         <td><span class="badge">{{ p.category|capitalize }}</span></td>
         <td>{{ p.unit }}</td>
-        <td>{{ "%.2f"|format(p.purchase_rate) }}</td>
-        <td>{{ "%.2f"|format(p.retail_rate) }}</td>
-        <td>{{ "%.2f"|format(p.commission) }}</td>
-        <td>{{ "%.2f"|format(p.opening_stock) }} as of {{ p.opening_stock_date.isoformat() if p.opening_stock_date else "the beginning" }}</td>
-        <td>{{ "%.2f"|format(stock.on_hand) }} {% if stock.is_low %}<span class="badge badge-low">LOW</span>{% else %}<span class="badge badge-ok">OK</span>{% endif %}</td>
+        <td>{{ (p.purchase_rate)|fmt }}</td>
+        <td>{{ (p.retail_rate)|fmt }}</td>
+        <td>{{ (p.commission)|fmt }}</td>
+        <td>{{ (p.opening_stock)|fmt }} as of {{ p.opening_stock_date.isoformat() if p.opening_stock_date else "the beginning" }}</td>
+        <td>{{ (stock.on_hand)|fmt }} {% if stock.is_low %}<span class="badge badge-low">LOW</span>{% else %}<span class="badge badge-ok">OK</span>{% endif %}</td>
         <td>{% if p.is_active %}<span class="badge badge-ok">Active</span>{% else %}<span class="badge badge-low">Deactivated</span>{% endif %}</td>
         <td>
           <form method="post" action="{{ url_for('settings_edit_product', product_id=p.id) }}" class="inline-edit-form">
@@ -353,7 +353,7 @@
       {% for f in fuel_types %}
       <tr>
         <td>{{ f.name }}</td>
-        <td>{{ "%.2f"|format(f.price_per_liter) }}</td>
+        <td>{{ (f.price_per_liter)|fmt }}</td>
         <td>
           <form method="post" action="{{ url_for('settings_edit_price', fuel_type_id=f.id) }}" class="inline-edit-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -366,7 +366,7 @@
           {% set history = f.price_history|sort(attribute='effective_date', reverse=true) %}
           {% if history %}
           {% for h in history %}
-          <div class="hint-sm">Rs {{ "%.2f"|format(h.price_per_liter) }} from {{ h.effective_date.isoformat() }}</div>
+          <div class="hint-sm">Rs {{ (h.price_per_liter)|fmt }} from {{ h.effective_date.isoformat() }}</div>
           {% endfor %}
           {% else %}
           <span class="hint-sm">none recorded</span>
@@ -555,8 +555,8 @@
         {% for b in bank_accounts %}
         <tr>
           <td>{{ b.name }}</td>
-          <td>{{ "%.2f"|format(b.opening_balance) }}{% if b.opening_balance_date %} as of {{ b.opening_balance_date.strftime("%Y-%m-%d") }}{% endif %}</td>
-          <td>{{ "%.2f"|format(b.balance) }}</td>
+          <td>{{ (b.opening_balance)|fmt }}{% if b.opening_balance_date %} as of {{ b.opening_balance_date.strftime("%Y-%m-%d") }}{% endif %}</td>
+          <td>{{ (b.balance)|fmt }}</td>
         </tr>
         {% else %}
         <tr><td colspan="3">No bank accounts yet.</td></tr>
@@ -584,7 +584,7 @@
     <div class="panel-head"><h3>Cash in Hand</h3></div>
     <div class="stat-card accent-green" style="margin-bottom:16px;">
       <div class="label">Current Balance</div>
-      <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
+      <div class="value">Rs {{ (cash_balance)|fmt }}</div>
       <div class="sub">Opening balance + cash sales - cash deposited to banks</div>
     </div>
     <p class="hint">Set this once when migrating from paper records - it's the cash you physically had on hand as of a chosen date.</p>

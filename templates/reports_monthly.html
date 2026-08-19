@@ -42,35 +42,35 @@
 <div class="stat-row">
   <div class="stat-card {{ 'accent-green' if net_profit >= 0 else 'accent-red' }}">
     <div class="label">Net Profit</div>
-    <div class="value">Rs {{ "%.2f"|format(net_profit) }}</div>
-    <div class="sub">{{ prior_month_label }}: Rs {{ "%.2f"|format(prior_ctx.net_profit) }}</div>
+    <div class="value">Rs {{ (net_profit)|fmt }}</div>
+    <div class="sub">{{ prior_month_label }}: Rs {{ (prior_ctx.net_profit)|fmt }}</div>
   </div>
   <div class="stat-card accent-brand">
     <div class="label">Fuel Sold</div>
-    <div class="value">{{ "%.2f"|format(liters_sold) }} L</div>
-    <div class="sub">Rs {{ "%.2f"|format(net_revenue) }} net revenue</div>
+    <div class="value">{{ (liters_sold)|fmt }} L</div>
+    <div class="sub">Rs {{ (net_revenue)|fmt }} net revenue</div>
   </div>
   <div class="stat-card accent-green">
     <div class="label">Total Gross Margin</div>
-    <div class="value">Rs {{ "%.2f"|format(total_gross_margin) }}</div>
+    <div class="value">Rs {{ (total_gross_margin)|fmt }}</div>
     <div class="sub">Fuel + product</div>
   </div>
   <div class="stat-card accent-brand">
     <div class="label">Stock Ordered</div>
-    <div class="value">{{ "%.2f"|format(purchases_liters) }} L</div>
-    <div class="sub">Rs {{ "%.2f"|format(purchases_cost) }}</div>
+    <div class="value">{{ (purchases_liters)|fmt }} L</div>
+    <div class="sub">Rs {{ (purchases_cost)|fmt }}</div>
   </div>
   <div class="stat-card accent-green">
     <a class="stat-link" href="{{ url_for('cash_account_detail') }}">
       <div class="label">Closing Cash in Hand</div>
-      <div class="value">Rs {{ "%.2f"|format(cash_period.closing) }}</div>
-      <div class="sub">Opening Rs {{ "%.2f"|format(cash_period.opening) }}</div>
+      <div class="value">Rs {{ (cash_period.closing)|fmt }}</div>
+      <div class="sub">Opening Rs {{ (cash_period.opening)|fmt }}</div>
     </a>
   </div>
   <div class="stat-card">
     <div class="label">Receivables &minus; Payables</div>
-    <div class="value">Rs {{ "%.2f"|format(receivables_total - payables_total) }}</div>
-    <div class="sub">Rs {{ "%.2f"|format(receivables_total) }} owed to you &middot; Rs {{ "%.2f"|format(payables_total) }} owed by you</div>
+    <div class="value">Rs {{ (receivables_total - payables_total)|fmt }}</div>
+    <div class="sub">Rs {{ (receivables_total)|fmt }} owed to you &middot; Rs {{ (payables_total)|fmt }} owed by you</div>
   </div>
 </div>
 
@@ -111,13 +111,13 @@
         <div class="tank-card">
           <div class="tank-card-head">
             <strong>{{ r.fuel }}</strong>
-            <span class="badge {{ 'badge-low' if mpl <= 0 else ('badge-warn' if mpl < thin_margin_per_liter else 'badge-ok') }}">Rs {{ "%.2f"|format(mpl) }}/L</span>
+            <span class="badge {{ 'badge-low' if mpl <= 0 else ('badge-warn' if mpl < thin_margin_per_liter else 'badge-ok') }}">Rs {{ (mpl)|fmt }}/L</span>
           </div>
-          <div class="fuel-figure">{{ "%.2f"|format(r.liters) }} <span class="fuel-unit">L</span></div>
+          <div class="fuel-figure">{{ (r.liters)|fmt }} <span class="fuel-unit">L</span></div>
           <div class="tank-fill-track"><div class="tank-fill-bar {{ bar_class }}" style="width: {{ bar_width }}%;"></div></div>
           <div class="sub">{{ "%.1f"|format(share) }}% of the month's litres</div>
-          <div class="sub">Rs {{ "%.2f"|format(r.revenue) }} net revenue</div>
-          <div class="sub">Rs {{ "%.2f"|format(r.margin) }} margin &middot; Rs {{ "%.4f"|format(r.unit_cost) }}/L cost</div>
+          <div class="sub">Rs {{ (r.revenue)|fmt }} net revenue</div>
+          <div class="sub">Rs {{ (r.margin)|fmt }} margin &middot; Rs {{ "%.4f"|format(r.unit_cost) }}/L cost</div>
         </div>
         {% endfor %}
       </div>
@@ -149,11 +149,11 @@
             <strong>{{ p.fuel }}</strong>
             <span class="badge">Rs {{ "%.4f"|format(p.avg_cost_per_liter) }}/L</span>
           </div>
-          <div class="fuel-figure">{{ "%.2f"|format(p.liters) }} <span class="fuel-unit">L</span></div>
+          <div class="fuel-figure">{{ (p.liters)|fmt }} <span class="fuel-unit">L</span></div>
           <div class="tank-fill-track"><div class="tank-fill-bar {{ bar_class }}" style="width: {{ bar_width }}%;"></div></div>
-          <div class="sub">Rs {{ "%.2f"|format(p.cost) }} total cost</div>
+          <div class="sub">Rs {{ (p.cost)|fmt }} total cost</div>
           <div class="sub">Rs {{ "%.4f"|format(p.avg_cost_per_liter) }} average order cost per litre</div>
-          <div class="sub">{% if sold %}{{ "%.1f"|format(cover) }}% of the {{ "%.2f"|format(sold) }} L sold{% else %}no sales of this fuel this month{% endif %}</div>
+          <div class="sub">{% if sold %}{{ "%.1f"|format(cover) }}% of the {{ (sold)|fmt }} L sold{% else %}no sales of this fuel this month{% endif %}</div>
         </div>
         {% endfor %}
       </div>
@@ -178,9 +178,9 @@
       </span>
       <span class="step-amount {{ 'neg' if s.kind == 'less' else ('pos' if s.kind == 'add' else '') }}">
         {%- if s.kind == 'less' %}&minus; {% elif s.kind == 'add' %}+ {% endif -%}
-        Rs {{ "%.2f"|format(s.amount) }}
+        Rs {{ (s.amount)|fmt }}
       </span>
-      <span class="step-running">{% if s.running is not none %}Rs {{ "%.2f"|format(s.running) }}{% endif %}</span>
+      <span class="step-running">{% if s.running is not none %}Rs {{ (s.running)|fmt }}{% endif %}</span>
       {% if s.note %}<span class="step-note">{{ s.note }}</span>{% endif %}
     </li>
     {% endfor %}
@@ -194,21 +194,21 @@
     <div class="table-wrap">
     <table class="table">
       <tbody>
-        <tr class="recon-anchor"><td>Opening cash in hand</td><td>Rs {{ "%.2f"|format(cash_period.opening) }}</td></tr>
+        <tr class="recon-anchor"><td>Opening cash in hand</td><td>Rs {{ (cash_period.opening)|fmt }}</td></tr>
         {% for row in cash_period.inflows %}
-        <tr><td>+ {{ row.label }}</td><td>Rs {{ "%.2f"|format(row.amount) }}</td></tr>
+        <tr><td>+ {{ row.label }}</td><td>Rs {{ (row.amount)|fmt }}</td></tr>
         {% endfor %}
-        <tr class="recon-anchor"><td>Total cash received</td><td>Rs {{ "%.2f"|format(cash_period.total_in) }}</td></tr>
+        <tr class="recon-anchor"><td>Total cash received</td><td>Rs {{ (cash_period.total_in)|fmt }}</td></tr>
         {% for row in cash_period.outflows %}
-        <tr><td>&minus; {{ row.label }}</td><td>Rs {{ "%.2f"|format(row.amount) }}</td></tr>
+        <tr><td>&minus; {{ row.label }}</td><td>Rs {{ (row.amount)|fmt }}</td></tr>
         {% endfor %}
-        <tr class="recon-anchor"><td>Total cash paid</td><td>Rs {{ "%.2f"|format(cash_period.total_out) }}</td></tr>
-        <tr class="recon-anchor"><td>Closing cash in hand</td><td>Rs {{ "%.2f"|format(cash_period.closing) }}</td></tr>
+        <tr class="recon-anchor"><td>Total cash paid</td><td>Rs {{ (cash_period.total_out)|fmt }}</td></tr>
+        <tr class="recon-anchor"><td>Closing cash in hand</td><td>Rs {{ (cash_period.closing)|fmt }}</td></tr>
       </tbody>
     </table>
     </div>
     <div class="recon-formula">
-      Opening (Rs {{ "%.2f"|format(cash_period.opening) }}) + Received (Rs {{ "%.2f"|format(cash_period.total_in) }}) &minus; Paid (Rs {{ "%.2f"|format(cash_period.total_out) }}) = Closing (Rs {{ "%.2f"|format(cash_period.closing) }})
+      Opening (Rs {{ (cash_period.opening)|fmt }}) + Received (Rs {{ (cash_period.total_in)|fmt }}) &minus; Paid (Rs {{ (cash_period.total_out)|fmt }}) = Closing (Rs {{ (cash_period.closing)|fmt }})
     </div>
     <p class="hint">Cash only - bank movements are not counted here. Closing cash in hand is the balance at the end of {{ end.strftime('%d %b %Y') }}.</p>
   </div>
@@ -218,10 +218,10 @@
     <div class="table-wrap">
     <table class="table">
       <tbody>
-        <tr><td>Credit given to customers</td><td>Rs {{ "%.2f"|format(credit_given) }}</td></tr>
-        <tr><td>Payments received</td><td>Rs {{ "%.2f"|format(receipts_total) }}</td></tr>
-        <tr><td>Fuel purchased</td><td>{{ "%.2f"|format(purchases_liters) }} L</td></tr>
-        <tr><td>Spent on fuel purchases</td><td>Rs {{ "%.2f"|format(purchases_cost) }}</td></tr>
+        <tr><td>Credit given to customers</td><td>Rs {{ (credit_given)|fmt }}</td></tr>
+        <tr><td>Payments received</td><td>Rs {{ (receipts_total)|fmt }}</td></tr>
+        <tr><td>Fuel purchased</td><td>{{ (purchases_liters)|fmt }} L</td></tr>
+        <tr><td>Spent on fuel purchases</td><td>Rs {{ (purchases_cost)|fmt }}</td></tr>
       </tbody>
     </table>
     </div>
@@ -235,7 +235,7 @@
     <div class="panel-head"><h3>Payables</h3></div>
     <details class="acct-details" open>
       <summary>
-        <span class="acct-total accent-neg">Rs {{ "%.2f"|format(payables_total) }}</span>
+        <span class="acct-total accent-neg">Rs {{ (payables_total)|fmt }}</span>
         <span class="acct-caption">owed to {{ payables_rows|length }} account(s)</span>
       </summary>
       <div class="table-wrap">
@@ -245,7 +245,7 @@
             {% for row in payables_rows %}
             <tr>
               <td><a href="{{ url_for('account_detail', account_id=row.account.id) }}">{{ row.account.name }}</a></td>
-              <td>{{ "%.2f"|format(row.amount_owed) }}</td>
+              <td>{{ (row.amount_owed)|fmt }}</td>
               <td>{{ row.oldest_purchase_date.strftime('%d %b %Y') if row.oldest_purchase_date else "-" }}</td>
               <td>{{ row.days_outstanding if row.days_outstanding is not none else "-" }}</td>
             </tr>
@@ -263,7 +263,7 @@
     <div class="panel-head"><h3>Receivables</h3></div>
     <details class="acct-details" open>
       <summary>
-        <span class="acct-total accent-pos">Rs {{ "%.2f"|format(receivables_total) }}</span>
+        <span class="acct-total accent-pos">Rs {{ (receivables_total)|fmt }}</span>
         <span class="acct-caption">owed by {{ receivable_rows|length }} account(s)</span>
       </summary>
       <div class="table-wrap">
@@ -273,7 +273,7 @@
             {% for row in receivable_rows %}
             <tr>
               <td><a href="{{ url_for('account_detail', account_id=row.account.id) }}">{{ row.account.name }}</a></td>
-              <td>{{ "%.2f"|format(row.balance) }}</td>
+              <td>{{ (row.balance)|fmt }}</td>
             </tr>
             {% else %}
             <tr><td colspan="2">No account owes the pump anything.</td></tr>
@@ -301,15 +301,15 @@
       {% for r in cogs_detail %}
       <tr>
         <td>{{ r.fuel }}</td>
-        <td>{{ "%.2f"|format(r.gross_revenue) }}</td>
-        <td>{{ "%.2f"|format(r.returns_liters) }}</td>
-        <td>{{ "%.2f"|format(r.returns_amount) }}</td>
-        <td>{{ "%.2f"|format(r.liters) }}</td>
-        <td>{{ "%.2f"|format(r.revenue) }}</td>
+        <td>{{ (r.gross_revenue)|fmt }}</td>
+        <td>{{ (r.returns_liters)|fmt }}</td>
+        <td>{{ (r.returns_amount)|fmt }}</td>
+        <td>{{ (r.liters)|fmt }}</td>
+        <td>{{ (r.revenue)|fmt }}</td>
         <td>{{ "%.4f"|format(r.unit_cost) }}</td>
-        <td>{{ "%.2f"|format(r.cost) }}</td>
-        <td>{{ "%.2f"|format(r.margin) }}</td>
-        <td>{{ "%.2f"|format(r.margin / r.liters if r.liters else 0) }}</td>
+        <td>{{ (r.cost)|fmt }}</td>
+        <td>{{ (r.margin)|fmt }}</td>
+        <td>{{ (r.margin / r.liters if r.liters else 0)|fmt }}</td>
       </tr>
       {% else %}
       <tr><td colspan="10">No sales in this month.</td></tr>
@@ -332,10 +332,10 @@
       {% for r in product_category_detail %}
       <tr>
         <td>{{ r.category|capitalize }}</td>
-        <td>{{ "%.2f"|format(r.quantity) }}</td>
-        <td>{{ "%.2f"|format(r.revenue) }}</td>
-        <td>{{ "%.2f"|format(r.cost) }}</td>
-        <td>{{ "%.2f"|format(r.margin) }}</td>
+        <td>{{ (r.quantity)|fmt }}</td>
+        <td>{{ (r.revenue)|fmt }}</td>
+        <td>{{ (r.cost)|fmt }}</td>
+        <td>{{ (r.margin)|fmt }}</td>
         <td>{{ "%.1f"|format(r.margin / r.revenue * 100 if r.revenue else 0) }}%</td>
       </tr>
       {% else %}
@@ -356,7 +356,7 @@
       <thead><tr><th>Category</th><th>Amount (Rs)</th></tr></thead>
       <tbody>
         {% for category, amount in expenses_by_category %}
-        <tr><td>{{ category }}</td><td>{{ "%.2f"|format(amount) }}</td></tr>
+        <tr><td>{{ category }}</td><td>{{ (amount)|fmt }}</td></tr>
         {% else %}
         <tr><td colspan="2">No expenses this month.</td></tr>
         {% endfor %}
@@ -377,7 +377,7 @@
           <td>{% if r.account %}<a href="{{ url_for('account_detail', account_id=r.account.id) }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</td>
           <td>{{ r.shifts }}</td>
           <td>{{ r.shortfalls }}</td>
-          <td>{{ "+" if r.total_variance > 0 }}{{ "%.2f"|format(r.total_variance) }}</td>
+          <td>{{ "+" if r.total_variance > 0 }}{{ (r.total_variance)|fmt }}</td>
         </tr>
         {% else %}
         <tr><td colspan="4">No shifts reconciled this month - record a cash handover on the Ledger to start tracking this.</td></tr>

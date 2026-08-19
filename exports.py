@@ -21,6 +21,8 @@ import io
 import re
 from datetime import date, datetime
 
+from formatting import format_number
+
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -47,7 +49,7 @@ def _format_cell_text(value):
     if value is None:
         return "-"
     if isinstance(value, float):
-        return f"{value:,.2f}"
+        return format_number(value)
     if isinstance(value, int):
         return f"{value:,}"
     if isinstance(value, (date, datetime)):

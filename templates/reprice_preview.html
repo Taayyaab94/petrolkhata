@@ -22,15 +22,15 @@
   </div>
   <div class="stat-card accent-red">
     <div class="label">Total now</div>
-    <div class="value">Rs {{ "%.2f"|format(preview.old_total) }}</div>
+    <div class="value">Rs {{ (preview.old_total)|fmt }}</div>
   </div>
   <div class="stat-card accent-green">
     <div class="label">Total after re-pricing</div>
-    <div class="value">Rs {{ "%.2f"|format(preview.new_total) }}</div>
+    <div class="value">Rs {{ (preview.new_total)|fmt }}</div>
   </div>
   <div class="stat-card {{ 'accent-green' if preview.difference >= 0 else 'accent-red' }}">
     <div class="label">Difference</div>
-    <div class="value">{{ "+" if preview.difference >= 0 }}Rs {{ "%.2f"|format(preview.difference) }}</div>
+    <div class="value">{{ "+" if preview.difference >= 0 }}Rs {{ (preview.difference)|fmt }}</div>
   </div>
 </div>
 
@@ -52,14 +52,14 @@
         <td>{{ c.obj.entry_date.isoformat() }}</td>
         <td>{{ c.label }}</td>
         <td>{{ c.fuel }}</td>
-        <td>{{ "%.2f"|format(c.liters) }}</td>
-        <td>{{ "%.2f"|format(c.old_price) }}</td>
-        <td><strong>{{ "%.2f"|format(c.new_price) }}</strong></td>
-        <td>{{ "%.2f"|format(c.old_amount) }}</td>
-        <td><strong>{{ "%.2f"|format(c.new_amount) }}</strong></td>
+        <td>{{ (c.liters)|fmt }}</td>
+        <td>{{ (c.old_price)|fmt }}</td>
+        <td><strong>{{ (c.new_price)|fmt }}</strong></td>
+        <td>{{ (c.old_amount)|fmt }}</td>
+        <td><strong>{{ (c.new_amount)|fmt }}</strong></td>
         <td>
           <span class="badge {{ 'badge-ok' if c.new_amount >= c.old_amount else 'badge-low' }}">
-            {{ "+" if (c.new_amount - c.old_amount) >= 0 }}{{ "%.2f"|format(c.new_amount - c.old_amount) }}
+            {{ "+" if (c.new_amount - c.old_amount) >= 0 }}{{ (c.new_amount - c.old_amount)|fmt }}
           </span>
         </td>
       </tr>
@@ -90,9 +90,9 @@
         <td>{{ c.obj.entry_date.isoformat() }}</td>
         <td>{{ c.label }}</td>
         <td>{{ c.fuel }}</td>
-        <td>{{ "%.2f"|format(c.liters) }}</td>
-        <td><strong>{{ "%.2f"|format(c.old_amount) }}</strong></td>
-        <td>{{ "%.2f"|format(c.liters * c.new_price) }}</td>
+        <td>{{ (c.liters)|fmt }}</td>
+        <td><strong>{{ (c.old_amount)|fmt }}</strong></td>
+        <td>{{ (c.liters * c.new_price)|fmt }}</td>
       </tr>
       {% endfor %}
     </tbody>

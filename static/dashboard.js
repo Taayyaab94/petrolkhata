@@ -260,10 +260,19 @@
     tooltip.hidden = true;
     document.body.appendChild(tooltip);
 
+    // Same rule as formatting.py's format_number() on the server side:
+    // comma thousands separators always, but a whole number never shows
+    // a trailing ".00" - only genuinely fractional values get 2dp.
     function fmt(v) {
       var n = parseFloat(v);
       if (isNaN(n)) return v;
-      return n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      var rounded = Math.round(n * 100) / 100;
+      var decimals = rounded === Math.trunc(rounded) ? 0 : 2;
+      // en-US, not en-IN: the app's own number rule (formatting.py) groups
+      // every 3 digits (1,789,359), not the Indian 2-2-3 grouping en-IN
+      // would produce (17,89,359) - this must match the server-rendered
+      // figures right next to it on the same page.
+      return rounded.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
     }
 
     svgs.forEach(function (svg) {

@@ -34,6 +34,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload
 
 import charts
+from formatting import format_number
 import email_service
 from exports import build_pdf, build_xlsx
 from extensions import db, login_manager, migrate
@@ -194,6 +195,11 @@ else:
     )
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+# Single shared number-display rule for every template (see
+# formatting.py's own docstring) - registered once here so any page using
+# |fmt automatically gets comma thousands separators and a dropped ".00".
+app.jinja_env.filters["fmt"] = format_number
+
 db.init_app(app)
 # Wires the tenant-scoping enforcement (see tenancy.py) into every session
 # created through db.session from here on: a do_orm_execute event filters
@@ -325,7 +331,7 @@ def cash_shortfall_message(entry_date):
     actually checked against."""
     return (
         f"Not enough cash in hand on {entry_date} for this (at most "
-        f"Rs {max_cash_available_on(entry_date):,.2f} is available then without going negative later)."
+        f"Rs {format_number(max_cash_available_on(entry_date))} is available then without going negative later)."
     )
 
 
@@ -1366,7 +1372,7 @@ def settings_edit_price(fuel_type_id):
         effective = effective_date or date.today()
         record_fuel_price(fuel, price, effective)
         db.session.commit()
-        flash(f"Set {fuel.name} to Rs {price:,.2f}/L, effective {effective}.", "success")
+        flash(f"Set {fuel.name} to Rs {format_number(price)}/L, effective {effective}.", "success")
 
     return redirect(url_for("settings"))
 
@@ -1430,8 +1436,9 @@ def settings_reprice():
     db.session.commit()
     flash(
         f"Re-priced {result['count']} entr{'y' if result['count'] == 1 else 'ies'} between "
-        f"{start} and {end}. Total changed from Rs {result['old_total']:,.2f} to "
-        f"Rs {result['new_total']:,.2f} ({result['difference']:+,.2f}).",
+        f"{start} and {end}. Total changed from Rs {format_number(result['old_total'])} to "
+        f"Rs {format_number(result['new_total'])} "
+        f"({'+' if result['difference'] >= 0 else ''}{format_number(result['difference'])}).",
         "success",
     )
     if result["skipped_credits"]:
@@ -2661,7 +2668,7 @@ def ledger_fuel_price():
     else:
         record_fuel_price(fuel, price, entry_date)
         db.session.commit()
-        flash(f"Updated {fuel.name} price to Rs {price:,.2f}/L, effective {entry_date}.", "success")
+        flash(f"Updated {fuel.name} price to Rs {format_number(price)}/L, effective {entry_date}.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -3422,14 +3429,14 @@ def ledger_handover():
                 flash(f"{shift.name}: cash counted matches the ledger exactly.", "success")
             elif variance < 0:
                 flash(
-                    f"{shift.name}: short by Rs {abs(variance):,.2f} "
-                    f"(expected Rs {expected:,.2f}, counted Rs {declared:,.2f}).",
+                    f"{shift.name}: short by Rs {format_number(abs(variance))} "
+                    f"(expected Rs {format_number(expected)}, counted Rs {format_number(declared)}).",
                     "error",
                 )
             else:
                 flash(
-                    f"{shift.name}: over by Rs {variance:,.2f} "
-                    f"(expected Rs {expected:,.2f}, counted Rs {declared:,.2f}).",
+                    f"{shift.name}: over by Rs {format_number(variance)} "
+                    f"(expected Rs {format_number(expected)}, counted Rs {format_number(declared)}).",
                     "error",
                 )
         except IntegrityError:
@@ -3469,7 +3476,7 @@ def ledger_handover_write_off(handover_id):
             )
         )
         db.session.commit()
-        flash(f"Recorded Rs {shortfall:,.2f} shortfall as a cash expense.", "success")
+        flash(f"Recorded Rs {format_number(shortfall)} shortfall as a cash expense.", "success")
 
     return redirect(url_for("ledger", date=handover.entry_date, shift=handover.shift_id))
 
@@ -3506,8 +3513,8 @@ def ledger_salary():
     elif deduction > outstanding + 0.01:
         db.session.rollback()
         flash(
-            f"{employee.name} only owes Rs {max(outstanding, 0):,.2f}, so you can't deduct "
-            f"Rs {deduction:,.2f}.",
+            f"{employee.name} only owes Rs {format_number(max(outstanding, 0))}, so you can't deduct "
+            f"Rs {format_number(deduction)}.",
             "error",
         )
     elif method_error:
@@ -3533,12 +3540,12 @@ def ledger_salary():
         db.session.commit()
         if deduction:
             flash(
-                f"Paid {employee.name} Rs {net:,.2f} (Rs {gross:,.2f} salary less "
-                f"Rs {deduction:,.2f} against their advance).",
+                f"Paid {employee.name} Rs {format_number(net)} (Rs {format_number(gross)} salary less "
+                f"Rs {format_number(deduction)} against their advance).",
                 "success",
             )
         else:
-            flash(f"Paid {employee.name} Rs {net:,.2f} salary.", "success")
+            flash(f"Paid {employee.name} Rs {format_number(net)} salary.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -3578,7 +3585,7 @@ def ledger_receipt():
             )
         )
         db.session.commit()
-        flash(f"Recorded receipt of Rs {amount:,.2f} from {account.name}.", "success")
+        flash(f"Recorded receipt of Rs {format_number(amount)} from {account.name}.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -3673,12 +3680,12 @@ def ledger_credit():
         db.session.commit()
         if entry_mode == "amount":
             flash(
-                f"Recorded Rs {amount:,.2f} ({liters:g} L equiv.) {fuel.name} on credit for {customer.name}.",
+                f"Recorded Rs {format_number(amount)} ({liters:g} L equiv.) {fuel.name} on credit for {customer.name}.",
                 "success",
             )
         else:
             flash(
-                f"Recorded {liters:g} L {fuel.name} (Rs {amount:,.2f}) on credit for {customer.name}.",
+                f"Recorded {liters:g} L {fuel.name} (Rs {format_number(amount)}) on credit for {customer.name}.",
                 "success",
             )
 
@@ -3743,7 +3750,7 @@ def ledger_sales_return():
             )
             db.session.commit()
             flash(
-                f"Recorded return of {liters:g} L {fuel.name} into {tank.label} (Rs {amount:,.2f}).",
+                f"Recorded return of {liters:g} L {fuel.name} into {tank.label} (Rs {format_number(amount)}).",
                 "success",
             )
 
@@ -3839,7 +3846,7 @@ def ledger_expense():
             )
         )
         db.session.commit()
-        flash(f"Logged expense: {category} - Rs {amount:,.2f}", "success")
+        flash(f"Logged expense: {category} - Rs {format_number(amount)}", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -3981,7 +3988,7 @@ def ledger_product_sale():
             )
         )
         db.session.commit()
-        flash(f"Recorded sale of {quantity:g} {product.label} (Rs {amount:,.2f}).", "success")
+        flash(f"Recorded sale of {quantity:g} {product.label} (Rs {format_number(amount)}).", "success")
         if quantity > stock_before:
             # Overselling means the STOCK COUNT is wrong, not that this
             # sale didn't happen - refusing to save would stop the
@@ -4031,7 +4038,7 @@ def ledger_other_income():
             )
         )
         db.session.commit()
-        flash(f"Recorded other income: {description} - Rs {amount:,.2f}", "success")
+        flash(f"Recorded other income: {description} - Rs {format_number(amount)}", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -4127,7 +4134,7 @@ def ledger_product_purchase():
             )
             db.session.commit()
             verb = "Received" if quantity > 0 else "Returned/corrected"
-            flash(f"{verb} {abs(quantity):g} {product.label} (Rs {abs(total_cost):,.2f}).", "success")
+            flash(f"{verb} {abs(quantity):g} {product.label} (Rs {format_number(abs(total_cost))}).", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -4167,7 +4174,7 @@ def ledger_supplier_payment():
             )
         )
         db.session.commit()
-        flash(f"Recorded payment of Rs {amount:,.2f} to {supplier.name}.", "success")
+        flash(f"Recorded payment of Rs {format_number(amount)} to {supplier.name}.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -4202,7 +4209,7 @@ def ledger_bank_sale():
             )
         )
         db.session.commit()
-        flash(f"Recorded Rs {amount:,.2f} bank sale to {bank_account.name}.", "success")
+        flash(f"Recorded Rs {format_number(amount)} bank sale to {bank_account.name}.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -4236,7 +4243,7 @@ def ledger_cash_deposit():
             )
         )
         db.session.commit()
-        flash(f"Recorded deposit of Rs {amount:,.2f} to {bank_account.name}.", "success")
+        flash(f"Recorded deposit of Rs {format_number(amount)} to {bank_account.name}.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -4294,9 +4301,9 @@ def ledger_employee_loan():
         )
         db.session.commit()
         if kind == "drawing":
-            flash(f"Recorded drawing of Rs {amount:,.2f} for {account.name}.", "success")
+            flash(f"Recorded drawing of Rs {format_number(amount)} for {account.name}.", "success")
         else:
-            flash(f"Recorded loan/advance of Rs {amount:,.2f} to {account.name}.", "success")
+            flash(f"Recorded loan/advance of Rs {format_number(amount)} to {account.name}.", "success")
 
     return redirect(url_for("ledger", date=entry_date))
 
@@ -4443,7 +4450,7 @@ def attention_items(
                     "severity": "critical",
                     "title": f"{row['tank'].label}: negative stock",
                     "detail": (
-                        f"Book stock is {row['stock']:.2f} L - a data-entry error "
+                        f"Book stock is {format_number(row['stock'])} L - a data-entry error "
                         "(a missed purchase or an over-recorded sale), not a real dip below empty."
                     ),
                     "url": url_for("inventory"),
@@ -4454,7 +4461,7 @@ def attention_items(
                 {
                     "severity": "critical",
                     "title": f"{row['tank'].label}: stock above capacity",
-                    "detail": f"Book stock {row['stock']:.2f} L exceeds the tank's {row['capacity']:.2f} L capacity.",
+                    "detail": f"Book stock {format_number(row['stock'])} L exceeds the tank's {format_number(row['capacity'])} L capacity.",
                     "url": url_for("inventory"),
                 }
             )
@@ -4479,8 +4486,8 @@ def attention_items(
                     "severity": "critical",
                     "title": f"{card['fuel_type'].name}: selling below cost",
                     "detail": (
-                        f"Rate Rs {card['rate']:.2f}/L is below the weighted-average "
-                        f"cost Rs {card['cost_per_liter']:.2f}/L."
+                        f"Rate Rs {format_number(card['rate'])}/L is below the weighted-average "
+                        f"cost Rs {format_number(card['cost_per_liter'])}/L."
                     ),
                     "url": url_for("dashboard", date=entry_date.isoformat()),
                 }
@@ -4496,7 +4503,7 @@ def attention_items(
                     "severity": "warning",
                     "title": f"{row['tank'].label}: dip variance over threshold",
                     "detail": (
-                        f"Variance {row['variance_liters']:.2f} L exceeds the "
+                        f"Variance {format_number(row['variance_liters'])} L exceeds the "
                         f"{threshold:.1f} L threshold for this tank's book stock."
                     ),
                     "url": url_for("reports", date=entry_date.isoformat()),
@@ -4508,7 +4515,7 @@ def attention_items(
             {
                 "severity": "warning",
                 "title": "Debt aged 90+ days",
-                "detail": f"Rs {aging['buckets']['90+']:.2f} has been outstanding for more than 90 days.",
+                "detail": f"Rs {format_number(aging['buckets']['90+'])} has been outstanding for more than 90 days.",
                 "url": url_for("accounts", kind="debitors"),
             }
         )
@@ -4520,7 +4527,7 @@ def attention_items(
                 "title": "Customer concentration risk",
                 "detail": (
                     f"Top 3 customers hold {concentration['top3_share_pct']:.1f}% of "
-                    f"receivables (Rs {concentration['total_receivable']:,.2f} total)."
+                    f"receivables (Rs {format_number(concentration['total_receivable'])} total)."
                 ),
                 "url": url_for("accounts", kind="debitors"),
             }
@@ -4563,7 +4570,7 @@ def attention_items(
                 {
                     "severity": "warning",
                     "title": f"{row['shift'].name}: handover variance",
-                    "detail": f"Rs {row['variance']:.2f} variance against the expected cash for this shift.",
+                    "detail": f"Rs {format_number(row['variance'])} variance against the expected cash for this shift.",
                     "url": url_for("reports", date=entry_date.isoformat()),
                 }
             )
@@ -4576,7 +4583,7 @@ def attention_items(
                 "severity": "info",
                 "title": "Dead stock tying up cash",
                 "detail": (
-                    f"Rs {dead_total:,.2f} tied up in {len(dead_stock_rows)} product(s) "
+                    f"Rs {format_number(dead_total)} tied up in {len(dead_stock_rows)} product(s) "
                     f"with no sale in {DEAD_STOCK_DAYS}+ days."
                 ),
                 "url": url_for("inventory"),
@@ -4624,10 +4631,10 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
                 "severity": "critical",
                 "title": "The month closed at a loss",
                 "detail": (
-                    f"Net profit for {start.strftime('%B %Y')} is Rs {ctx['net_profit']:,.2f}. "
-                    f"Total gross margin Rs {ctx['total_gross_margin']:,.2f} plus other income "
-                    f"Rs {ctx['other_income_total']:,.2f} did not cover Rs {ctx['expenses_total']:,.2f} "
-                    f"of expenses and Rs {ctx['salaries_total']:,.2f} of salaries."
+                    f"Net profit for {start.strftime('%B %Y')} is Rs {format_number(ctx['net_profit'])}. "
+                    f"Total gross margin Rs {format_number(ctx['total_gross_margin'])} plus other income "
+                    f"Rs {format_number(ctx['other_income_total'])} did not cover Rs {format_number(ctx['expenses_total'])} "
+                    f"of expenses and Rs {format_number(ctx['salaries_total'])} of salaries."
                 ),
                 "url": None,
             }
@@ -4641,8 +4648,8 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
                     "severity": "critical",
                     "title": f"{r['fuel']}: sold below cost this month",
                     "detail": (
-                        f"Rs {mpl(r):,.2f} margin per litre across {r['liters']:,.2f} L - net revenue "
-                        f"Rs {r['revenue']:,.2f} against Rs {r['cost']:,.2f} of cost at the "
+                        f"Rs {format_number(mpl(r))} margin per litre across {format_number(r['liters'])} L - net revenue "
+                        f"Rs {format_number(r['revenue'])} against Rs {format_number(r['cost'])} of cost at the "
                         "weighted-average purchase price."
                     ),
                     "url": None,
@@ -4657,9 +4664,9 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
                     "severity": "warning",
                     "title": f"{r['fuel']}: thin margin",
                     "detail": (
-                        f"Only Rs {mpl(r):,.2f} margin per litre this month, under the "
-                        f"Rs {THIN_MARGIN_PER_LITER:,.2f}/L mark - Rs {r['margin']:,.2f} earned on "
-                        f"{r['liters']:,.2f} L."
+                        f"Only Rs {format_number(mpl(r))} margin per litre this month, under the "
+                        f"Rs {format_number(THIN_MARGIN_PER_LITER)}/L mark - Rs {format_number(r['margin'])} earned on "
+                        f"{format_number(r['liters'])} L."
                     ),
                     "url": None,
                 }
@@ -4675,8 +4682,8 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
                     "severity": "good",
                     "title": "Profit is up on last month",
                     "detail": (
-                        f"Rs {ctx['net_profit']:,.2f} this month against Rs {prior_ctx['net_profit']:,.2f} "
-                        f"in {prior_month_label} - up Rs {delta:,.2f} ({pct:+.1f}%)."
+                        f"Rs {format_number(ctx['net_profit'])} this month against Rs {format_number(prior_ctx['net_profit'])} "
+                        f"in {prior_month_label} - up Rs {format_number(delta)} ({pct:+.1f}%)."
                     ),
                     "url": None,
                 }
@@ -4687,8 +4694,8 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
                     "severity": "warning",
                     "title": "Profit is down on last month",
                     "detail": (
-                        f"Rs {ctx['net_profit']:,.2f} this month against Rs {prior_ctx['net_profit']:,.2f} "
-                        f"in {prior_month_label} - down Rs {abs(delta):,.2f} ({pct:+.1f}%)."
+                        f"Rs {format_number(ctx['net_profit'])} this month against Rs {format_number(prior_ctx['net_profit'])} "
+                        f"in {prior_month_label} - down Rs {format_number(abs(delta))} ({pct:+.1f}%)."
                     ),
                     "url": None,
                 }
@@ -4713,8 +4720,8 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
                 "severity": "good",
                 "title": f"{top['fuel']} led the month",
                 "detail": (
-                    f"{top['liters']:,.2f} L sold for Rs {top['revenue']:,.2f} - {share:.1f}% of net "
-                    f"fuel revenue, at Rs {mpl(top):,.2f} margin per litre."
+                    f"{format_number(top['liters'])} L sold for Rs {format_number(top['revenue'])} - {share:.1f}% of net "
+                    f"fuel revenue, at Rs {format_number(mpl(top))} margin per litre."
                 ),
                 "url": None,
             }
@@ -4726,7 +4733,7 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
             {
                 "severity": "good",
                 "title": f"Best day: {best_day['date'].strftime('%d %b %Y')}",
-                "detail": f"Rs {best_day['amount']:,.2f} of fuel sold that day, the highest of the month.",
+                "detail": f"Rs {format_number(best_day['amount'])} of fuel sold that day, the highest of the month.",
                 "url": url_for("reports", date=best_day["date"].isoformat()),
             }
         )
@@ -4741,7 +4748,7 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
                     "severity": "warning",
                     "title": f"{w['name']}: cash short this month",
                     "detail": (
-                        f"Rs {abs(w['total_variance']):,.2f} net short across {w['shifts']} reconciled "
+                        f"Rs {format_number(abs(w['total_variance']))} net short across {w['shifts']} reconciled "
                         f"shift(s), {w['shortfalls']} of them short."
                     ),
                     "url": url_for("account_detail", account_id=w["account"].id) if w["account"] else None,
@@ -4756,7 +4763,7 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
                     "severity": "info",
                     "title": "Sold more than was received",
                     "detail": (
-                        f"{ctx['liters_sold']:,.2f} L sold against {ctx['purchases_liters']:,.2f} L "
+                        f"{format_number(ctx['liters_sold'])} L sold against {format_number(ctx['purchases_liters'])} L "
                         "received - the difference came out of tank stock."
                     ),
                     "url": url_for("inventory"),
@@ -4768,7 +4775,7 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
                     "severity": "info",
                     "title": "Received more than was sold",
                     "detail": (
-                        f"{ctx['purchases_liters']:,.2f} L received against {ctx['liters_sold']:,.2f} L "
+                        f"{format_number(ctx['purchases_liters'])} L received against {format_number(ctx['liters_sold'])} L "
                         "sold - the difference is still in the tanks."
                     ),
                     "url": url_for("inventory"),
@@ -4820,7 +4827,7 @@ def profit_walkthrough(ctx):
 
     start_row(
         "Fuel Revenue, Gross", r["revenue"],
-        f"{r['liters_sold']:,.2f} L sold · {r['testing_liters']:,.2f} L testing",
+        f"{format_number(r['liters_sold'])} L sold · {format_number(r['testing_liters'])} L testing",
     )
     memo_row(
         "Discounts already netted out above", r["total_discounts"],
@@ -4828,7 +4835,7 @@ def profit_walkthrough(ctx):
     )
     less_row(
         "Sales Returns", r["sales_returns_amount"],
-        f"{r['sales_returns_liters']:,.2f} L returned, any refund method",
+        f"{format_number(r['sales_returns_liters'])} L returned, any refund method",
     )
     subtotal_row("Net Fuel Revenue", r["net_revenue"], "Gross revenue less sales returns")
     less_row("Cost of Fuel Sold", r["cogs"], "Net litres sold × weighted-average purchase cost")
@@ -5103,20 +5110,20 @@ def dashboard():
         # 5's drill-down table) - only the values that table actually
         # names get one; the rest render as plain text same as before.
         kpi_rail = [
-            {"label": "Cash in hand", "value": f"Rs {wc['cash']:,.2f}", "href": url_for("cash_account_detail")},
-            {"label": "Bank balance", "value": f"Rs {wc['bank']:,.2f}"},
+            {"label": "Cash in hand", "value": f"Rs {format_number(wc['cash'])}", "href": url_for("cash_account_detail")},
+            {"label": "Bank balance", "value": f"Rs {format_number(wc['bank'])}"},
             {
                 "label": "Receivables (all-time)",
-                "value": f"Rs {wc['receivables']:,.2f}",
+                "value": f"Rs {format_number(wc['receivables'])}",
                 "href": url_for("accounts"),
             },
-            {"label": "Payables (all-time)", "value": f"Rs {wc['payables']:,.2f}", "href": url_for("accounts")},
-            {"label": "Net working capital", "value": f"Rs {wc['net']:,.2f}", "href": url_for("accounts")},
-            {"label": "Stock value", "value": f"Rs {stock_value_total:,.2f}", "href": url_for("inventory")},
+            {"label": "Payables (all-time)", "value": f"Rs {format_number(wc['payables'])}", "href": url_for("accounts")},
+            {"label": "Net working capital", "value": f"Rs {format_number(wc['net'])}", "href": url_for("accounts")},
+            {"label": "Stock value", "value": f"Rs {format_number(stock_value_total)}", "href": url_for("inventory")},
             {
                 "label": "Fuel margin / litre",
                 "value": (
-                    f"Rs {margin['margin_per_liter']:.2f}" if margin["margin_per_liter"] is not None else "-"
+                    f"Rs {format_number(margin['margin_per_liter'])}" if margin["margin_per_liter"] is not None else "-"
                 ),
             },
             {
@@ -5125,7 +5132,7 @@ def dashboard():
             },
             {
                 "label": "Dip variance today",
-                "value": f"Rs {dip_variance['total_value']:,.2f}",
+                "value": f"Rs {format_number(dip_variance['total_value'])}",
                 "href": url_for("reports", date=selected_date.isoformat()),
             },
         ]
@@ -5784,8 +5791,8 @@ def account_entry_salary_edit(entry_id):
         flash("Deduction can't be more than the salary itself.", "error")
     elif deduction > outstanding_without_entry + 0.01:
         flash(
-            f"{entry.account.name} only owes Rs {max(outstanding_without_entry, 0):,.2f}, so you "
-            f"can't deduct Rs {deduction:,.2f}.",
+            f"{entry.account.name} only owes Rs {format_number(max(outstanding_without_entry, 0))}, so you "
+            f"can't deduct Rs {format_number(deduction)}.",
             "error",
         )
     elif method_error:
@@ -5881,31 +5888,31 @@ def _statement_event_details(e):
     for one event, reused so the export doesn't drift from the page."""
     obj = e["obj"]
     if e["kind"] == "credit":
-        bits = [f"{obj.liters:.2f} L {obj.fuel_type.name}"]
+        bits = [f"{format_number(obj.liters)} L {obj.fuel_type.name}"]
         if obj.vehicle_number:
             bits.append(obj.vehicle_number)
         if obj.note:
             bits.append(obj.note)
         return " - ".join(bits)
     if e["kind"] == "purchase":
-        bits = [f"{obj.liters:.2f} L {obj.tank.label}"]
+        bits = [f"{format_number(obj.liters)} L {obj.tank.label}"]
         if obj.note:
             bits.append(obj.note)
         return " - ".join(bits)
     if e["kind"] == "sales_return":
-        bits = [f"{obj.liters:.2f} L {obj.fuel_type.name} returned to {obj.tank.label}"]
+        bits = [f"{format_number(obj.liters)} L {obj.fuel_type.name} returned to {obj.tank.label}"]
         if obj.note:
             bits.append(obj.note)
         return " - ".join(bits)
     if e["kind"] in ("product_sale", "product_purchase"):
-        bits = [f"{obj.quantity:.2f} {obj.product.unit} {obj.product.label}"]
+        bits = [f"{format_number(obj.quantity)} {obj.product.unit} {obj.product.label}"]
         if obj.note:
             bits.append(obj.note)
         return " - ".join(bits)
     if e["kind"] == "salary":
         text = obj.period_label or "Salary"
         if obj.deduction_amount:
-            text += f" - Rs {obj.deduction_amount:,.2f} deducted against advance"
+            text += f" - Rs {format_number(obj.deduction_amount)} deducted against advance"
         return text
     if e["kind"] == "other_income":
         # An Other Income row only ever reaches an account's statement when

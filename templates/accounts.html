@@ -48,15 +48,15 @@
         <td><span class="badge">{{ {"bank": "Bank Account", "cash": "Cash"}.get(r.kind) or r.obj.account_type|capitalize }}</span></td>
         <td>{{ r.obj.phone or "-" if r.kind == "account" else "-" }}</td>
         {% if r.kind == "bank" %}
-        <td>{{ "%.2f"|format(r.balance) }}</td>
+        <td>{{ (r.balance)|fmt }}</td>
         <td>-</td>
         <td><a href="{{ url_for('bank_account_detail', bank_account_id=r.obj.id) }}">View history</a></td>
         {% elif r.kind == "cash" %}
-        <td>{{ "%.2f"|format(r.balance) }}</td>
+        <td>{{ (r.balance)|fmt }}</td>
         <td>-</td>
         <td><a href="{{ url_for('cash_account_detail') }}">View history</a></td>
         {% else %}
-        <td>{{ "%.2f"|format(r.balance) }} <span class="hint-sm">{{ "owed to you" if r.balance > 0 else ("you owe" if r.balance < 0 else "") }}</span></td>
+        <td>{{ (r.balance)|fmt }} <span class="hint-sm">{{ "owed to you" if r.balance > 0 else ("you owe" if r.balance < 0 else "") }}</span></td>
         <td>
           {% if r.aging and r.aging.oldest_days is not none %}
             <span class="badge {{ 'badge-low' if r.aging.oldest_days > 60 else '' }}">{{ r.aging.oldest_days }} days</span>
@@ -83,23 +83,23 @@
   <div class="stat-row">
     <div class="stat-card">
       <div class="label">0-30 days</div>
-      <div class="value">Rs {{ "%.2f"|format(aging_totals["0-30"]) }}</div>
+      <div class="value">Rs {{ (aging_totals["0-30"])|fmt }}</div>
     </div>
     <div class="stat-card">
       <div class="label">31-60 days</div>
-      <div class="value">Rs {{ "%.2f"|format(aging_totals["31-60"]) }}</div>
+      <div class="value">Rs {{ (aging_totals["31-60"])|fmt }}</div>
     </div>
     <div class="stat-card {{ 'accent-red' if aging_totals['61-90'] else '' }}">
       <div class="label">61-90 days</div>
-      <div class="value">Rs {{ "%.2f"|format(aging_totals["61-90"]) }}</div>
+      <div class="value">Rs {{ (aging_totals["61-90"])|fmt }}</div>
     </div>
     <div class="stat-card {{ 'accent-red' if aging_totals['90+'] else '' }}">
       <div class="label">Over 90 days</div>
-      <div class="value">Rs {{ "%.2f"|format(aging_totals["90+"]) }}</div>
+      <div class="value">Rs {{ (aging_totals["90+"])|fmt }}</div>
     </div>
     <div class="stat-card accent-brand">
       <div class="label">Total Owed To You</div>
-      <div class="value">Rs {{ "%.2f"|format(aging_total) }}</div>
+      <div class="value">Rs {{ (aging_total)|fmt }}</div>
     </div>
   </div>
 </div>
@@ -119,7 +119,7 @@
         <td>{{ e.category }}</td>
         <td>{{ e.description or "-" }}</td>
         <td>{{ "Via " + e.bank_account.name if e.method == "bank" else "Cash" }}</td>
-        <td>{{ "%.2f"|format(e.amount) }}</td>
+        <td>{{ (e.amount)|fmt }}</td>
         <td>{{ e.user.label if e.user else "-" }}</td>
         <td><a href="#" class="edit-toggle">Edit</a></td>
       </tr>

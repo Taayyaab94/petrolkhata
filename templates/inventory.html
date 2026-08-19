@@ -30,12 +30,12 @@
 <div class="stat-row">
   <div class="stat-card accent-brand">
     <div class="label">Total Litres</div>
-    <div class="value">{{ "%.2f"|format(total_liters) }} L</div>
+    <div class="value">{{ (total_liters)|fmt }} L</div>
     <div class="sub">across {{ tank_rows|length }} tank(s)</div>
   </div>
   <div class="stat-card accent-brand">
     <div class="label">Total Stock Value</div>
-    <div class="value">Rs {{ "%.2f"|format(total_stock_value) }}</div>
+    <div class="value">Rs {{ (total_stock_value)|fmt }}</div>
     <div class="sub">at weighted average cost</div>
   </div>
   <div class="stat-card {{ 'accent-red' if low_count > 0 else '' }}">
@@ -45,7 +45,7 @@
   </div>
   <div class="stat-card {{ 'accent-red' if variance_total < 0 else ('accent-green' if variance_total > 0 else '') }}">
     <div class="label">Open Variance</div>
-    <div class="value">{{ "%.2f"|format(variance_total) }} L</div>
+    <div class="value">{{ (variance_total)|fmt }} L</div>
     <div class="sub">book vs. last dip, across dipped tanks</div>
   </div>
 </div>
@@ -67,13 +67,13 @@
       <div class="tank-cylinder-body">
         {{ cylinder(row.fill_pct, bar_class) }}
         <div class="tank-cylinder-figures">
-          <div class="sub">{% if row.fill_pct is not none %}{{ "%.1f"|format(row.fill_pct) }}%{% else %}-{% endif %} &middot; {{ "%.2f"|format(row.stock) }} / {{ "%.2f"|format(row.capacity) }} L</div>
-          <div class="sub">Book {{ "%.2f"|format(row.stock) }} L
-            {%- if vrow.has_dip %} &middot; Actual {{ "%.2f"|format(vrow.actual_stock) }} L
-              <span class="{{ 'variance-neg' if vrow.variance_liters < 0 else ('variance-pos' if vrow.variance_liters > 0 else '') }}">({{ "+" if vrow.variance_liters > 0 }}{{ "%.2f"|format(vrow.variance_liters) }} L)</span>
+          <div class="sub">{% if row.fill_pct is not none %}{{ "%.1f"|format(row.fill_pct) }}%{% else %}-{% endif %} &middot; {{ (row.stock)|fmt }} / {{ (row.capacity)|fmt }} L</div>
+          <div class="sub">Book {{ (row.stock)|fmt }} L
+            {%- if vrow.has_dip %} &middot; Actual {{ (vrow.actual_stock)|fmt }} L
+              <span class="{{ 'variance-neg' if vrow.variance_liters < 0 else ('variance-pos' if vrow.variance_liters > 0 else '') }}">({{ "+" if vrow.variance_liters > 0 }}{{ (vrow.variance_liters)|fmt }} L)</span>
             {%- else %} &middot; <span class="hint-sm">no dip recorded</span>{% endif %}</div>
           <div class="sub">{% if row.days_of_stock is not none %}{{ "%.1f"|format(row.days_of_stock) }} days of cover{% else %}no recent sales rate{% endif %}</div>
-          <div class="sub">Rs {{ "%.2f"|format(row.value) }} value</div>
+          <div class="sub">Rs {{ (row.value)|fmt }} value</div>
         </div>
       </div>
     </div>
@@ -91,12 +91,12 @@
       <tr class="{{ 'row-low' if row.has_dip and row.variance_liters < 0 else '' }}">
         <td>{{ row.tank.label }}</td>
         <td>{{ row.tank.fuel_type.name }}</td>
-        <td>{{ "%.2f"|format(row.book_stock) }}</td>
+        <td>{{ (row.book_stock)|fmt }}</td>
         {% if row.has_dip %}
-        <td>{{ "%.2f"|format(row.actual_stock) }}</td>
+        <td>{{ (row.actual_stock)|fmt }}</td>
         <td>{{ row.dip_date.strftime('%d %b %Y') }}{% if row.dip_age_days > 0 %} <span class="hint-sm">({{ row.dip_age_days }}d ago)</span>{% endif %}</td>
-        <td>{{ "%.2f"|format(row.variance_liters) }}</td>
-        <td>{{ "%.2f"|format(row.variance_value) }}</td>
+        <td>{{ (row.variance_liters)|fmt }}</td>
+        <td>{{ (row.variance_value)|fmt }}</td>
         <td>{% if row.variance_liters < 0 %}<span class="badge badge-low">SHORT</span>{% elif row.variance_liters > 0 %}<span class="badge badge-warn">OVER</span>{% else %}<span class="badge badge-ok">MATCH</span>{% endif %}</td>
         {% else %}
         <td class="hint-sm" colspan="4">No dip recorded</td>
@@ -144,9 +144,9 @@
     {% for f in fuel_summary %}
     <div class="stat-card">
       <div class="label">{{ f.fuel_type.name }}</div>
-      <div class="value">{{ "%.2f"|format(f.closing) }} L</div>
-      <div class="sub">Opening {{ "%.2f"|format(f.opening) }} L</div>
-      <div class="sub">+ {{ "%.2f"|format(f.received) }} received &middot; &minus; {{ "%.2f"|format(f.sold) }} sold</div>
+      <div class="value">{{ (f.closing)|fmt }} L</div>
+      <div class="sub">Opening {{ (f.opening)|fmt }} L</div>
+      <div class="sub">+ {{ (f.received)|fmt }} received &middot; &minus; {{ (f.sold)|fmt }} sold</div>
     </div>
     {% endfor %}
   </div>
@@ -158,8 +158,8 @@
       {% for day in movement_days %}
       <tr>
         <td>{{ day.date.strftime('%d %b %Y') }}</td>
-        <td>{{ "%.2f"|format(day.total_received) }}</td>
-        <td>{{ "%.2f"|format(day.total_sold) }}</td>
+        <td>{{ (day.total_received)|fmt }}</td>
+        <td>{{ (day.total_sold)|fmt }}</td>
       </tr>
       {% else %}
       <tr><td colspan="3">No movement in this range.</td></tr>
@@ -168,8 +168,8 @@
     <tfoot>
       <tr>
         <td>Total</td>
-        <td>{{ "%.2f"|format(movement_days|sum(attribute='total_received')) }}</td>
-        <td>{{ "%.2f"|format(movement_days|sum(attribute='total_sold')) }}</td>
+        <td>{{ (movement_days|sum(attribute='total_received'))|fmt }}</td>
+        <td>{{ (movement_days|sum(attribute='total_sold'))|fmt }}</td>
       </tr>
     </tfoot>
   </table>
@@ -184,10 +184,10 @@
     <tbody>
       {% for row in product_rows %}
       <tr class="{{ 'row-low' if row.is_low else '' }}">
-        <td>{{ row.product.label }}<div class="hint-sm">Opening {{ "%.2f"|format(row.opening) }} &middot; Received {{ "%.2f"|format(row.received) }} &middot; Sold {{ "%.2f"|format(row.sold) }}</div></td>
+        <td>{{ row.product.label }}<div class="hint-sm">Opening {{ (row.opening)|fmt }} &middot; Received {{ (row.received)|fmt }} &middot; Sold {{ (row.sold)|fmt }}</div></td>
         <td>{{ row.product.category|capitalize }}</td>
         <td>{{ row.product.unit }}</td>
-        <td>{{ "%.2f"|format(row.on_hand) }}</td>
+        <td>{{ (row.on_hand)|fmt }}</td>
         <td>{% if row.is_low %}<span class="badge badge-low">LOW STOCK</span>{% else %}<span class="badge badge-ok">OK</span>{% endif %}</td>
       </tr>
       {% else %}
@@ -230,8 +230,8 @@
       <tr>
         <td>{{ p.entry_date.strftime("%Y-%m-%d") }}</td>
         <td>{{ p.tank.label }}</td>
-        <td>{{ "%.2f"|format(p.liters) }}</td>
-        <td>{{ "%.2f"|format(p.cost) if p.cost is not none else "-" }}</td>
+        <td>{{ (p.liters)|fmt }}</td>
+        <td>{{ (p.cost)|fmt if p.cost is not none else "-" }}</td>
         <td>{{ p.payment_type }}</td>
         <td>{{ p.account.name if p.account else "-" }}</td>
         <td>{{ p.user.username }}</td>
@@ -253,7 +253,7 @@
       {% for s in suppliers %}
       <tr class="{{ 'row-low' if s.balance < 0 else '' }}">
         <td><a href="{{ url_for('account_detail', account_id=s.id) }}">{{ s.name }}</a></td>
-        <td>{{ "%.2f"|format(-s.balance if s.balance < 0 else 0) }}</td>
+        <td>{{ (-s.balance if s.balance < 0 else 0)|fmt }}</td>
       </tr>
       {% else %}
       <tr><td colspan="2">No suppliers yet - add one from the Ledger's "Fuel Purchase" or "Payment to Supplier" section.</td></tr>

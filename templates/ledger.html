@@ -38,7 +38,7 @@
   {% for f in fuels_without_price %}{{ f.name }}{% if not loop.last %} and {% endif %}{% endfor %}
   on or before {{ selected_date.strftime("%d %B %Y") }}.</strong>
   Anything entered for this date will fall back to today's rate
-  ({% for f in fuels_without_price %}{{ f.name }} Rs {{ "%.2f"|format(fuel_prices_by_id.get(f.id) or 0) }}{% if not loop.last %}, {% endif %}{% endfor %}),
+  ({% for f in fuels_without_price %}{{ f.name }} Rs {{ (fuel_prices_by_id.get(f.id) or 0)|fmt }}{% if not loop.last %}, {% endif %}{% endfor %}),
   which is almost certainly wrong for an older date. Set the correct price for this date first
   {%- if current_user.is_owner %} using the Fuel Price panel further down this page{% else %} - ask the owner to set it{% endif %},
   because every entry stores its own price at the moment you save it: correcting the price afterwards will <em>not</em> repair entries already made.
@@ -48,30 +48,30 @@
 <div class="ledger-summary">
   <div class="stat-card accent-brand">
     <div class="label">Total Sales</div>
-    <div class="value">Rs {{ "%.2f"|format(breakdown.total) }}</div>
+    <div class="value">Rs {{ (breakdown.total)|fmt }}</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Credit Sales</div>
-    <div class="value">Rs {{ "%.2f"|format(breakdown.credit) }}</div>
+    <div class="value">Rs {{ (breakdown.credit)|fmt }}</div>
   </div>
   <div class="stat-card">
     <div class="label">Bank Sales</div>
-    <div class="value">Rs {{ "%.2f"|format(breakdown.bank) }}</div>
+    <div class="value">Rs {{ (breakdown.bank)|fmt }}</div>
   </div>
   <div class="stat-card accent-green">
     <div class="label">Cash Sales</div>
-    <div class="value">Rs {{ "%.2f"|format(breakdown.cash) }}</div>
+    <div class="value">Rs {{ (breakdown.cash)|fmt }}</div>
     <div class="sub">Total - credit - bank</div>
   </div>
   {% if summary %}
   <div class="stat-card accent-green">
     <div class="label">Debit (Cash In)</div>
-    <div class="value">Rs {{ "%.2f"|format(summary.debit_total) }}</div>
+    <div class="value">Rs {{ (summary.debit_total)|fmt }}</div>
     <div class="sub">Sales + receipts - credit given</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Credit (Cash Out)</div>
-    <div class="value">Rs {{ "%.2f"|format(summary.credit_total) }}</div>
+    <div class="value">Rs {{ (summary.credit_total)|fmt }}</div>
     <div class="sub">Expenses + cash purchases + supplier payments</div>
   </div>
   {% endif %}
@@ -82,7 +82,7 @@
   {% for name, d in fuel_sales.items() %}
   <div class="stat-card">
     <div class="label">{{ name }} Sold</div>
-    <div class="value">{{ "%.2f"|format(d.liters) }} L</div>
+    <div class="value">{{ (d.liters)|fmt }} L</div>
   </div>
   {% endfor %}
 </div>
@@ -92,13 +92,13 @@
 <div class="ledger-summary">
   <div class="stat-card accent-green">
     <div class="label">Cash in Hand</div>
-    <div class="value">Rs {{ "%.2f"|format(cash_balance) }}</div>
+    <div class="value">Rs {{ (cash_balance)|fmt }}</div>
     <div class="sub">As of {{ selected_date.strftime("%d %b %Y") }}</div>
   </div>
   {% for b in bank_accounts %}
   <div class="stat-card">
     <div class="label">{{ b.name }}</div>
-    <div class="value">Rs {{ "%.2f"|format(bank_balances_by_id[b.id]) }}</div>
+    <div class="value">Rs {{ (bank_balances_by_id[b.id])|fmt }}</div>
   </div>
   {% endfor %}
 </div>
@@ -115,7 +115,7 @@
       {% for f in fuel_types %}
       <tr>
         <td>{{ f.name }}</td>
-        <td>{{ "%.2f"|format(fuel_prices_by_id.get(f.id)) }}</td>
+        <td>{{ (fuel_prices_by_id.get(f.id))|fmt }}</td>
         <td>
           <form method="post" action="{{ url_for('ledger_fuel_price') }}" class="inline-edit-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -197,10 +197,10 @@
                    data-gross="{{ row.existing_gross if row.existing_gross is not none else '' }}">
                 <div>
                   <div class="nz-label">D{{ row.dispenser.number }} &middot; Nozzle {{ row.nozzle.nozzle_number }}</div>
-                  <div class="nz-fuel">{{ row.nozzle.tank.label }} &middot; Rs {{ "%.2f"|format(row.price) }}/L{% if selected_date != today %} (as of {{ selected_date.strftime("%d %b") }}){% endif %}</div>
+                  <div class="nz-fuel">{{ row.nozzle.tank.label }} &middot; Rs {{ (row.price)|fmt }}/L{% if selected_date != today %} (as of {{ selected_date.strftime("%d %b") }}){% endif %}</div>
                 </div>
                 {% if row.previous_is_auto %}
-                <div class="nz-last">Previous<strong>{{ "%.2f"|format(row.previous_reading) }}</strong></div>
+                <div class="nz-last">Previous<strong>{{ (row.previous_reading)|fmt }}</strong></div>
                 {% else %}
                 <label class="nz-previous-manual">Previous
                   <input type="number" step="0.01" min="0" name="previous_{{ row.nozzle.id }}" class="nz-previous-input"
@@ -226,7 +226,7 @@
             <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
             <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
             <input type="hidden" name="fuel_type_id" value="{{ group.fuel_type.id }}">
-            <p class="hint-sm">Rs {{ "%.2f"|format(fuel_prices_by_id.get(group.fuel_type.id)) }}/L{% if selected_date != today %} (as of {{ selected_date.strftime("%d %b") }}){% endif %}</p>
+            <p class="hint-sm">Rs {{ (fuel_prices_by_id.get(group.fuel_type.id))|fmt }}/L{% if selected_date != today %} (as of {{ selected_date.strftime("%d %b") }}){% endif %}</p>
             <div class="fuel-group-body" data-price="{{ fuel_prices_by_id.get(group.fuel_type.id) }}">
               {% if group.combined %}
               <div class="form-grid">
@@ -279,7 +279,7 @@
             <select name="fuel_type_id" id="return_fuel_type" required>
               <option value="">Select...</option>
               {% for f in fuel_types %}
-              <option value="{{ f.id }}" data-price="{{ fuel_prices_by_id.get(f.id) }}">{{ f.name }} (Rs {{ "%.2f"|format(fuel_prices_by_id.get(f.id)) }}/L)</option>
+              <option value="{{ f.id }}" data-price="{{ fuel_prices_by_id.get(f.id) }}">{{ f.name }} (Rs {{ (fuel_prices_by_id.get(f.id))|fmt }}/L)</option>
               {% endfor %}
             </select>
           </label>
@@ -608,7 +608,7 @@
             <select name="fuel_type_id" id="credit_fuel_type" required>
               <option value="">Select...</option>
               {% for f in fuel_types %}
-              <option value="{{ f.id }}" data-price="{{ fuel_prices_by_id.get(f.id) }}">{{ f.name }} (Rs {{ "%.2f"|format(fuel_prices_by_id.get(f.id)) }}/L)</option>
+              <option value="{{ f.id }}" data-price="{{ fuel_prices_by_id.get(f.id) }}">{{ f.name }} (Rs {{ (fuel_prices_by_id.get(f.id))|fmt }}/L)</option>
               {% endfor %}
             </select>
           </label>
@@ -1063,18 +1063,18 @@
       {% for row in handover_rows %}
       <tr class="{{ 'row-low' if row.variance is not none and row.variance < -0.01 else '' }}">
         <td>{{ row.shift.name }}</td>
-        <td>{{ "%.2f"|format(row.sales_total) }}</td>
-        <td>{{ "%.2f"|format(row.credit_total) }}</td>
-        <td>{{ "%.2f"|format(row.bank_total) }}</td>
-        <td><strong>{{ "%.2f"|format(row.expected) }}</strong></td>
-        <td>{{ "%.2f"|format(row.declared) if row.declared is not none else "-" }}</td>
+        <td>{{ (row.sales_total)|fmt }}</td>
+        <td>{{ (row.credit_total)|fmt }}</td>
+        <td>{{ (row.bank_total)|fmt }}</td>
+        <td><strong>{{ (row.expected)|fmt }}</strong></td>
+        <td>{{ (row.declared)|fmt if row.declared is not none else "-" }}</td>
         <td>
           {% if row.variance is none %}
             <span class="badge">Not reconciled</span>
           {% elif row.variance < -0.01 %}
-            <span class="badge badge-low">Short {{ "%.2f"|format(-row.variance) }}</span>
+            <span class="badge badge-low">Short {{ (-row.variance)|fmt }}</span>
           {% elif row.variance > 0.01 %}
-            <span class="badge">Over {{ "%.2f"|format(row.variance) }}</span>
+            <span class="badge">Over {{ (row.variance)|fmt }}</span>
           {% else %}
             <span class="badge badge-ok">Matches</span>
           {% endif %}
@@ -1110,7 +1110,7 @@
           <form method="post" action="{{ url_for('ledger_handover_write_off', handover_id=row.handover.id) }}" style="margin-top:10px;"
                 onsubmit="return confirm('Record the Rs {{ '%.2f'|format(-row.variance) }} shortfall as a cash expense? This reduces cash in hand so it matches what is physically there.');">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm btn-ghost">Write off Rs {{ "%.2f"|format(-row.variance) }} shortfall as expense</button>
+            <button type="submit" class="btn btn-sm btn-ghost">Write off Rs {{ (-row.variance)|fmt }} shortfall as expense</button>
           </form>
           {% endif %}
           {% if current_user.is_owner and row.handover %}
@@ -1145,7 +1145,7 @@
         <tr class="{{ 'row-low' if row.is_low else '' }}">
           <td>{{ row.tank.label }}</td>
           <td>{{ row.tank.fuel_type.name }}</td>
-          <td>{{ "%.2f"|format(row.book_stock) }}{% if row.is_low %} <span class="badge badge-low">LOW</span>{% endif %}</td>
+          <td>{{ (row.book_stock)|fmt }}{% if row.is_low %} <span class="badge badge-low">LOW</span>{% endif %}</td>
           <td>
             {% if row.has_chart %}
             <input type="number" step="0.1" min="0" id="dip_{{ row.tank.id }}" name="dipcm_{{ row.tank.id }}"
@@ -1162,7 +1162,7 @@
             <span class="hint-sm">L</span>
             {% endif %}
           </td>
-          <td><div class="calc-preview" id="dipcalc_{{ row.tank.id }}">{% if row.has_chart and row.existing_dip is not none %}= {{ "%.2f"|format(row.existing_dip) }} L{% else %}-{% endif %}</div></td>
+          <td><div class="calc-preview" id="dipcalc_{{ row.tank.id }}">{% if row.has_chart and row.existing_dip is not none %}= {{ (row.existing_dip)|fmt }} L{% else %}-{% endif %}</div></td>
           <td>
             <input type="number" step="0.1" min="0" name="water_{{ row.tank.id }}"
                    placeholder="0" value="{{ row.existing_water_cm if row.existing_water_cm is not none else '' }}">
@@ -1205,45 +1205,45 @@
     <div class="feed-item">
       <div class="feed-time">{{ e.sort.strftime("%H:%M") }}</div>
       {% if e.kind == "sale" %}
-      <div class="feed-desc"><strong>{{ e.obj.nozzle.label }} &middot; {{ e.obj.nozzle.tank.fuel_type.name }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L{% if e.obj.testing_liters %} &middot; {{ "%.2f"|format(e.obj.testing_liters) }} L testing{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.nozzle.label }} &middot; {{ e.obj.nozzle.tank.fuel_type.name }}</strong><span>{{ (e.obj.liters)|fmt }} L{% if e.obj.testing_liters %} &middot; {{ (e.obj.testing_liters)|fmt }} L testing{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-debit">Sale</span>
-      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.total_amount) }}</div>
+      <div class="feed-amount debit">+Rs {{ (e.obj.total_amount)|fmt }}</div>
       {% elif e.kind == "direct_sale" %}
-      <div class="feed-desc"><strong>{{ e.obj.tank.label }} &middot; Direct Sale</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.tank.label }} &middot; Direct Sale</strong><span>{{ (e.obj.liters)|fmt }} L &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-debit">Direct Sale</span>
-      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.total_amount) }}</div>
+      <div class="feed-amount debit">+Rs {{ (e.obj.total_amount)|fmt }}</div>
       {% elif e.kind == "sales_return" %}
-      <div class="feed-desc"><strong>{{ e.obj.fuel_type.name }} returned to {{ e.obj.tank.label }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else ("On " + e.obj.account.name + "'s account" if e.obj.method == "credit" and e.obj.account else "Cash") }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.fuel_type.name }} returned to {{ e.obj.tank.label }}</strong><span>{{ (e.obj.liters)|fmt }} L &middot; {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else ("On " + e.obj.account.name + "'s account" if e.obj.method == "credit" and e.obj.account else "Cash") }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Sales Return</span>
-      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      <div class="feed-amount credit">-Rs {{ (e.obj.amount)|fmt }}</div>
       {% elif e.kind == "receipt" %}
       <div class="feed-desc"><strong>Receipt from {{ e.obj.account.name }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-debit">Receipt</span>
-      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      <div class="feed-amount debit">+Rs {{ (e.obj.amount)|fmt }}</div>
       {% elif e.kind == "credit" %}
-      <div class="feed-desc"><strong>Credit to {{ e.obj.account.name }}</strong><span>{{ "%.2f"|format(e.obj.liters) }} L {{ e.obj.fuel_type.name }}{% if e.obj.vehicle_number %} &middot; {{ e.obj.vehicle_number }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>Credit to {{ e.obj.account.name }}</strong><span>{{ (e.obj.liters)|fmt }} L {{ e.obj.fuel_type.name }}{% if e.obj.vehicle_number %} &middot; {{ e.obj.vehicle_number }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Credit</span>
-      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      <div class="feed-amount credit">-Rs {{ (e.obj.amount)|fmt }}</div>
       {% elif e.kind == "expense" %}
       <div class="feed-desc"><strong>{{ e.obj.category }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.description %} &middot; {{ e.obj.description }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Expense</span>
-      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      <div class="feed-amount credit">-Rs {{ (e.obj.amount)|fmt }}</div>
       {% elif e.kind == "purchase" %}
-      <div class="feed-desc"><strong>{{ e.obj.tank.label }} delivery</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; {{ ("Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash") if e.obj.payment_type == "cash" else "On credit" }} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.tank.label }} delivery</strong><span>{{ (e.obj.liters)|fmt }} L &middot; {{ ("Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash") if e.obj.payment_type == "cash" else "On credit" }} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Purchase</span>
-      <div class="feed-amount credit">{% if e.obj.cost %}-Rs {{ "%.2f"|format(e.obj.cost) }}{% else %}-{% endif %}</div>
+      <div class="feed-amount credit">{% if e.obj.cost %}-Rs {{ (e.obj.cost)|fmt }}{% else %}-{% endif %}</div>
       {% elif e.kind == "supplier_payment" %}
       <div class="feed-desc"><strong>Payment to {{ e.obj.account.name }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Supplier Payment</span>
-      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      <div class="feed-amount credit">-Rs {{ (e.obj.amount)|fmt }}</div>
       {% elif e.kind == "bank_sale" %}
       <div class="feed-desc"><strong>Bank sale &middot; {{ e.obj.bank_account.name }}</strong><span>{{ e.obj.note or "" }} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-debit">Bank Sale</span>
-      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      <div class="feed-amount debit">+Rs {{ (e.obj.amount)|fmt }}</div>
       {% elif e.kind == "cash_deposit" %}
       <div class="feed-desc"><strong>Cash deposit &middot; {{ e.obj.bank_account.name }}</strong><span>{{ e.obj.note or "" }} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Cash Deposit</span>
-      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      <div class="feed-amount credit">-Rs {{ (e.obj.amount)|fmt }}</div>
       {% elif e.kind == "employee_loan" %}
       {% if e.obj.kind == "drawing" %}
       <div class="feed-desc"><strong>Drawing by {{ e.obj.account.name }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
@@ -1252,35 +1252,35 @@
       <div class="feed-desc"><strong>Loan to {{ e.obj.account.name }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Employee Loan</span>
       {% endif %}
-      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      <div class="feed-amount credit">-Rs {{ (e.obj.amount)|fmt }}</div>
       {% elif e.kind == "dip" %}
-      <div class="feed-desc"><strong>{{ e.obj.tank.label }} dip</strong><span>{% if e.obj.dip_cm is not none %}{{ "%.1f"|format(e.obj.dip_cm) }} cm = {% endif %}{{ "%.2f"|format(e.obj.dip_liters) }} L{% if e.obj.water_cm %} &middot; Water {{ "%.1f"|format(e.obj.water_cm) }} cm{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.tank.label }} dip</strong><span>{% if e.obj.dip_cm is not none %}{{ "%.1f"|format(e.obj.dip_cm) }} cm = {% endif %}{{ (e.obj.dip_liters)|fmt }} L{% if e.obj.water_cm %} &middot; Water {{ "%.1f"|format(e.obj.water_cm) }} cm{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-neutral">Dip</span>{% if e.obj.water_cm %} <span class="badge badge-low">Water</span>{% endif %}
-      <div class="feed-amount neutral">{{ "+" if e.variance >= 0 }}{{ "%.2f"|format(e.variance) }} L</div>
+      <div class="feed-amount neutral">{{ "+" if e.variance >= 0 }}{{ (e.variance)|fmt }} L</div>
       {% elif e.kind == "handover" %}
-      <div class="feed-desc"><strong>{{ e.obj.shift.name }} cash handover</strong><span>Counted Rs {{ "%.2f"|format(e.obj.declared_amount) }}{% if e.obj.attendant %} &middot; {{ e.obj.attendant.name }}{% endif %}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.shift.name }} cash handover</strong><span>Counted Rs {{ (e.obj.declared_amount)|fmt }}{% if e.obj.attendant %} &middot; {{ e.obj.attendant.name }}{% endif %}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-neutral">Handover</span>
-      <div class="feed-amount neutral">{{ "+" if e.variance >= 0 }}Rs {{ "%.2f"|format(e.variance) }}</div>
+      <div class="feed-amount neutral">{{ "+" if e.variance >= 0 }}Rs {{ (e.variance)|fmt }}</div>
       {% elif e.kind == "salary" %}
-      <div class="feed-desc"><strong>Salary to {{ e.obj.account.name }}</strong><span>{% if e.obj.period_label %}{{ e.obj.period_label }} &middot; {% endif %}{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.deduction_amount %} &middot; Rs {{ "%.2f"|format(e.obj.deduction_amount) }} deducted{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>Salary to {{ e.obj.account.name }}</strong><span>{% if e.obj.period_label %}{{ e.obj.period_label }} &middot; {% endif %}{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.deduction_amount %} &middot; Rs {{ (e.obj.deduction_amount)|fmt }} deducted{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Salary</span>
-      <div class="feed-amount credit">-Rs {{ "%.2f"|format(e.obj.net_paid) }}</div>
+      <div class="feed-amount credit">-Rs {{ (e.obj.net_paid)|fmt }}</div>
       {% elif e.kind == "product_sale" %}
-      <div class="feed-desc"><strong>{{ e.obj.product.label }}</strong><span>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} &middot; {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else ("On " + e.obj.account.name + "'s account" if e.obj.method == "credit" and e.obj.account else "Cash") }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.product.label }}</strong><span>{{ (e.obj.quantity)|fmt }} {{ e.obj.product.unit }} &middot; {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else ("On " + e.obj.account.name + "'s account" if e.obj.method == "credit" and e.obj.account else "Cash") }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-debit">Non-Fuel Sale</span>
-      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      <div class="feed-amount debit">+Rs {{ (e.obj.amount)|fmt }}</div>
       {% elif e.kind == "other_income" %}
       <div class="feed-desc"><strong>{{ e.obj.description }}</strong><span>{{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else ("On " + e.obj.account.name + "'s account" if e.obj.method == "credit" and e.obj.account else "Cash") }} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-debit">Other Income</span>
-      <div class="feed-amount debit">+Rs {{ "%.2f"|format(e.obj.amount) }}</div>
+      <div class="feed-amount debit">+Rs {{ (e.obj.amount)|fmt }}</div>
       {% elif e.kind == "product_purchase" %}
-      <div class="feed-desc"><strong>{{ e.obj.product.label }}{{ " return/correction" if e.obj.quantity < 0 }}</strong><span>{{ "%.2f"|format(e.obj.quantity) }} {{ e.obj.product.unit }} &middot; {{ ("Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash") if e.obj.payment_type == "cash" else "On credit" }} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.product.label }}{{ " return/correction" if e.obj.quantity < 0 }}</strong><span>{{ (e.obj.quantity)|fmt }} {{ e.obj.product.unit }} &middot; {{ ("Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash") if e.obj.payment_type == "cash" else "On credit" }} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-credit">Product Purchase</span>
-      <div class="feed-amount {{ 'debit' if e.obj.total_cost < 0 else 'credit' }}">{{ "+" if e.obj.total_cost < 0 }}Rs {{ "%.2f"|format(e.obj.total_cost|abs) }}</div>
+      <div class="feed-amount {{ 'debit' if e.obj.total_cost < 0 else 'credit' }}">{{ "+" if e.obj.total_cost < 0 }}Rs {{ (e.obj.total_cost|abs)|fmt }}</div>
       {% elif e.kind == "nozzle_testing" %}
-      <div class="feed-desc"><strong>{{ e.obj.nozzle.label }} testing</strong><span>{{ "%.2f"|format(e.obj.liters) }} L &middot; drains back into {{ e.obj.nozzle.tank.label }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
+      <div class="feed-desc"><strong>{{ e.obj.nozzle.label }} testing</strong><span>{{ (e.obj.liters)|fmt }} L &middot; drains back into {{ e.obj.nozzle.tank.label }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %} &middot; {{ e.obj.user.username }}</span></div>
       <span class="feed-tag feed-tag-neutral">Testing</span>
-      <div class="feed-amount neutral">{{ "%.2f"|format(e.obj.liters) }} L</div>
+      <div class="feed-amount neutral">{{ (e.obj.liters)|fmt }} L</div>
       {% endif %}
       {% if current_user.is_owner %}
       <form method="post" action="{{ url_for('entry_delete', kind=delete_kind, entry_id=e.obj.id) }}"
@@ -1299,7 +1299,11 @@
 
 <script>
 function fmtMoney(v) {
-  return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // Same rule as formatting.py's format_number(): comma thousands
+  // separators, but no trailing .00 on a whole number.
+  var rounded = Math.round(v * 100) / 100;
+  var decimals = rounded === Math.trunc(rounded) ? 0 : 2;
+  return rounded.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
 // --- Nozzle reading live calculation ---

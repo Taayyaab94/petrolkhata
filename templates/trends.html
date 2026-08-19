@@ -21,45 +21,45 @@
 <div class="stat-row">
   <div class="stat-card accent-brand">
     <div class="label">Total Sales</div>
-    <div class="value">Rs {{ "%.2f"|format(totals.total_sales) }}</div>
+    <div class="value">Rs {{ (totals.total_sales)|fmt }}</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Credit Given</div>
-    <div class="value">Rs {{ "%.2f"|format(totals.total_credit_given) }}</div>
+    <div class="value">Rs {{ (totals.total_credit_given)|fmt }}</div>
   </div>
   <div class="stat-card accent-green">
     <div class="label">Receipts</div>
-    <div class="value">Rs {{ "%.2f"|format(totals.total_receipts) }}</div>
+    <div class="value">Rs {{ (totals.total_receipts)|fmt }}</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Expenses</div>
-    <div class="value">Rs {{ "%.2f"|format(totals.total_expenses) }}</div>
+    <div class="value">Rs {{ (totals.total_expenses)|fmt }}</div>
   </div>
   <div class="stat-card">
     <div class="label">Fuel Purchased</div>
-    <div class="value">{{ "%.2f"|format(totals.total_purchased_liters) }} L</div>
+    <div class="value">{{ (totals.total_purchased_liters)|fmt }} L</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Cost of Fuel Sold</div>
-    <div class="value">Rs {{ "%.2f"|format(totals.total_cogs) }}</div>
+    <div class="value">Rs {{ (totals.total_cogs)|fmt }}</div>
     <div class="sub">Net of sales returns</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Salaries</div>
-    <div class="value">Rs {{ "%.2f"|format(totals.total_salaries) }}</div>
+    <div class="value">Rs {{ (totals.total_salaries)|fmt }}</div>
   </div>
   <div class="stat-card accent-red">
     <div class="label">Sales Returns</div>
-    <div class="value">Rs {{ "%.2f"|format(totals.total_sales_returns) }}</div>
+    <div class="value">Rs {{ (totals.total_sales_returns)|fmt }}</div>
   </div>
   <div class="stat-card {{ 'accent-green' if totals.total_product_margin >= 0 else 'accent-red' }}">
     <div class="label">Product Margin</div>
-    <div class="value">Rs {{ "%.2f"|format(totals.total_product_margin) }}</div>
+    <div class="value">Rs {{ (totals.total_product_margin)|fmt }}</div>
     <div class="sub">Non-fuel dealer commission - exact, not weighted-average</div>
   </div>
   <div class="stat-card {{ 'accent-green' if totals.total_profit >= 0 else 'accent-red' }}">
     <div class="label">Profit</div>
-    <div class="value">Rs {{ "%.2f"|format(totals.total_profit) }}</div>
+    <div class="value">Rs {{ (totals.total_profit)|fmt }}</div>
   </div>
 </div>
 
@@ -83,7 +83,7 @@
     {% for name, liters in fuel_sold_totals.items() %}
     <div class="stat-card">
       <div class="label">{{ name }}</div>
-      <div class="value">{{ "%.2f"|format(liters) }} L</div>
+      <div class="value">{{ (liters)|fmt }} L</div>
     </div>
     {% endfor %}
   </div>
