@@ -67,11 +67,14 @@ from ledger_logic import (
     default_shift,
     dip_variance_for_date,
     first_negative_cash_date,
+    fuel_movement_for_range,
     fuel_rate_cards,
     fuel_sales_for_date,
     handover_rows_for_date,
     humanize_since,
+    inventory_insights,
     last_activity_at,
+    latest_dip_by_tank,
     latest_reset_for,
     liters_from_dip_cm,
     max_cash_available_on,
@@ -100,6 +103,7 @@ from ledger_logic import (
     stock_purchases_by_fuel_for_period,
     stock_series,
     sync_sale_testing,
+    tank_book_vs_actual,
     tank_stock_rows,
     weighted_avg_cost,
     weighted_avg_costs,
@@ -5165,19 +5169,58 @@ def dashboard():
 
 # ------------------------------------------------------------ inventory ---
 
+def _inventory_range(args):
+    """Parses the Inventory page's fuel-movement date-range controls:
+    range=7|14 (default 7), or a custom start/end pair which wins when
+    both are present (reversed dates are swapped, not rejected). Hard-
+    capped at 14 days - if the resolved span exceeds that, start is
+    pulled forward to end - 13 days and clamped=True comes back so the
+    template can show a notice. end never exceeds today.
+    fuel_movement_for_range() itself places no cap of its own; this is
+    the one place a user-controlled range enters the app, so the cap has
+    to live here."""
+    today = date.today()
+    raw_start = (args.get("start") or "").strip()
+    raw_end = (args.get("end") or "").strip()
+    clamped = False
+
+    if raw_start and raw_end:
+        start = parse_date_param(raw_start, fallback=today)
+        end = parse_date_param(raw_end, fallback=today)
+        if start > end:
+            start, end = end, start
+        preset = "custom"
+    else:
+        days = 14 if args.get("range") == "14" else 7
+        preset = str(days)
+        end = today
+        start = end - timedelta(days=days - 1)
+
+    if end > today:
+        end = today
+    if start > end:
+        start = end
+
+    if (end - start).days + 1 > 14:
+        start = end - timedelta(days=13)
+        clamped = True
+
+    return start, end, preset, clamped
+
+
 @app.route("/inventory")
 @login_required
 def inventory():
     today = date.today()
-    tanks = Tank.query.order_by(Tank.number).all()
-    tank_rows = []
-    by_fuel = {}
-    for t in tanks:
-        stock = book_stock(t, today)
-        tank_rows.append({"tank": t, "stock": stock, "is_low": stock <= t.low_stock_threshold})
-        agg = by_fuel.setdefault(t.fuel_type.name, {"stock": 0.0, "capacity": 0.0})
-        agg["stock"] += stock
-        agg["capacity"] += t.capacity_liters
+    costs = weighted_avg_costs(today)
+
+    tank_rows = tank_stock_rows(today, costs=costs)
+    variance_rows = tank_book_vs_actual(today, tank_rows, costs)
+
+    range_start, range_end, range_preset, range_clamped = _inventory_range(request.args)
+    movement = fuel_movement_for_range(range_start, range_end)
+    fuel_summary = movement["fuels"]
+    movement_days = movement["days"]
 
     dispensers = Dispenser.query.order_by(Dispenser.number).all()
     recent_purchases = (
@@ -5202,10 +5245,38 @@ def inventory():
     )
     product_rows = product_stock_summary(today, products=products)
 
+    insights = inventory_insights(today, tank_rows, variance_rows, product_rows)
+
+    # "As at" the newest ledger entry that could move stock - falls back
+    # to today on an empty pump (no purchases/sales recorded yet).
+    as_at_candidates = [
+        db.session.query(func.max(Sale.entry_date)).scalar(),
+        db.session.query(func.max(DirectSale.entry_date)).scalar(),
+        db.session.query(func.max(StockPurchase.entry_date)).scalar(),
+    ]
+    as_at_candidates = [d for d in as_at_candidates if d is not None]
+    as_at_date = max(as_at_candidates) if as_at_candidates else today
+
+    total_stock_value = round(sum(r["value"] for r in tank_rows), 2)
+    total_liters = round(sum(r["stock"] for r in tank_rows), 2)
+    fuel_types = FuelType.query.order_by(FuelType.name).all()
+
     return render_template(
         "inventory.html",
         tank_rows=tank_rows,
-        by_fuel=by_fuel,
+        variance_rows=variance_rows,
+        fuel_summary=fuel_summary,
+        movement_days=movement_days,
+        insights=insights,
+        range_start=range_start,
+        range_end=range_end,
+        range_preset=range_preset,
+        range_clamped=range_clamped,
+        as_at_date=as_at_date,
+        total_stock_value=total_stock_value,
+        total_liters=total_liters,
+        fuel_types=fuel_types,
+        today=today,
         dispensers=dispensers,
         recent_purchases=recent_purchases,
         suppliers=suppliers,

@@ -2906,6 +2906,316 @@ def dip_variance_for_date(entry_date, costs=None):
     }
 
 
+def latest_dip_by_tank(as_of_date):
+    """Most recent TankDip on or before as_of_date, one per tank -
+    {tank_id: TankDip}. Two queries total, not one per tank: a grouped
+    max(entry_date) per tank_id, then one IN fetch of candidate rows,
+    filtered in Python back down to exactly the (tank_id, its own max
+    date) pairs - a plain "entry_date IN (...)" fetch alone could pair a
+    tank with another tank's max date that happens to match, since dates
+    aren't unique across tanks."""
+    latest_dates = (
+        db.session.query(TankDip.tank_id, func.max(TankDip.entry_date))
+        .filter(TankDip.entry_date <= as_of_date)
+        .group_by(TankDip.tank_id)
+        .all()
+    )
+    if not latest_dates:
+        return {}
+    date_by_tank = dict(latest_dates)
+    candidates = (
+        TankDip.query.filter(
+            TankDip.tank_id.in_(date_by_tank.keys()),
+            TankDip.entry_date.in_(set(date_by_tank.values())),
+        ).all()
+    )
+    return {
+        dip.tank_id: dip
+        for dip in candidates
+        if dip.entry_date == date_by_tank.get(dip.tank_id)
+    }
+
+
+def tank_book_vs_actual(as_of_date, tank_rows, costs):
+    """Book stock vs. the most recent physical dip, one row per row of
+    tank_rows (tank_stock_rows()'s own output) - the Inventory page's
+    "Book vs Actual" table.
+
+    actual_stock is the dip AS MEASURED on dip_date - NOT re-projected
+    forward to as_of_date. If the last dip is a week old, this is last
+    week's physical reading, not an estimate of today's level; dip_age_days
+    is returned precisely so the template can caveat a stale dip instead
+    of presenting it as current.
+
+    Sign convention matches dip_variance_for_date() exactly: variance =
+    dip_liters - book_stock (negative = fuel physically missing).
+    variance_value is that same litre variance priced at costs (the
+    {fuel_type_id: weighted_avg_cost} dict callers resolve once via
+    weighted_avg_costs() and thread through here and to tank_stock_rows())
+    - reused rather than calling weighted_avg_cost() per tank in a loop."""
+    dips = latest_dip_by_tank(as_of_date)
+    rows = []
+    for row in tank_rows:
+        tank = row["tank"]
+        book = row["stock"]
+        dip = dips.get(tank.id)
+        if dip is None:
+            rows.append(
+                {
+                    "tank": tank,
+                    "book_stock": book,
+                    "actual_stock": None,
+                    "dip_date": None,
+                    "dip_age_days": None,
+                    "variance_liters": None,
+                    "variance_value": None,
+                    "variance_pct": None,
+                    "has_dip": False,
+                }
+            )
+            continue
+
+        variance_liters = round(dip.dip_liters - book, 2)
+        variance_value = round(variance_liters * costs.get(tank.fuel_type_id, 0.0), 2)
+        variance_pct = round(variance_liters / book * 100, 2) if book else None
+        rows.append(
+            {
+                "tank": tank,
+                "book_stock": book,
+                "actual_stock": dip.dip_liters,
+                "dip_date": dip.entry_date,
+                "dip_age_days": (as_of_date - dip.entry_date).days,
+                "variance_liters": variance_liters,
+                "variance_value": variance_value,
+                "variance_pct": variance_pct,
+                "has_dip": True,
+            }
+        )
+    return rows
+
+
+def fuel_movement_for_range(start_date, end_date):
+    """Day-by-day fuel movement across [start_date, end_date] inclusive,
+    grouped by fuel type - the Inventory page's "Fuel movement" block.
+
+    opening is the sum of book_stock(tank, start_date - 1 day) over every
+    tank of that fuel type (the level at the START of start_date).
+    closing = opening + received - sold, and equals the sum of
+    book_stock(tank, end_date) for that fuel's tanks (asserted in tests).
+
+    received/sold are each read with ONE grouped query over the whole
+    window, not a query per day or per tank - the same three-query
+    pattern tank_stock_rows() documents: StockPurchase grouped by
+    (entry_date, tank_id) for received; Sale (joined via Nozzle.tank_id),
+    DirectSale, and SalesReturn, each grouped the same way, for sold (a
+    SalesReturn re-enters the tank, so it nets OUT of "sold" exactly like
+    it nets into book_stock() - see that function's docstring).
+
+    days is a day-wise (not transaction-wise) breakdown: one row per
+    calendar date in the range, {date, per_fuel: {fuel_id: {received,
+    sold}}, total_received, total_sold}. The caller (app.py's
+    _inventory_range()) caps the window at 14 days; this function places
+    no cap of its own and stays correct - just bigger - for a longer
+    range."""
+    tanks = Tank.query.all()
+    fuel_types = FuelType.query.order_by(FuelType.name).all()
+    tanks_by_fuel = {}
+    for t in tanks:
+        tanks_by_fuel.setdefault(t.fuel_type_id, []).append(t)
+
+    opening_before = start_date - timedelta(days=1)
+
+    def _nest(rows):
+        nested = {}
+        for entry_date, tank_id, qty in rows:
+            nested.setdefault(entry_date, {})[tank_id] = qty or 0.0
+        return nested
+
+    purchased = _nest(
+        db.session.query(StockPurchase.entry_date, StockPurchase.tank_id, func.sum(StockPurchase.liters))
+        .filter(StockPurchase.entry_date >= start_date, StockPurchase.entry_date <= end_date)
+        .group_by(StockPurchase.entry_date, StockPurchase.tank_id)
+        .all()
+    )
+    sold_metered = _nest(
+        db.session.query(Sale.entry_date, Nozzle.tank_id, func.sum(Sale.liters))
+        .select_from(Sale)
+        .join(Nozzle, Sale.nozzle_id == Nozzle.id)
+        .filter(Sale.entry_date >= start_date, Sale.entry_date <= end_date)
+        .group_by(Sale.entry_date, Nozzle.tank_id)
+        .all()
+    )
+    sold_direct = _nest(
+        db.session.query(DirectSale.entry_date, DirectSale.tank_id, func.sum(DirectSale.liters))
+        .filter(DirectSale.entry_date >= start_date, DirectSale.entry_date <= end_date)
+        .group_by(DirectSale.entry_date, DirectSale.tank_id)
+        .all()
+    )
+    returned = _nest(
+        db.session.query(SalesReturn.entry_date, SalesReturn.tank_id, func.sum(SalesReturn.liters))
+        .filter(SalesReturn.entry_date >= start_date, SalesReturn.entry_date <= end_date)
+        .group_by(SalesReturn.entry_date, SalesReturn.tank_id)
+        .all()
+    )
+
+    n_days = (end_date - start_date).days + 1
+    all_dates = [start_date + timedelta(days=i) for i in range(n_days)]
+
+    days = []
+    for d in all_dates:
+        per_fuel = {}
+        total_received = 0.0
+        total_sold = 0.0
+        for ft in fuel_types:
+            received = 0.0
+            sold = 0.0
+            for t in tanks_by_fuel.get(ft.id, []):
+                received += purchased.get(d, {}).get(t.id, 0.0)
+                sold += (
+                    sold_metered.get(d, {}).get(t.id, 0.0)
+                    + sold_direct.get(d, {}).get(t.id, 0.0)
+                    - returned.get(d, {}).get(t.id, 0.0)
+                )
+            received = round(received, 2)
+            sold = round(sold, 2)
+            per_fuel[ft.id] = {"received": received, "sold": sold}
+            total_received += received
+            total_sold += sold
+        days.append(
+            {
+                "date": d,
+                "per_fuel": per_fuel,
+                "total_received": round(total_received, 2),
+                "total_sold": round(total_sold, 2),
+            }
+        )
+
+    fuels = []
+    for ft in fuel_types:
+        ft_tanks = tanks_by_fuel.get(ft.id, [])
+        if not ft_tanks:
+            continue
+        opening = round(sum(book_stock(t, opening_before) for t in ft_tanks), 2)
+        received = round(sum(day["per_fuel"][ft.id]["received"] for day in days), 2)
+        sold = round(sum(day["per_fuel"][ft.id]["sold"] for day in days), 2)
+        closing = round(opening + received - sold, 2)
+        fuels.append(
+            {
+                "fuel_type": ft,
+                "opening": opening,
+                "received": received,
+                "sold": sold,
+                "closing": closing,
+            }
+        )
+
+    return {"fuels": fuels, "days": days}
+
+
+def inventory_insights(as_of_date, tank_rows, variance_rows, product_rows):
+    """Inventory page's "Needs attention" list, in the same {severity,
+    title, detail, url} shape attention_items() (app.py) produces for the
+    Dashboard, so the same .attention-list markup renders both (severity
+    here is "high"|"medium" rather than the Dashboard's three-level
+    critical/warning/info - the Inventory page's own template maps that
+    down to the same badge classes).
+
+    Every rule reads rows the route already built for the page's own
+    tables - tank_rows from tank_stock_rows(), variance_rows from
+    tank_book_vs_actual(), product_rows from product_stock_summary() - no
+    new query runs here. Capped at ~8 items, high severity first (a
+    stable sort, so same-severity rules keep the order they were appended
+    in below)."""
+    items = []
+
+    for row in tank_rows:
+        if row["is_low"]:
+            items.append(
+                {
+                    "severity": "high",
+                    "title": f"{row['tank'].label}: low stock",
+                    "detail": f"{row['stock']:.2f} L is at or below the {row['tank'].low_stock_threshold:.2f} L threshold.",
+                    "url": None,
+                }
+            )
+        elif row["days_of_stock"] is not None and row["days_of_stock"] <= LOW_DAYS_OF_STOCK:
+            items.append(
+                {
+                    "severity": "high",
+                    "title": f"{row['tank'].label}: fast depletion",
+                    "detail": f"Projected to run out in {row['days_of_stock']:.1f} days at the current sales rate.",
+                    "url": None,
+                }
+            )
+
+    for row in variance_rows:
+        if not row["has_dip"]:
+            continue
+        over_liters = abs(row["variance_liters"]) >= DIP_VARIANCE_MIN_LITERS
+        over_pct = row["variance_pct"] is not None and abs(row["variance_pct"]) >= 1.0
+        if over_liters or over_pct:
+            items.append(
+                {
+                    "severity": "high" if (over_liters and over_pct) else "medium",
+                    "title": f"{row['tank'].label}: book vs actual variance",
+                    "detail": (
+                        f"Dip on {row['dip_date'].strftime('%d %b %Y')} shows "
+                        f"{row['variance_liters']:.2f} L variance (Rs {row['variance_value']:.2f})."
+                    ),
+                    "url": None,
+                }
+            )
+
+    for row in variance_rows:
+        if not row["has_dip"]:
+            items.append(
+                {
+                    "severity": "medium",
+                    "title": f"{row['tank'].label}: no dip recorded",
+                    "detail": "No physical dip has ever been recorded for this tank.",
+                    "url": None,
+                }
+            )
+        elif row["dip_age_days"] is not None and row["dip_age_days"] > 7:
+            items.append(
+                {
+                    "severity": "medium",
+                    "title": f"{row['tank'].label}: dip is stale",
+                    "detail": f"Last dip is {row['dip_age_days']} days old ({row['dip_date'].strftime('%d %b %Y')}).",
+                    "url": None,
+                }
+            )
+
+    for row in tank_rows:
+        if row["negative"] or row["over_capacity"]:
+            what = "negative stock" if row["negative"] else "stock above capacity"
+            items.append(
+                {
+                    "severity": "high",
+                    "title": f"{row['tank'].label}: {what}",
+                    "detail": (
+                        f"Book stock is {row['stock']:.2f} L against a {row['capacity']:.2f} L "
+                        "capacity - a data-entry error, not a real reading."
+                    ),
+                    "url": None,
+                }
+            )
+
+    for row in product_rows:
+        if row["is_low"]:
+            items.append(
+                {
+                    "severity": "medium",
+                    "title": f"{row['product'].label}: low stock",
+                    "detail": f"{row['on_hand']:.2f} {row['product'].unit} on hand, at or below the {row['product'].low_stock_threshold:.2f} threshold.",
+                    "url": None,
+                }
+            )
+
+    items.sort(key=lambda it: 0 if it["severity"] == "high" else 1)
+    return items[:8]
+
+
 def account_positions(as_of_date, include_aging=True):
     """Every account with its balance (and optionally its aging buckets),
     resolved in ONE pass with relationships eagerly loaded.

@@ -1848,3 +1848,29 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
   .profit-steps, .profit-step, .tank-card, .acct-details { break-inside: avoid; }
   details > summary { list-style: none; }
 }
+
+/* ---------- inventory: tank cylinders & fuel movement range ---------- */
+
+.tank-cylinder-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s4);
+  background: var(--surface);
+  min-width: 0;
+}
+
+.tank-cylinder-body { display: flex; gap: 14px; align-items: center; margin-top: var(--s2); }
+
+.tank-cylinder { width: 60px; flex-shrink: 0; }
+.tank-cylinder.pos { color: var(--pos); }
+.tank-cylinder.warn { color: var(--warn); }
+.tank-cylinder.neg { color: var(--neg); }
+
+.tank-cylinder-figures { min-width: 0; }
+
+.variance-pos { color: var(--pos); }
+.variance-neg { color: var(--neg); }
+
+.range-toggle { display: flex; gap: 8px; }
+
+.product-compact .table td { padding: 6px 8px; }
