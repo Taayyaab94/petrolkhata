@@ -44,7 +44,7 @@
     <tbody>
       {% for r in rows %}
       <tr class="{{ 'row-low' if r.balance != 0 else '' }}">
-        <td>{{ r.name }}</td>
+        <td>{{ r.name }}{% if r.is_group %} <span class="badge">{{ r.child_count }} sub-accounts</span>{% endif %}</td>
         <td><span class="badge">{{ {"bank": "Bank Account", "cash": "Cash"}.get(r.kind) or r.obj.account_type|capitalize }}</span></td>
         <td>{{ r.obj.phone or "-" if r.kind == "account" else "-" }}</td>
         {% if r.kind == "bank" %}
@@ -56,7 +56,10 @@
         <td>-</td>
         <td><a href="{{ url_for('cash_account_detail') }}">View history</a></td>
         {% else %}
-        <td>{{ (r.balance)|fmt }} <span class="hint-sm">{{ "owed to you" if r.balance > 0 else ("you owe" if r.balance < 0 else "") }}</span></td>
+        <td>
+          {{ (r.balance)|fmt }} <span class="hint-sm">{{ "owed to you" if r.balance > 0 else ("you owe" if r.balance < 0 else "") }}</span>
+          {% if r.is_group %}<div class="hint-sm">group total</div>{% endif %}
+        </td>
         <td>
           {% if r.aging and r.aging.oldest_days is not none %}
             <span class="badge {{ 'badge-low' if r.aging.oldest_days > 60 else '' }}">{{ r.aging.oldest_days }} days</span>
@@ -186,6 +189,14 @@
     <label id="add_phone_field">Phone (optional)
       <input type="text" name="phone">
     </label>
+    <label id="add_parent_field">Parent account (optional)
+      <select name="parent_account_id">
+        <option value="">None - top-level account</option>
+        {% for p in parent_candidates %}
+        <option value="{{ p.id }}">{{ p.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <label>Opening Balance (Rs)
       <input type="number" step="0.01" name="opening_balance" placeholder="0.00">
     </label>
@@ -198,6 +209,9 @@
 <script>
 document.getElementById('add_account_type').addEventListener('change', function () {
   document.getElementById('add_phone_field').style.display = this.value === 'bank' ? 'none' : '';
+  // A bank account is the pump's own money, not a party with a khata, so
+  // it can never be somebody's sub-account.
+  document.getElementById('add_parent_field').style.display = this.value === 'bank' ? 'none' : '';
 });
 document.querySelectorAll('.edit-toggle').forEach(function (link) {
   link.addEventListener('click', function (e) {

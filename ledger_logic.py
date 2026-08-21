@@ -1294,6 +1294,72 @@ def credit_aging(account, as_of_date):
     }
 
 
+def allocate_group_payment(children, amount, as_of_date):
+    """Split one lump-sum payment across a parent account's sub-accounts,
+    oldest debt first, and report what each of them should be credited.
+
+    This is the same FIFO convention credit_aging() already applies WITHIN
+    a single account ("a shopkeeper clears the oldest entries on the khata
+    first"), lifted one level up and applied ACROSS accounts: whichever
+    sub-account has been carrying unpaid money the longest gets settled
+    first, then the next, until the lump sum runs out.
+
+    Only sub-accounts with a positive balance are considered - a settled
+    account (balance 0) or one the pump actually owes money to (negative
+    balance) has nothing to pay off, so handing it part of a payment would
+    be inventing an advance rather than clearing a debt.
+
+    Ordering is by each child's oldest still-unpaid debit, taken straight
+    from credit_aging(child, as_of_date)["oldest_date"]. A child whose
+    balance is positive but which has no dated debit left after the FIFO
+    walk (oldest_date None) sorts LAST - there is no age to prioritise it
+    by. Name is the tie-break purely so the result is deterministic when
+    two children share an oldest date.
+
+    Returns (allocations, leftover):
+      - allocations: [{"account": <Account>, "amount": <float, 2dp>}, ...]
+        in the order the money is applied, with zero-amount entries
+        dropped.
+      - leftover: whatever could not be placed because the selected
+        children simply did not owe that much.
+
+    This function DECIDES nothing beyond the split - it creates no rows and
+    touches no balances. The caller turns each allocation into an ordinary
+    Receipt, exactly like a receipt typed in by hand on that sub-account,
+    so nothing downstream has to learn about groups at all.
+    """
+    candidates = []
+    for child in children:
+        balance = child.balance
+        if balance <= 0:
+            continue
+        aging = credit_aging(child, as_of_date)
+        candidates.append({"account": child, "balance": balance, "oldest_date": aging["oldest_date"]})
+
+    # None (no dated debt found) must sort AFTER every real date, hence
+    # the leading 0/1 flag rather than trying to compare None to a date.
+    candidates.sort(
+        key=lambda c: (
+            1 if c["oldest_date"] is None else 0,
+            c["oldest_date"] or as_of_date,
+            c["account"].name.lower(),
+        )
+    )
+
+    allocations = []
+    remaining = round(amount, 2)
+    for c in candidates:
+        if remaining <= 0:
+            break
+        share = round(min(remaining, c["balance"]), 2)
+        if share <= 0:
+            continue
+        allocations.append({"account": c["account"], "amount": share})
+        remaining = round(remaining - share, 2)
+
+    return allocations, round(remaining, 2)
+
+
 def fuel_sales_for_date(entry_date):
     """Liters sold and revenue for entry_date, grouped by fuel type name -
     computed from nozzle meter reading differences (Sale rows) AND direct

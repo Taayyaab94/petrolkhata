@@ -43,6 +43,7 @@ from ledger_logic import (
     account_ledger_events,
     account_positions,
     active_shifts,
+    allocate_group_payment,
     attendant_variance_summary,
     bank_account_balance_as_of,
     bank_account_ledger_events,
@@ -5296,6 +5297,100 @@ def inventory():
 ACCOUNT_TYPES = ("customer", "supplier", "employee", "owner")
 
 
+def _validate_parent(account, parent_id):
+    """Guard the parent/sub-account link. Returns an error string to flash,
+    or None when the link is allowed.
+
+    Sub-accounts are ONE LEVEL DEEP and nothing in the database enforces
+    that (the FK is self-referential and would happily allow a chain, or
+    even a cycle) - these three checks are the only thing keeping the tree
+    flat, which is what lets group_balance stay a single non-recursive sum
+    and lets every balance/aging consumer keep treating a sub-account as
+    an ordinary account.
+
+    account may be None (the add-account path, where the row does not
+    exist yet) - the self-parent and has-own-children checks simply do not
+    apply to a brand new account.
+
+    A parent id that matches no account is treated as "no parent" rather
+    than an error: Account.query is already tenant-scoped (see tenancy.py),
+    so an id belonging to another pump resolves to None here and can never
+    become a cross-pump parent - there is nothing extra to re-check.
+    """
+    if parent_id is None:
+        return None
+
+    if account is not None and parent_id == account.id:
+        return "An account can't be its own parent."
+
+    parent = db.session.get(Account, parent_id)
+    if parent is None:
+        return None
+
+    if parent.parent_account_id is not None:
+        return f"{parent.name} is already a sub-account - sub-accounts are only one level deep."
+
+    if account is not None and account.children:
+        return f"{account.name} has its own sub-accounts, so it can't become one."
+
+    return None
+
+
+def _parent_id_from_form(form, field="parent_account_id"):
+    """Read the optional parent picker off a form. An empty string (the
+    blank first option) means "top-level", i.e. None - which is also what
+    clearing an existing link submits, so editing an account back to
+    top-level works through the same path."""
+    raw = (form.get(field) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _group_aging(account, children, as_of_date):
+    """The aging buckets shown on ONE Accounts-list row.
+
+    For a childless account this is plain credit_aging() and nothing has
+    changed. For a parent - whose children are not listed separately on
+    that page - the row's buckets are its own plus each child's, summed
+    bucket by bucket, with the worst (largest) oldest_days of the group,
+    so the "Oldest Unpaid" badge reflects the oldest money anywhere in the
+    group rather than only the parent's own.
+
+    This is a per-row DISPLAY aggregate only. The page's aging_totals are
+    built separately from every account individually (see the invariant
+    comment in _accounts_context) - never from these row figures."""
+    own = credit_aging(account, as_of_date) if account.balance > 0 else None
+    if not children:
+        return own
+
+    buckets = {"0-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
+    oldest_days = None
+    oldest_date = None
+    parts = [own] + [credit_aging(c, as_of_date) if c.balance > 0 else None for c in children]
+    found = False
+    for part in parts:
+        if not part:
+            continue
+        found = True
+        for bucket, value in part["buckets"].items():
+            buckets[bucket] = round(buckets[bucket] + value, 2)
+        if part["oldest_days"] is not None and (oldest_days is None or part["oldest_days"] > oldest_days):
+            oldest_days = part["oldest_days"]
+            oldest_date = part["oldest_date"]
+    if not found:
+        return None
+    return {
+        "buckets": buckets,
+        "outstanding": round(sum(buckets.values()), 2),
+        "oldest_date": oldest_date,
+        "oldest_days": oldest_days,
+    }
+
+
 def _accounts_context(kind, type_filter):
     """Shared by the Accounts page and its PDF/Excel export, so the two
     can never quietly drift apart - same filters, same rows, same aging
@@ -5309,15 +5404,25 @@ def _accounts_context(kind, type_filter):
 
     rows = []
     if type_filter not in ("bank", "cash"):
-        query = Account.query
+        # TOP-LEVEL ONLY: a sub-account is reached through its parent's
+        # detail page, never listed here in its own right. That is also
+        # what stops this list double-counting - a parent row shows the
+        # rolled-up group figure, so listing its children alongside it
+        # would show the same money twice.
+        query = Account.query.filter(Account.parent_account_id.is_(None))
         if type_filter in ACCOUNT_TYPES:
             query = query.filter_by(account_type=type_filter)
         for a in query.all():
             # Debitor/creditor is purely a function of the account's current
             # balance sign - not its type label - so an account's
             # classification here can shift over time as its balance shifts.
-            balance = a.balance
-            aging = credit_aging(a, date.today()) if balance > 0 else None
+            children = a.children
+            # A childless account shows its OWN balance exactly as before.
+            # A parent shows the group total, because its children are not
+            # on this list to be seen separately - and every filter and
+            # sort below then works off whatever is actually displayed.
+            balance = a.group_balance if children else a.balance
+            aging = _group_aging(a, children, date.today())
             rows.append(
                 {
                     "kind": "account",
@@ -5325,6 +5430,8 @@ def _accounts_context(kind, type_filter):
                     "name": a.name,
                     "balance": balance,
                     "aging": aging,
+                    "child_count": len(children),
+                    "is_group": bool(children),
                 }
             )
 
@@ -5355,13 +5462,39 @@ def _accounts_context(kind, type_filter):
 
     expenses = Expense.query.order_by(Expense.entry_date.desc(), Expense.recorded_at.desc()).all()
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
+    # Every top-level account, for the Add-an-Account form's optional
+    # parent picker - deliberately NOT `rows` above, which is narrowed by
+    # the page's type/kind filters and would otherwise hide perfectly
+    # valid parents just because the owner is looking at "Suppliers".
+    parent_candidates = (
+        Account.query.filter(Account.parent_account_id.is_(None)).order_by(Account.name).all()
+    )
 
     # Aging totals across every debitor, so overdue money is visible at a
     # glance instead of one account at a time.
+    #
+    # INVARIANT - these totals are computed from EVERY account, including
+    # sub-accounts, deliberately NOT from `rows` above (which is filtered
+    # to top-level accounts and carries rolled-up group figures). "Total
+    # owed to you" has to keep meaning exactly what it means today: every
+    # account counted once. Summing the rows instead would either drop
+    # sub-accounts from a type/kind-filtered list or double-count them
+    # against their parent's group figure - both of which would silently
+    # change a headline number that nothing about grouping should touch.
+    aging_query = Account.query
+    if type_filter in ACCOUNT_TYPES:
+        aging_query = aging_query.filter_by(account_type=type_filter)
     aging_totals = {"0-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
-    for r in rows:
-        if r.get("aging"):
-            for bucket, value in r["aging"]["buckets"].items():
+    # Only a debit balance ages, so the Creditors view has nothing to
+    # total here - exactly as before, when every creditor row carried
+    # aging=None.
+    if type_filter not in ("bank", "cash") and kind != "creditors":
+        today_ = date.today()
+        for a in aging_query.all():
+            if a.balance <= 0:
+                continue
+            aging = credit_aging(a, today_)
+            for bucket, value in aging["buckets"].items():
                 aging_totals[bucket] = round(aging_totals[bucket] + value, 2)
 
     return {
@@ -5370,6 +5503,7 @@ def _accounts_context(kind, type_filter):
         "type_filter": type_filter,
         "expenses": expenses,
         "bank_accounts": bank_accounts,
+        "parent_candidates": parent_candidates,
         "aging_totals": aging_totals,
         "aging_total": round(sum(aging_totals.values()), 2),
     }
@@ -5456,6 +5590,10 @@ def accounts_add():
     opening_balance = request.form.get("opening_balance", type=float) or 0
     raw_date = request.form.get("opening_balance_date", "").strip()
     opening_balance_date = parse_date_param(raw_date) if raw_date else None
+    # Optional grouping - blank means an ordinary top-level account, which
+    # is what every account was before this field existed.
+    parent_account_id = _parent_id_from_form(request.form)
+    parent_error = _validate_parent(None, parent_account_id)
 
     if not name:
         flash("Please enter a name.", "error")
@@ -5471,6 +5609,8 @@ def accounts_add():
         flash(f"Added bank account \"{name}\".", "success")
     elif account_type not in ACCOUNT_TYPES:
         flash("Please choose an account type.", "error")
+    elif parent_error:
+        flash(parent_error, "error")
     else:
         db.session.add(
             Account(
@@ -5479,6 +5619,7 @@ def accounts_add():
                 account_type=account_type,
                 opening_balance=opening_balance,
                 opening_balance_date=opening_balance_date,
+                parent_account_id=parent_account_id,
             )
         )
         db.session.commit()
@@ -5510,6 +5651,17 @@ def account_detail(account_id):
     tanks = Tank.query.order_by(Tank.number).all()
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
     today = date.today()
+    children = sorted(account.children, key=lambda c: c.name.lower())
+    # The edit form's parent picker only ever offers TOP-LEVEL accounts
+    # other than this one - offering a sub-account would create a second
+    # level, and offering itself would create a self-parent. Both are
+    # rejected by _validate_parent() anyway; this just keeps the dropdown
+    # from suggesting something that can only fail.
+    parent_candidates = (
+        Account.query.filter(Account.parent_account_id.is_(None), Account.id != account.id)
+        .order_by(Account.name)
+        .all()
+    )
     return render_template(
         "account_detail.html",
         account=account,
@@ -5520,6 +5672,9 @@ def account_detail(account_id):
         tanks=tanks,
         bank_accounts=bank_accounts,
         aging=credit_aging(account, today) if account.balance > 0 else None,
+        children=children,
+        group_balance=account.group_balance,
+        parent_candidates=parent_candidates,
     )
 
 
@@ -5531,15 +5686,22 @@ def account_edit(account_id):
     name = request.form.get("name", "").strip()
     phone = request.form.get("phone", "").strip()
     account_type = request.form.get("account_type", "")
+    # Blank = top-level, so clearing the picker un-links a sub-account
+    # again through this same path.
+    parent_account_id = _parent_id_from_form(request.form)
+    parent_error = _validate_parent(account, parent_account_id)
 
     if not name:
         flash("Please enter a name.", "error")
     elif account_type not in ACCOUNT_TYPES:
         flash("Please choose an account type.", "error")
+    elif parent_error:
+        flash(parent_error, "error")
     else:
         account.name = name
         account.phone = phone or None
         account.account_type = account_type
+        account.parent_account_id = parent_account_id
         db.session.commit()
         flash("Account details updated.", "success")
 
@@ -5584,7 +5746,9 @@ def account_delete(account_id):
         or account.employee_loans
     )
 
-    if has_entries or account.opening_balance:
+    if account.children:
+        flash(f"Can't delete {account.name} - it still has sub-accounts. Move them out first.", "error")
+    elif has_entries or account.opening_balance:
         flash(f"Can't delete {account.name} - it already has transaction history or a nonzero opening balance.", "error")
     else:
         name = account.name
@@ -5593,6 +5757,107 @@ def account_delete(account_id):
         flash(f'Deleted "{name}".', "success")
 
     return redirect(url_for("accounts"))
+
+
+@app.route("/accounts/<int:account_id>/group-payment", methods=["POST"])
+@login_required
+@owner_required
+def account_group_payment(account_id):
+    """One lump sum from a parent account, split across the ticked
+    sub-accounts oldest-debt-first (see allocate_group_payment() in
+    ledger_logic.py) and recorded as one ORDINARY Receipt per
+    sub-account.
+
+    Nothing new is stored: each allocation becomes exactly the Receipt row
+    that typing that payment in by hand on that sub-account would have
+    created, with the same fields ledger_receipt() uses. Every balance,
+    statement and report therefore sees plain receipts and needs to know
+    nothing at all about groups.
+
+    DELIBERATE: an over-payment is REJECTED, not absorbed. If the amount
+    exceeds what the selected sub-accounts currently owe, the whole thing
+    is refused rather than parking the surplus somewhere - this app never
+    silently invents an advance or a credit balance on an account nobody
+    chose. An owner who genuinely wants to overpay one account can record
+    a direct receipt on that account, where the resulting negative balance
+    is an explicit, visible decision.
+    """
+    account = db.session.get(Account, account_id) or abort(404)
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    amount = request.form.get("amount", type=float)
+    note = request.form.get("note", "").strip()
+    selected_ids = request.form.getlist("sub_account_ids")
+    # resolve_payment_method() can db.session.add() a quick-added bank
+    # account, so every rejection below rolls back rather than leaving
+    # that half-made row sitting in the session.
+    method, bank_account, method_error = resolve_payment_method(request.form)
+
+    children_by_id = {c.id: c for c in account.children}
+
+    if not children_by_id:
+        db.session.rollback()
+        flash(f"{account.name} has no sub-accounts to pay for.", "error")
+        return redirect(url_for("account_detail", account_id=account.id))
+
+    if not amount or amount <= 0:
+        db.session.rollback()
+        flash("Amount must be a positive number.", "error")
+        return redirect(url_for("account_detail", account_id=account.id))
+
+    if not selected_ids:
+        db.session.rollback()
+        flash("Please tick at least one sub-account to pay for.", "error")
+        return redirect(url_for("account_detail", account_id=account.id))
+
+    selected = []
+    for raw in selected_ids:
+        try:
+            child = children_by_id[int(raw)]
+        except (ValueError, KeyError):
+            # Not silently ignored: a posted id that isn't a child of this
+            # account means the form was tampered with or is stale, and
+            # quietly dropping it would record a payment the owner did not
+            # actually authorise the shape of.
+            db.session.rollback()
+            flash("One of the selected sub-accounts doesn't belong to this account.", "error")
+            return redirect(url_for("account_detail", account_id=account.id))
+        selected.append(child)
+
+    if method_error:
+        db.session.rollback()
+        flash(method_error, "error")
+        return redirect(url_for("account_detail", account_id=account.id))
+
+    allocations, leftover = allocate_group_payment(selected, amount, entry_date)
+    if leftover > 0.01:
+        owed = round(amount - leftover, 2)
+        db.session.rollback()
+        flash(
+            f"Rs {format_number(amount)} is more than the Rs {format_number(owed)} "
+            f"currently owed across the selected sub-accounts.",
+            "error",
+        )
+        return redirect(url_for("account_detail", account_id=account.id))
+
+    for allocation in allocations:
+        db.session.add(
+            Receipt(
+                account_id=allocation["account"].id,
+                entry_date=entry_date,
+                amount=allocation["amount"],
+                method=method,
+                bank_account_id=bank_account.id if bank_account else None,
+                note=note or None,
+                user_id=current_user.id,
+            )
+        )
+    db.session.commit()
+
+    summary = ", ".join(
+        f"{a['account'].name} Rs {format_number(a['amount'])}" for a in allocations
+    )
+    flash(f"Recorded Rs {format_number(amount)} across {len(allocations)} sub-account(s): {summary}.", "success")
+    return redirect(url_for("account_detail", account_id=account.id))
 
 
 @app.route("/accounts/entry/credit/<int:entry_id>/edit", methods=["POST"])

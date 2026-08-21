@@ -5,6 +5,9 @@
 <div class="page-head">
   <div>
     <h1>{{ account.name }} <span class="owner-tag">{{ account.account_type|capitalize }}</span></h1>
+    {% if account.parent %}
+    <div class="subtitle">Sub-account of <a href="{{ url_for('account_detail', account_id=account.parent.id) }}">{{ account.parent.name }}</a></div>
+    {% endif %}
     <div class="subtitle">{{ account.phone or "No phone on file" }}</div>
   </div>
   <div>
@@ -68,6 +71,14 @@
     <label>Phone (optional)
       <input type="text" name="phone" value="{{ account.phone or '' }}">
     </label>
+    <label>Parent account
+      <select name="parent_account_id">
+        <option value="">None - top-level account</option>
+        {% for p in parent_candidates %}
+        <option value="{{ p.id }}" {{ "selected" if account.parent_account_id == p.id }}>{{ p.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <button type="submit" class="btn btn-sm">Save Details</button>
   </form>
   {% if not events %}
@@ -93,6 +104,80 @@
     <button type="submit" class="btn btn-sm">Save Opening Balance</button>
   </form>
 </div>
+{% endif %}
+
+{% if children %}
+<div class="panel">
+  <div class="panel-head"><h3>Sub-accounts</h3></div>
+  <p class="hint">Each sub-account keeps its own khata - its own entries, its own balance, its own aging. The group total below is only a roll-up for reading at a glance; it is not a balance of its own and no report is built from it.</p>
+  <div class="stat-row">
+    <div class="stat-card accent-brand">
+      <div class="label">Group Balance (incl. sub-accounts)</div>
+      <div class="value">Rs {{ (group_balance|abs)|fmt }}</div>
+      <div class="sub">{% if group_balance > 0 %}owed to you{% elif group_balance < 0 %}you owe{% else %}settled{% endif %}</div>
+    </div>
+  </div>
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Name</th><th>Type</th><th>Balance (Rs)</th><th></th></tr></thead>
+    <tbody>
+      {% for c in children %}
+      <tr>
+        <td><a href="{{ url_for('account_detail', account_id=c.id) }}">{{ c.name }}</a></td>
+        <td><span class="badge">{{ c.account_type|capitalize }}</span></td>
+        <td>{{ (c.balance)|fmt }}</td>
+        <td><a href="{{ url_for('account_statement', account_id=c.id) }}">Statement</a></td>
+      </tr>
+      {% endfor %}
+      <tr>
+        <td colspan="2"><strong>Group total</strong> <span class="hint-sm">(this account + its sub-accounts)</span></td>
+        <td><strong>{{ (group_balance)|fmt }}</strong></td>
+        <td></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+{% if current_user.is_owner %}
+<div class="panel">
+  <div class="panel-head"><h3>Pay for Sub-accounts</h3></div>
+  <p class="hint">One lump sum, split across the ticked sub-accounts, oldest debt first. Each share is recorded as an ordinary receipt on that sub-account - exactly as if you had entered it there by hand. The total can't exceed what the ticked sub-accounts currently owe.</p>
+  <form method="post" action="{{ url_for('account_group_payment', account_id=account.id) }}" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Date
+      <input type="date" name="entry_date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" required>
+    </label>
+    <label>Amount (Rs)
+      <input type="number" step="0.01" min="0.01" name="amount" required>
+    </label>
+    <label>Paid via
+      <select name="paid_via">
+        <option value="cash">Cash</option>
+        {% for b in bank_accounts %}
+        <option value="{{ b.id }}">{{ b.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Note (optional)
+      <input type="text" name="note">
+    </label>
+    <div style="grid-column: 1 / -1;">
+      <div class="hint-sm">Sub-accounts to pay for</div>
+      <div class="field-row" style="margin-top:6px;">
+        {% for c in children %}
+        <label style="display:inline-flex; gap:6px; align-items:center;">
+          <input type="checkbox" name="sub_account_ids" value="{{ c.id }}">
+          {{ c.name }} <span class="hint-sm">Rs {{ (c.balance)|fmt }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="hint" style="margin-top:6px;">The amount is split across the ticked sub-accounts, oldest debt first.</div>
+    </div>
+    <button type="submit" class="btn">Record Group Payment</button>
+  </form>
+</div>
+{% endif %}
 {% endif %}
 
 <div class="panel">

@@ -311,6 +311,62 @@ class Account(TenantScoped, db.Model):
     opening_balance = db.Column(db.Float, nullable=False, default=0)
     opening_balance_date = db.Column(db.Date, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
+    # Optional parent for a "group" of related accounts - e.g. a company
+    # whose several drivers each keep their own khata but which settles
+    # for all of them with one lump payment.
+    #
+    # ONE LEVEL ONLY: a sub-account can never itself be a parent. That is
+    # enforced by the route guards (_validate_parent() in app.py), NOT by
+    # the database - the FK is self-referential and would happily allow a
+    # chain, so those guards are the only thing keeping the tree flat.
+    #
+    # NULL = an ordinary top-level account, which is what every row that
+    # existed before this column did becomes. The column is nullable with
+    # no server_default and no backfill precisely so that adding it
+    # changes nothing whatsoever for existing data - that is the whole
+    # point of it.
+    parent_account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=True)
+    children = db.relationship(
+        "Account",
+        backref=db.backref("parent", remote_side=[id]),
+        lazy="selectin",
+    )
+
+    @property
+    def is_sub_account(self):
+        """True when this account hangs under a parent. It stays an
+        entirely ordinary account in every other respect - its own
+        entries, its own .balance, its own aging; the link is purely a
+        grouping for display and for the group-payment shortcut."""
+        return self.parent_account_id is not None
+
+    @property
+    def is_parent_account(self):
+        """True when other accounts hang under this one. A parent is also
+        still an ordinary account with its own entries and its own
+        .balance - being a parent adds a rolled-up DISPLAY figure
+        (group_balance below); it never moves anybody's money."""
+        return bool(self.children)
+
+    @property
+    def group_balance(self):
+        """This account's own balance plus each of its sub-accounts' -
+        what the whole group owes, as one number.
+
+        DISPLAY ONLY. group_balance is NEVER used by account_positions(),
+        working_capital(), receivables_aging(), payables_schedule(), or
+        anything else that feeds cash / working-capital maths. Those keep
+        walking EVERY account individually - parent and children each
+        counted exactly once - which already totals correctly. Using
+        group_balance there would count every sub-account TWICE: once
+        folded into its parent's rolled-up figure and once again as
+        itself, silently inflating receivables across the whole app.
+
+        Only the Accounts list row for a parent and the parent's own
+        detail page show this number, and both label it as a group total
+        so a rolled-up figure can never be mistaken for one account's own
+        balance."""
+        return round(self.balance + sum(c.balance for c in self.children), 2)
 
     @property
     def balance(self):
