@@ -2,18 +2,53 @@
 {% block title %}Petrol Khata - Inventory{% endblock %}
 {% block content %}
 
+{#  A tank drawn as a real closed cylinder: top cap, body, bottom cap.
+    Every stroke is vector-effect="non-scaling-stroke" so the outline
+    stays exactly 1.5px however large the card renders it - the old macro
+    scaled its strokes with the viewBox and went soft and fuzzy on big
+    screens. The 25/50/75% ticks are the actual "define it better" bit:
+    they turn a coloured blob into something you can read a level off at
+    a glance.
+
+    Draw order matters and is: caps and body FILL first (so the top cap's
+    upper half has a background), then the liquid, then the ticks, then
+    the outline strokes last so nothing paints over the edges. The liquid
+    gets its own bottom ellipse so it fills the rounded base instead of
+    ending in a straight line, and its surface ellipse is stroked so the
+    fill line is a defined edge rather than a blur.
+
+    The drawn fill is clamped to 0-100 (an over-capacity tank cannot draw
+    liquid outside the cylinder) but the printed percentage is always the
+    TRUE one, so over-capacity stays visible in the label and the title. #}
 {% macro cylinder(pct, cls) %}
 {% set clamped = [[pct if pct is not none else 0, 100]|min, 0]|max %}
-{% set liquid_h = 82 * clamped / 100 %}
-{% set liquid_y = 96 - liquid_h %}
-<svg class="tank-cylinder {{ cls }}" viewBox="0 0 60 110" role="img" aria-hidden="false">
+{% set liquid_h = 92 * clamped / 100 %}
+{% set liquid_y = 112 - liquid_h %}
+<svg class="tank-cylinder {{ cls }}" viewBox="0 0 72 128" role="img" aria-hidden="false"
+     shape-rendering="geometricPrecision">
   <title>{% if pct is not none %}{{ "%.1f"|format(pct) }}% full{% else %}no capacity set{% endif %}</title>
-  <rect x="6" y="14" width="48" height="82" rx="4" fill="var(--surface-2)" stroke="var(--border)"></rect>
+  <ellipse cx="36" cy="20" rx="28" ry="8" fill="var(--surface-2)"></ellipse>
+  <rect x="8" y="20" width="56" height="92" fill="var(--surface-2)"></rect>
+  <ellipse cx="36" cy="112" rx="28" ry="8" fill="var(--surface-2)"></ellipse>
   {% if clamped > 0 %}
-  <rect x="7" y="{{ liquid_y }}" width="46" height="{{ liquid_h }}" fill="currentColor" opacity="0.85"></rect>
-  <ellipse cx="30" cy="{{ liquid_y }}" rx="23" ry="6" fill="currentColor"></ellipse>
+  <ellipse cx="36" cy="112" rx="28" ry="8" fill="currentColor" opacity="0.9"></ellipse>
+  <rect x="8" y="{{ liquid_y }}" width="56" height="{{ liquid_h }}" fill="currentColor" opacity="0.9"></rect>
+  <ellipse cx="36" cy="{{ liquid_y }}" rx="28" ry="8" fill="currentColor" opacity="0.9"
+           stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke"></ellipse>
   {% endif %}
-  <ellipse cx="30" cy="14" rx="24" ry="7" fill="var(--surface-2)" stroke="var(--border)"></ellipse>
+  {% for tick in [25, 50, 75] %}
+  <line x1="14" x2="58" y1="{{ 112 - 92 * tick / 100 }}" y2="{{ 112 - 92 * tick / 100 }}"
+        stroke="var(--border)" stroke-width="1.5" opacity="0.35" vector-effect="non-scaling-stroke"></line>
+  {% endfor %}
+  <line x1="8" y1="20" x2="8" y2="112" fill="none" stroke="var(--border-strong)"
+        stroke-width="1.5" vector-effect="non-scaling-stroke"></line>
+  <line x1="64" y1="20" x2="64" y2="112" fill="none" stroke="var(--border-strong)"
+        stroke-width="1.5" vector-effect="non-scaling-stroke"></line>
+  <ellipse cx="36" cy="112" rx="28" ry="8" fill="none" stroke="var(--border-strong)"
+           stroke-width="1.5" vector-effect="non-scaling-stroke"></ellipse>
+  <ellipse cx="36" cy="20" rx="28" ry="8" fill="none" stroke="var(--border-strong)"
+           stroke-width="1.5" vector-effect="non-scaling-stroke"></ellipse>
+  <text class="tank-pct" x="36" y="70" text-anchor="middle" dominant-baseline="middle">{% if pct is not none %}{{ "%.1f"|format(pct) }}%{% else %}-{% endif %}</text>
 </svg>
 {% endmacro %}
 
@@ -27,12 +62,30 @@
 
 {% set low_count = tank_rows|selectattr('is_low')|list|length %}
 {% set variance_total = variance_rows|selectattr('has_dip')|sum(attribute='variance_liters') %}
+{# Litres are shown PER FUEL TYPE: adding diesel litres to petrol litres
+   produced one number the owner could do nothing with. Each card carries
+   that fuel's own stock value and tank count so the fuel's whole picture
+   is in one place. #}
 <div class="stat-row">
+  {% for f in fuel_totals %}
   <div class="stat-card accent-brand">
-    <div class="label">Total Litres</div>
-    <div class="value">{{ (total_liters)|fmt }} L</div>
-    <div class="sub">across {{ tank_rows|length }} tank(s)</div>
+    <div class="label">{{ f.fuel_type.name }} in Stock</div>
+    <div class="value">{{ (f.stock)|fmt }} L</div>
+    <div class="sub">Rs {{ (f.value)|fmt }} at weighted average cost</div>
+    <div class="sub">{{ f.tank_count }} tank(s)
+      {%- if f.fill_pct is not none %} &middot; {{ "%.1f"|format(f.fill_pct) }}% of {{ (f.capacity)|fmt }} L{% endif %}
+      {%- if f.low_count %} &middot; <span class="variance-neg">{{ f.low_count }} low</span>{% endif %}</div>
   </div>
+  {% else %}
+  <div class="stat-card">
+    <div class="label">Fuel in Stock</div>
+    <div class="value">-</div>
+    <div class="sub">No tanks set up yet.</div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="stat-row">
   <div class="stat-card accent-brand">
     <div class="label">Total Stock Value</div>
     <div class="value">Rs {{ (total_stock_value)|fmt }}</div>
@@ -67,7 +120,7 @@
       <div class="tank-cylinder-body">
         {{ cylinder(row.fill_pct, bar_class) }}
         <div class="tank-cylinder-figures">
-          <div class="sub">{% if row.fill_pct is not none %}{{ "%.1f"|format(row.fill_pct) }}%{% else %}-{% endif %} &middot; {{ (row.stock)|fmt }} / {{ (row.capacity)|fmt }} L</div>
+          <div class="tank-figure">{{ (row.stock)|fmt }} L <span class="hint-sm">of {{ (row.capacity)|fmt }} L</span></div>
           <div class="sub">Book {{ (row.stock)|fmt }} L
             {%- if vrow.has_dip %} &middot; Actual {{ (vrow.actual_stock)|fmt }} L
               <span class="{{ 'variance-neg' if vrow.variance_liters < 0 else ('variance-pos' if vrow.variance_liters > 0 else '') }}">({{ "+" if vrow.variance_liters > 0 }}{{ (vrow.variance_liters)|fmt }} L)</span>
@@ -177,25 +230,110 @@
 </div>
 
 <div class="panel product-compact">
-  <div class="panel-head"><h3>Non-Fuel Stock</h3></div>
-  <div class="table-wrap">
-  <table class="table">
-    <thead><tr><th>Product</th><th>Category</th><th>Unit</th><th>On Hand</th><th>Status</th></tr></thead>
-    <tbody>
-      {% for row in product_rows %}
-      <tr class="{{ 'row-low' if row.is_low else '' }}">
-        <td>{{ row.product.label }}<div class="hint-sm">Opening {{ (row.opening)|fmt }} &middot; Received {{ (row.received)|fmt }} &middot; Sold {{ (row.sold)|fmt }}</div></td>
-        <td>{{ row.product.category|capitalize }}</td>
-        <td>{{ row.product.unit }}</td>
-        <td>{{ (row.on_hand)|fmt }}</td>
-        <td>{% if row.is_low %}<span class="badge badge-low">LOW STOCK</span>{% else %}<span class="badge badge-ok">OK</span>{% endif %}</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="5">No products set up yet - add some from Settings.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="panel-head">
+    <h3>Non-Fuel Stock</h3>
+    {% if current_user.is_owner and product_rows %}
+    <button type="button" class="btn btn-sm" id="price-edit-toggle">Update Selling Price</button>
+    {% endif %}
   </div>
+
+  {# Collapsible so a long lubricant catalogue does not push the rest of
+     the page off screen - same native <details> the Monthly Report uses
+     for Payables/Receivables, open by default so print never loses it.
+     The summary carries the count and the total value, which is the bit
+     worth seeing while it is collapsed. #}
+  <details class="acct-details" open id="product-details">
+    <summary>
+      <span class="acct-total">Rs {{ (product_stock_value)|fmt }}</span>
+      <span class="acct-caption">{{ product_rows|length }} product(s) &middot; stock value at cost</span>
+    </summary>
+
+    <p class="hint-sm">Read-only. Nothing is sold from this page - record every product sale on the
+      <a href="{{ url_for('ledger') }}">Ledger</a>, which is what moves these figures.</p>
+
+    <div class="product-filter-row">
+      <input type="search" id="product-filter" class="product-filter"
+             placeholder="Search product or size..." aria-label="Search product or size">
+    </div>
+
+    {# can_edit_prices gates every part of the price editor - the date
+       block, the extra column and the Save/Cancel row - not just the
+       button. Staff get the same read-only table with nothing to submit,
+       rather than a form whose POST would only 403 at them. #}
+    {% set can_edit_prices = current_user.is_owner %}
+    <form method="post" action="{{ url_for('inventory_update_prices') }}" id="price-form" class="product-price-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+      {% if can_edit_prices %}
+      {# Effective date FIRST: a price is meaningless without the date it
+         starts on, and it applies to every price typed below. #}
+      <div class="price-edit-block price-date-block">
+        <label for="price-effective-date"><strong>New prices effective from</strong></label>
+        <input type="date" id="price-effective-date" name="effective_date" value="{{ today.isoformat() }}">
+        <span class="hint-sm">Every new price below takes effect on this date. Leave a product blank to keep its current price.</span>
+      </div>
+      {% endif %}
+
+      <div class="table-wrap">
+      <table class="table" id="product-table">
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>Size/Unit</th>
+            <th>Remaining</th>
+            <th>Selling Price/Unit</th>
+            <th>Stock Value <span class="hint-sm">at cost</span></th>
+            {% if can_edit_prices %}<th class="price-edit-block price-col">New Selling Price/Unit</th>{% endif %}
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in product_rows %}
+          <tr class="product-row {{ 'row-low' if row.is_low else '' }}"
+              data-search="{{ (row.product.label ~ ' ' ~ (row.product.pack_size or '') ~ ' ' ~ row.product.unit ~ ' ' ~ row.product.category)|lower }}">
+            <td>{{ row.product.label }}
+              <div class="hint-sm">Opening {{ (row.opening)|fmt }} &middot; Received {{ (row.received)|fmt }} &middot; Sold {{ (row.sold)|fmt }}</div>
+            </td>
+            <td>{{ row.product.pack_size or "-" }} <span class="hint-sm">{{ row.product.unit }}</span></td>
+            <td><span class="{{ 'num-strong badge-low' if row.is_low else 'num-strong' }}">{{ (row.on_hand)|fmt }}</span></td>
+            <td class="num-strong">{% if row.retail_rate %}Rs {{ (row.retail_rate)|fmt }}{% else %}&mdash;{% endif %}</td>
+            <td class="num-strong">{% if row.stock_value %}Rs {{ (row.stock_value)|fmt }}{% else %}&mdash;{% endif %}</td>
+            {% if can_edit_prices %}
+            <td class="price-edit-block price-col">
+              <input type="number" step="0.01" min="0" name="new_price_{{ row.product.id }}"
+                     placeholder="{{ (row.retail_rate)|fmt if row.retail_rate else 'not set' }}"
+                     aria-label="New selling price for {{ row.product.label }}">
+            </td>
+            {% endif %}
+            <td>{% if row.is_low %}<span class="badge badge-low">LOW STOCK</span>{% else %}<span class="badge badge-ok">OK</span>{% endif %}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="{{ 7 if can_edit_prices else 6 }}">No products set up yet - add some from Settings.</td></tr>
+          {% endfor %}
+          <tr class="product-filter-empty" hidden><td colspan="{{ 7 if can_edit_prices else 6 }}">Nothing matches that search.</td></tr>
+        </tbody>
+        <tfoot>
+          <tr>
+            <td>Total</td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td class="num-strong">Rs {{ (product_stock_value)|fmt }}</td>
+            {% if can_edit_prices %}<td class="price-edit-block price-col"></td>{% endif %}
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+      </div>
+
+      {% if can_edit_prices %}
+      <div class="price-edit-block price-actions">
+        <button type="submit" class="btn">Save New Prices</button>
+        <button type="button" class="btn btn-ghost" id="price-edit-cancel">Cancel</button>
+      </div>
+      {% endif %}
+    </form>
+  </details>
 </div>
 
 <div class="panel">
@@ -263,4 +401,59 @@
   </div>
 </div>
 {% endif %}
+
+{# Two small, independent bits of progressive enhancement over the
+   already-rendered non-fuel table. Neither is required for the page to
+   work: with JS off the price editor simply stays hidden (prices are
+   still readable) and the filter box does nothing. Both operate purely
+   on rows the server already sent - no fetch, no route, no round trip. #}
+<script>
+(function () {
+  {% if current_user.is_owner %}
+  var form = document.getElementById('price-form');
+  var toggle = document.getElementById('price-edit-toggle');
+  var cancel = document.getElementById('price-edit-cancel');
+  var details = document.getElementById('product-details');
+
+  function setEditing(on) {
+    if (!form) return;
+    form.classList.toggle('price-editing', on);
+    if (toggle) {
+      toggle.textContent = on ? 'Cancel Price Update' : 'Update Selling Price';
+      toggle.setAttribute('aria-expanded', on ? 'true' : 'false');
+    }
+    // The button lives in the panel head, outside <details> - opening the
+    // section is the only way the revealed inputs are actually visible.
+    if (on && details) details.open = true;
+    if (!on) {
+      form.querySelectorAll('input[name^="new_price_"]').forEach(function (input) { input.value = ''; });
+    }
+  }
+
+  if (toggle) {
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.addEventListener('click', function () {
+      setEditing(!form.classList.contains('price-editing'));
+    });
+  }
+  if (cancel) cancel.addEventListener('click', function () { setEditing(false); });
+  {% endif %}
+
+  var filter = document.getElementById('product-filter');
+  if (filter) {
+    var rows = Array.prototype.slice.call(document.querySelectorAll('#product-table tr.product-row'));
+    var empty = document.querySelector('#product-table tr.product-filter-empty');
+    filter.addEventListener('keyup', function () {
+      var q = filter.value.trim().toLowerCase();
+      var shown = 0;
+      rows.forEach(function (row) {
+        var match = !q || (row.dataset.search || '').indexOf(q) !== -1;
+        row.hidden = !match;
+        if (match) shown++;
+      });
+      if (empty) empty.hidden = !(rows.length && shown === 0);
+    });
+  }
+})();
+</script>
 {% endblock %}

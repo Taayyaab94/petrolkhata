@@ -3029,6 +3029,58 @@ def tank_stock_rows(as_of_date, costs=None, lookback_days=14):
     return rows
 
 
+def fuel_totals_by_type(tank_rows):
+    """Collapse tank_stock_rows() into ONE row per fuel type - litres,
+    stock value, capacity and a combined fill percentage - so the
+    Inventory page can show "Diesel in Stock" and "Petrol in Stock" as
+    separate headline figures instead of a single meaningless combined
+    litre count (diesel litres and petrol litres are not the same thing
+    and adding them together tells the owner nothing actionable).
+
+    Takes the rows the caller ALREADY built rather than querying again:
+    every figure here is a pure re-aggregation of tank_stock_rows(), so
+    the per-fuel cards can never disagree with the tank cards beside them,
+    and no extra database round trip is spent to say the same thing twice.
+
+    fill_pct is the group's combined stock over its combined capacity, and
+    is None when the group has no capacity configured at all (a zero
+    denominator, not a zero percentage). Ordered by fuel name so the cards
+    keep a stable position between page loads.
+    """
+    groups = {}
+    for row in tank_rows:
+        fuel = row["tank"].fuel_type
+        group = groups.get(fuel.id)
+        if group is None:
+            group = groups[fuel.id] = {
+                "fuel_type": fuel,
+                "stock": 0.0,
+                "value": 0.0,
+                "capacity": 0.0,
+                "tank_count": 0,
+                "low_count": 0,
+            }
+        group["stock"] += row["stock"]
+        group["value"] += row["value"]
+        group["capacity"] += row["capacity"] or 0
+        group["tank_count"] += 1
+        if row["is_low"]:
+            group["low_count"] += 1
+
+    totals = []
+    for group in groups.values():
+        group["stock"] = round(group["stock"], 2)
+        group["value"] = round(group["value"], 2)
+        group["capacity"] = round(group["capacity"], 2)
+        group["fill_pct"] = (
+            round(group["stock"] / group["capacity"] * 100, 1) if group["capacity"] else None
+        )
+        totals.append(group)
+
+    totals.sort(key=lambda g: g["fuel_type"].name.lower())
+    return totals
+
+
 def daily_margin(entry_date, costs=None):
     """Today's profit picture: fuel margin (net of sales returns), product
     margin, other income, and their total, for exactly one date.

@@ -2026,3 +2026,95 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
   }
   .acct-actions { grid-column: 1 / -1; }
 }
+
+/* ================================================================== */
+/* Inventory page: sharper tank cylinders, and the non-fuel stock      */
+/* section with its dated selling-price editor.                        */
+/*                                                                     */
+/* Tokens only - this block has to read correctly in both themes, so   */
+/* every colour here resolves through :root/[data-theme] rather than   */
+/* being written literally.                                            */
+/* ================================================================== */
+
+/* The cylinder is drawn taller than it is wide now (72x128 viewBox) and
+   is given a little more room, because the level ticks and the centred
+   percentage label need it to be legible. */
+.tank-cylinder { width: 68px; }
+
+/* The percentage sits ON the cylinder, over the liquid. paint-order:
+   stroke draws a surface-coloured halo BEHIND the glyphs, which is what
+   keeps it readable against a full tank as well as an empty one. */
+.tank-cylinder .tank-pct {
+  fill: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  paint-order: stroke;
+  stroke: var(--surface-2);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+/* The litres are the point of a tank card; the capacity beside them is
+   context. Making the number bigger than its own label is the whole
+   readability change asked for on this page. */
+.tank-figure {
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  color: var(--ink);
+}
+
+/* Same idea inside the non-fuel table: figures louder than their
+   surrounding hint text, and column-aligned via tabular numerals so
+   values are comparable down the column at a glance. */
+.num-strong {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  color: var(--ink);
+}
+
+.product-filter-row { margin: var(--s2) 0 var(--s3); }
+
+.product-filter {
+  width: 100%;
+  max-width: 320px;
+}
+
+/* The dated price editor. It is rendered in the HTML but hidden until
+   the owner presses "Update Selling Price" - showing it is a class
+   toggle on the form, so nothing is fetched and nothing re-renders.
+   display:none rather than [hidden] because the revealed cells have to
+   come back as table-cell, not block. */
+.price-edit-block { display: none; }
+.price-editing .price-edit-block { display: block; }
+.price-editing th.price-col,
+.price-editing td.price-col { display: table-cell; }
+
+/* Note both of these set their layout ONLY inside .price-editing: a
+   plain `display: flex` on the base rule would out-cascade
+   .price-edit-block's display:none (same specificity, declared later)
+   and leave the editor permanently open. */
+.price-date-block {
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  padding: var(--s3);
+  margin-bottom: var(--s3);
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+}
+.price-editing .price-date-block { display: flex; }
+
+.price-actions {
+  margin-top: var(--s3);
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+.price-editing .price-actions { display: flex; }
+
+.price-col input { max-width: 120px; }

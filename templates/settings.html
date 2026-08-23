@@ -234,12 +234,12 @@
             </select>
             <input type="text" name="pack_size" value="{{ p.pack_size or '' }}" placeholder="pack size" title="Pack size" style="max-width:80px;">
             <input type="number" step="0.01" min="0" name="purchase_rate" value="{{ p.purchase_rate }}" required title="Purchase (indent) rate" style="max-width:90px;">
-            <input type="number" step="0.01" min="0" name="retail_rate" value="{{ p.retail_rate }}" required title="Retail rate" style="max-width:90px;">
-            <input type="date" name="rate_effective_date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" title="Rate change effective from (only used if a rate above changed)">
+            <input type="date" name="rate_effective_date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" title="Purchase rate change effective from (only used if the rate above changed)">
             <input type="number" step="0.01" min="0" name="opening_stock" value="{{ p.opening_stock }}" required title="Opening stock" style="max-width:90px;">
             <input type="date" name="opening_stock_date" value="{{ p.opening_stock_date.isoformat() if p.opening_stock_date else '' }}" max="{{ today.isoformat() }}" title="Opening stock as of (blank = from the beginning)">
             <input type="number" step="0.01" min="0" name="low_stock_threshold" value="{{ p.low_stock_threshold }}" required title="Low-stock alert level">
             <button type="submit" class="btn btn-sm">Save</button>
+            <span class="hint-sm">Purchase (cost) rate only. Selling price is set on the <a href="{{ url_for('inventory') }}">Inventory page</a>.</span>
           </form>
         </td>
         <td>

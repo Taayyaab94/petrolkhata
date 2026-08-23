@@ -72,6 +72,7 @@ from ledger_logic import (
     fuel_movement_for_range,
     fuel_rate_cards,
     fuel_sales_for_date,
+    fuel_totals_by_type,
     handover_rows_for_date,
     humanize_since,
     inventory_insights,
@@ -1705,13 +1706,27 @@ def settings_add_product():
 @login_required
 @owner_required
 def settings_edit_product(product_id):
+    """Edit a product's catalogue details and its PURCHASE (indent) rate.
+
+    The selling price is deliberately NOT editable here any more - it
+    lives on the Inventory page (inventory_update_prices()), where the
+    owner sets an effective date first and sees current prices and stock
+    beside each other. Settings keeps the cost side only.
+
+    Because ProductRateHistory stores both rates in one row, this route
+    must still supply a retail rate when it writes history - and it takes
+    the one already in effect ON THE EFFECTIVE DATE via
+    product_rates_on_date(), passed straight through. Anything else
+    (Product.retail_rate, or worse a form field) would let a cost
+    correction silently reset the selling price the owner set on
+    Inventory.
+    """
     product = db.session.get(Product, product_id) or abort(404)
     name = request.form.get("name", "").strip()
     category = request.form.get("category", product.category).strip() or product.category
     pack_size = request.form.get("pack_size", "").strip() or None
     unit = request.form.get("unit", product.unit).strip() or product.unit
     purchase_rate = request.form.get("purchase_rate", type=float)
-    retail_rate = request.form.get("retail_rate", type=float)
     opening_stock = request.form.get("opening_stock", type=float)
     low_stock_threshold = request.form.get("low_stock_threshold", type=float)
     stock_date, date_error = parse_stock_date(request.form.get("opening_stock_date", ""))
@@ -1729,14 +1744,6 @@ def settings_edit_product(product_id):
         flash(f"A product named \"{existing.name}\" already exists.", "error")
     elif purchase_rate is None or purchase_rate < 0:
         flash("Please enter a valid purchase rate.", "error")
-    elif retail_rate is None or retail_rate < 0:
-        flash("Please enter a valid retail rate.", "error")
-    elif retail_rate < purchase_rate:
-        flash(
-            "Retail rate can't be less than the purchase rate - that's a guaranteed "
-            "loss and almost always a typo.",
-            "error",
-        )
     elif opening_stock is None or opening_stock < 0:
         flash("Please enter a valid opening stock.", "error")
     elif date_error == "invalid":
@@ -1762,8 +1769,12 @@ def settings_edit_product(product_id):
         # Only a genuine rate CHANGE creates history - editing a typo'd
         # name/pack/threshold alongside unchanged rates must not leave a
         # spurious ProductRateHistory row behind.
-        if purchase_rate != product.purchase_rate or retail_rate != product.retail_rate:
-            record_product_rates(product, purchase_rate, retail_rate, rate_effective or date.today())
+        if purchase_rate != product.purchase_rate:
+            # The retail rate in effect on the SAME date this cost change
+            # lands on, written back unchanged - see the docstring.
+            effective_on = rate_effective or date.today()
+            _, existing_retail = product_rates_on_date(product, effective_on)
+            record_product_rates(product, purchase_rate, existing_retail, effective_on)
         db.session.commit()
         flash(f"Updated {product.label}.", "success")
 
@@ -5651,6 +5662,25 @@ def inventory():
     )
     product_rows = product_stock_summary(today, products=products)
 
+    # Rates for the non-fuel table, resolved in ONE bulk pass rather than
+    # per row in the template: product_rates_on_date() is a query each,
+    # and calling it inside a Jinja loop is exactly the N+1 storm
+    # product_rate_resolver() exists to prevent. The retail rate is what
+    # the shop sells at today; stock value is deliberately valued at the
+    # PURCHASE rate (cost), matching how fuel stock value and dead_stock()
+    # are valued elsewhere on this same page - mixing a retail-valued
+    # figure in beside cost-valued ones would make the page's money
+    # columns incomparable.
+    resolve_product_rate = product_rate_resolver(products)
+    product_stock_value = 0.0
+    for row in product_rows:
+        purchase_rate, retail_rate = resolve_product_rate(row["product"], today)
+        row["purchase_rate"] = purchase_rate
+        row["retail_rate"] = retail_rate
+        row["stock_value"] = round(row["on_hand"] * (purchase_rate or 0.0), 2)
+        product_stock_value += row["stock_value"]
+    product_stock_value = round(product_stock_value, 2)
+
     insights = inventory_insights(today, tank_rows, variance_rows, product_rows)
 
     # "As at" the newest ledger entry that could move stock - falls back
@@ -5665,6 +5695,11 @@ def inventory():
 
     total_stock_value = round(sum(r["value"] for r in tank_rows), 2)
     total_liters = round(sum(r["stock"] for r in tank_rows), 2)
+    # One headline card per fuel type instead of one combined litre count
+    # - see fuel_totals_by_type(). total_liters stays in the context (the
+    # template still uses it for the "across N tanks" cross-check line and
+    # it costs nothing), it just no longer gets a card of its own.
+    fuel_totals = fuel_totals_by_type(tank_rows)
     fuel_types = FuelType.query.order_by(FuelType.name).all()
 
     return render_template(
@@ -5681,13 +5716,105 @@ def inventory():
         as_at_date=as_at_date,
         total_stock_value=total_stock_value,
         total_liters=total_liters,
+        fuel_totals=fuel_totals,
         fuel_types=fuel_types,
         today=today,
         dispensers=dispensers,
         recent_purchases=recent_purchases,
         suppliers=suppliers,
         product_rows=product_rows,
+        product_stock_value=product_stock_value,
     )
+
+
+@app.route("/inventory/update-prices", methods=["POST"])
+@login_required
+@owner_required
+def inventory_update_prices():
+    """Set new SELLING (retail) prices for non-fuel products, effective
+    from a date the owner picks - the only place selling prices are
+    edited now that Settings has been reduced to cost/indent rates.
+
+    Two things this route is careful about:
+
+    ALL-OR-NOTHING. A price update is a batch the owner types in one go,
+    so a single bad cell aborts the whole submission with nothing written.
+    Half-applying it would leave the owner with no way to tell which
+    products took the new price and which kept the old one, and the fix
+    (retyping the batch) would then double-write history rows for the ones
+    that did land. Everything is therefore validated into a pending list
+    BEFORE any record_product_rates() call.
+
+    THE PURCHASE RATE IS PASSED THROUGH UNCHANGED. ProductRateHistory
+    carries both rates in one row, so writing a retail-only change still
+    has to supply a purchase rate - and it must be the one in effect ON
+    THE EFFECTIVE DATE (product_rates_on_date(), not Product.purchase_rate,
+    which is only the current-rate cache and would be wrong for a
+    backdated change). Getting this wrong would silently reset costs and
+    corrupt every margin figure computed after that date.
+
+    Blank inputs mean "leave this product's price alone" and are skipped
+    entirely - the owner should never have to retype prices that are not
+    changing. Product.query is tenant-scoped, so an id from another pump
+    resolves to None here and is rejected rather than silently skipped:
+    silence would tell the owner the price was set when it was not.
+    """
+    # parse_date_param() falls back to TODAY on a blank or malformed
+    # value, which would silently apply the batch on the wrong date - so
+    # it is given date.min as the fallback purely as a sentinel meaning
+    # "did not parse", and that is rejected below. (A literal 0001-01-01
+    # typed by hand is rejected too; that is not a real effective date.)
+    raw_date = (request.form.get("effective_date") or "").strip()
+    effective_date = parse_date_param(raw_date, fallback=date.min)
+    if effective_date == date.min:
+        flash("Please pick a valid date for the new prices to take effect from.", "error")
+        return redirect(url_for("inventory"))
+
+    pending = []
+    for field, raw_value in request.form.items():
+        if not field.startswith("new_price_"):
+            continue
+        raw_value = (raw_value or "").strip()
+        if not raw_value:
+            continue  # blank = leave this product's price alone
+
+        try:
+            product_id = int(field[len("new_price_"):])
+        except ValueError:
+            flash("That price form was malformed - nothing was changed.", "error")
+            return redirect(url_for("inventory"))
+
+        product = Product.query.filter_by(id=product_id).first()
+        if product is None:
+            flash("One of those products no longer exists - nothing was changed.", "error")
+            return redirect(url_for("inventory"))
+
+        try:
+            new_retail = float(raw_value)
+        except ValueError:
+            flash(f"\"{raw_value}\" isn't a valid price for {product.label} - nothing was changed.", "error")
+            return redirect(url_for("inventory"))
+        if new_retail <= 0:
+            flash(f"The new selling price for {product.label} has to be more than 0 - nothing was changed.", "error")
+            return redirect(url_for("inventory"))
+
+        pending.append((product, new_retail))
+
+    if not pending:
+        flash("No new prices were entered, so nothing was changed.", "info")
+        return redirect(url_for("inventory"))
+
+    for product, new_retail in pending:
+        purchase_rate, _ = product_rates_on_date(product, effective_date)
+        record_product_rates(product, purchase_rate, new_retail, effective_date)
+    db.session.commit()
+
+    flash(
+        f"Updated the selling price of {len(pending)} product(s), effective "
+        f"{effective_date.strftime('%d %b %Y')}.",
+        "success",
+    )
+    return redirect(url_for("inventory"))
 
 
 # ------------------------------------------------------------ accounts ---
