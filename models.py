@@ -326,6 +326,20 @@ class Account(TenantScoped, db.Model):
     # changes nothing whatsoever for existing data - that is the whole
     # point of it.
     parent_account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=True)
+    # Free-text context about this account, for whatever the owner needs
+    # to remember about it that no other column can hold - "pays on the
+    # 5th", "brother of the Shell pump owner", "always disputes the
+    # weighbridge slip". Deliberately NOT a transaction note (every entry
+    # already has its own `note`) and deliberately not parsed, searched or
+    # totalled by anything: it is a sticky note on the khata, nothing
+    # more, so it can never affect a number.
+    #
+    # Nullable with no server_default and no backfill, for exactly the
+    # reason parent_account_id above is: adding it must change nothing at
+    # all for the rows that already exist. NULL and "" both mean "no
+    # note"; the edit route normalises a blank textarea back to NULL so
+    # the two do not both accumulate in the table.
+    notes = db.Column(db.Text, nullable=True)
     children = db.relationship(
         "Account",
         backref=db.backref("parent", remote_side=[id]),
@@ -404,6 +418,18 @@ class Account(TenantScoped, db.Model):
         # above - account_id is only ever set on an OtherIncome row for that
         # method.
         other_income_credit_total = sum(oi.amount for oi in self.other_income_entries if oi.method == "credit")
+        # A pass-through tanker deal (see TankerDeal) can touch this
+        # account from EITHER side, and the two must never cross - hence
+        # the two distinct backrefs. A tanker bought on credit is money
+        # the pump owes this supplier, exactly the same direction as
+        # purchases_credit_total above; a tanker sold on credit is money
+        # this customer owes the pump, exactly the same direction as
+        # credit_given_total. supplier_account_id/customer_account_id are
+        # only ever set for their own "credit" payment type, so every row
+        # in either backref already qualifies with no filter needed - same
+        # convention as product_sales_credit_total above.
+        tanker_purchases_credit_total = sum(d.purchase_cost for d in self.tanker_purchases)
+        tanker_sales_credit_total = sum(d.sale_amount for d in self.tanker_sales)
         return round(
             self.opening_balance
             + credit_given_total
@@ -415,7 +441,9 @@ class Account(TenantScoped, db.Model):
             - sales_returns_total
             + product_sales_credit_total
             - product_purchases_credit_total
-            + other_income_credit_total,
+            + other_income_credit_total
+            - tanker_purchases_credit_total
+            + tanker_sales_credit_total,
             2,
         )
 
@@ -521,6 +549,121 @@ class DirectSale(TenantScoped, db.Model):
     tank = db.relationship("Tank", backref="direct_sales")
     shift = db.relationship("Shift")
     user = db.relationship("User")
+
+
+class TankerDeal(TenantScoped, db.Model):
+    """A pass-through deal: fuel bought from a supplier and sent STRAIGHT
+    to a customer. It never enters the pump's tanks and never goes through
+    a nozzle, so the pump's profit on it is purely
+    `sale_amount - purchase_cost`.
+
+    WHY THIS IS ITS OWN MODEL, NOT A DirectSale VARIANT
+    ---------------------------------------------------
+    Every existing fuel-sale kind (Sale, DirectSale) does two things this
+    one must NOT do: it reduces a tank's book stock, and it is costed per
+    litre against that fuel's weighted-average purchase cost. A
+    pass-through deal does neither - the fuel was never in a tank, and its
+    cost is the exact price paid for that ONE tanker, not a weighted
+    average of every delivery ever taken. Folding it into DirectSale would
+    deduct stock that never existed and would corrupt every
+    margin-per-litre figure on the Dashboard, the Monthly Report and the
+    Inventory page.
+
+    `liters` IS INFORMATIONAL ONLY
+    ------------------------------
+    It is recorded so the deal reads like a real tanker load on the day's
+    feed and on the customer's history, and for nothing else. It is
+    deliberately NOT fed into any litres-sold or margin-per-litre figure:
+    those are all about fuel DISPENSED FROM THE PUMP'S OWN TANKS, and
+    mixing a pass-through tanker into them would make "margin per litre"
+    mean two different things at once (a per-litre spread earned on
+    pumped fuel, and a lump-sum spread earned on a load that was never
+    pumped).
+
+    WHERE THIS MODEL DELIBERATELY DOES NOT APPEAR
+    ---------------------------------------------
+    Stock, because the fuel never entered a tank: book_stock(),
+    tank_stock_rows(), stock_series(), fuel_movement_for_range().
+
+    Per-litre / tank-based fuel figures, because this deal carries its own
+    exact cost rather than a weighted average and dispensed no litres:
+    cogs_for_period(), fuel_sales_for_date(), sales_breakdown_for_date(),
+    daily_margin()'s per-fuel/per-litre detail (`by_fuel`, `fuel_liters`,
+    `margin_per_liter`), fuel_rate_cards(), revenue_mix_for_date()'s fuel
+    segment, and reprice_entries().
+
+    Those exclusions are as deliberate, and as load-bearing, as the
+    inclusions below - a TankerDeal leaking into any of them is a real
+    bug, not a missing feature.
+
+    WHERE IT DOES APPEAR (money only)
+    ---------------------------------
+    Account.balance + credit_aging() + account_ledger_events() (a credit
+    purchase is money owed to the supplier, a credit sale is money owed by
+    the customer); the cash and bank balance/movement functions (a
+    cash/bank-method side really does move cash or a bank account); and
+    profit, as its OWN margin category - daily_margin()["tanker_margin"],
+    the Daily/Monthly Report contexts, and the Dashboard/Trends profit
+    series - never folded into fuel margin.
+    """
+
+    id = db.Column(db.Integer, primary_key=True)
+    entry_date = db.Column(db.Date, nullable=False)
+    fuel_type_id = db.Column(db.Integer, db.ForeignKey("fuel_type.id"), nullable=False)
+    # Informational only - see the docstring above.
+    liters = db.Column(db.Float, nullable=False)
+
+    # --- the buy side ---
+    purchase_cost = db.Column(db.Float, nullable=False)
+    purchase_payment_type = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank | credit
+    purchase_bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
+    # Set ONLY when purchase_payment_type == "credit" - the same
+    # "account_id is only ever populated for one method" convention
+    # ProductSale/OtherIncome/SalesReturn already use, which is what lets
+    # Account.balance and credit_aging() sum the `tanker_purchases`
+    # backref with no method filter of their own.
+    supplier_account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=True)
+
+    # --- the sell side ---
+    sale_amount = db.Column(db.Float, nullable=False)
+    sale_payment_type = db.Column(db.String(10), nullable=False, default="cash")  # cash | bank | credit
+    sale_bank_account_id = db.Column(db.Integer, db.ForeignKey("bank_account.id"), nullable=True)
+    # Set ONLY when sale_payment_type == "credit" - same convention as
+    # supplier_account_id above.
+    customer_account_id = db.Column(db.Integer, db.ForeignKey("account.id"), nullable=True)
+
+    note = db.Column(db.String(200))
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.now)
+
+    fuel_type = db.relationship("FuelType")
+    # TWO FKs to account and TWO to bank_account, so every one of these
+    # four relationships MUST name its own foreign_keys explicitly -
+    # without it SQLAlchemy cannot tell which column joins which side and
+    # raises at mapper-configuration time (i.e. at import), not at query
+    # time. The backref names are deliberately distinct
+    # (tanker_purchases vs tanker_sales) so the supplier side and the
+    # customer side can never cross in Account.balance/credit_aging().
+    supplier = db.relationship(
+        "Account", foreign_keys=[supplier_account_id], backref="tanker_purchases"
+    )
+    customer = db.relationship(
+        "Account", foreign_keys=[customer_account_id], backref="tanker_sales"
+    )
+    purchase_bank_account = db.relationship(
+        "BankAccount", foreign_keys=[purchase_bank_account_id], backref="tanker_purchases_paid"
+    )
+    sale_bank_account = db.relationship(
+        "BankAccount", foreign_keys=[sale_bank_account_id], backref="tanker_sales_received"
+    )
+    user = db.relationship("User")
+
+    @property
+    def margin(self):
+        """The whole profit of this deal, computed - never stored. Same
+        rule as every other total in this app: derived fresh on every
+        read, so editing either side always ripples through immediately."""
+        return round(self.sale_amount - self.purchase_cost, 2)
 
 
 class CreditGiven(TenantScoped, db.Model):
@@ -825,6 +968,15 @@ class BankAccount(TenantScoped, db.Model):
         # ledger_other_income() in app.py) - no method filter needed here,
         # same reasoning as product_sales_total's docstring above it.
         other_income_total = sum(oi.amount for oi in self.other_income_entries)
+        # Bank-method sides of a pass-through tanker deal (see TankerDeal).
+        # purchase_bank_account_id / sale_bank_account_id are only ever set
+        # for their own side's "bank" payment type, so neither backref
+        # needs a filter - same reasoning other_income_total above uses.
+        # The two are separate backrefs, not one shared list, so a deal
+        # whose purchase and sale both route through THIS bank still nets
+        # correctly (out by cost, in by sale) rather than counting once.
+        tanker_purchases_total = sum(d.purchase_cost for d in self.tanker_purchases_paid)
+        tanker_sales_total = sum(d.sale_amount for d in self.tanker_sales_received)
         return round(
             self.opening_balance
             + sales_total
@@ -838,7 +990,9 @@ class BankAccount(TenantScoped, db.Model):
             - sales_returns_total
             + product_sales_total
             - product_purchases_total
-            + other_income_total,
+            + other_income_total
+            - tanker_purchases_total
+            + tanker_sales_total,
             2,
         )
 

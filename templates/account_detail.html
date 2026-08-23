@@ -53,6 +53,13 @@
   {% endif %}
 </div>
 
+{% if account.notes %}
+<div class="panel panel-tight account-note-panel">
+  <div class="account-note-label">Note</div>
+  <div class="account-note-body">{{ account.notes }}</div>
+</div>
+{% endif %}
+
 {% if current_user.is_owner %}
 <div class="panel">
   <div class="panel-head"><h3>Account Details</h3></div>
@@ -78,6 +85,9 @@
         <option value="{{ p.id }}" {{ "selected" if account.parent_account_id == p.id }}>{{ p.name }}</option>
         {% endfor %}
       </select>
+    </label>
+    <label class="form-grid-wide">Notes (optional)
+      <textarea name="notes" rows="3" placeholder="Anything worth remembering about this account - payment habits, who to call, disputes.">{{ account.notes or '' }}</textarea>
     </label>
     <button type="submit" class="btn btn-sm">Save Details</button>
   </form>
@@ -142,40 +152,7 @@
 {% if current_user.is_owner %}
 <div class="panel">
   <div class="panel-head"><h3>Pay for Sub-accounts</h3></div>
-  <p class="hint">One lump sum, split across the ticked sub-accounts, oldest debt first. Each share is recorded as an ordinary receipt on that sub-account - exactly as if you had entered it there by hand. The total can't exceed what the ticked sub-accounts currently owe.</p>
-  <form method="post" action="{{ url_for('account_group_payment', account_id=account.id) }}" class="form-grid">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <label>Date
-      <input type="date" name="entry_date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" required>
-    </label>
-    <label>Amount (Rs)
-      <input type="number" step="0.01" min="0.01" name="amount" required>
-    </label>
-    <label>Paid via
-      <select name="paid_via">
-        <option value="cash">Cash</option>
-        {% for b in bank_accounts %}
-        <option value="{{ b.id }}">{{ b.name }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Note (optional)
-      <input type="text" name="note">
-    </label>
-    <div style="grid-column: 1 / -1;">
-      <div class="hint-sm">Sub-accounts to pay for</div>
-      <div class="field-row" style="margin-top:6px;">
-        {% for c in children %}
-        <label style="display:inline-flex; gap:6px; align-items:center;">
-          <input type="checkbox" name="sub_account_ids" value="{{ c.id }}">
-          {{ c.name }} <span class="hint-sm">Rs {{ (c.balance)|fmt }}</span>
-        </label>
-        {% endfor %}
-      </div>
-      <div class="hint" style="margin-top:6px;">The amount is split across the ticked sub-accounts, oldest debt first.</div>
-    </div>
-    <button type="submit" class="btn">Record Group Payment</button>
-  </form>
+  <p class="hint">Record a payment for this group from the <a href="{{ url_for('ledger') }}">Ledger</a> - pick {{ account.name }} in the Receipt (or Payment to Supplier) form and it will offer to split the money across these sub-accounts.</p>
 </div>
 {% endif %}
 {% endif %}
@@ -239,14 +216,22 @@
         <td><span class="badge badge-low">Product Purchase (Credit)</span></td>
         <td>{{ (e.obj.quantity)|fmt }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
         <td>{{ "+" if -e.obj.total_cost >= 0 }}{{ (-e.obj.total_cost)|fmt }}</td>
+        {% elif e.kind == "tanker_sale" %}
+        <td><span class="badge badge-low">Tanker Deal (Credit Sale)</span></td>
+        <td>{{ (e.obj.liters)|fmt }} L {{ e.obj.fuel_type.name }} straight from the supplier - never entered a tank{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>+{{ (e.obj.sale_amount)|fmt }}</td>
+        {% elif e.kind == "tanker_purchase" %}
+        <td><span class="badge badge-low">Tanker Deal (Credit Purchase)</span></td>
+        <td>{{ (e.obj.liters)|fmt }} L {{ e.obj.fuel_type.name }} sent straight to a customer - never entered a tank{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>-{{ (e.obj.purchase_cost)|fmt }}</td>
         {% endif %}
         <td>{{ (e.running_balance)|fmt }}</td>
         <td>{{ e.obj.user.label if e.obj and e.obj.user else "-" }}</td>
         {% if current_user.is_owner %}
-        <td>{% if e.kind not in ("opening", "sales_return", "product_sale", "product_purchase") %}<a href="#" class="edit-toggle">Edit</a>{% endif %}</td>
+        <td>{% if e.kind not in ("opening", "sales_return", "product_sale", "product_purchase", "other_income", "tanker_sale", "tanker_purchase") %}<a href="#" class="edit-toggle">Edit</a>{% endif %}</td>
         {% endif %}
       </tr>
-      {% if current_user.is_owner and e.kind not in ("opening", "sales_return", "product_sale", "product_purchase") %}
+      {% if current_user.is_owner and e.kind not in ("opening", "sales_return", "product_sale", "product_purchase", "other_income", "tanker_sale", "tanker_purchase") %}
       {% set delete_kind = {"credit": "credit", "receipt": "receipt", "purchase": "purchase", "supplier_payment": "supplier-payment", "employee_loan": "employee-loan", "salary": "salary"}[e.kind] %}
       <tr class="edit-row" style="display:none;">
         <td colspan="7">

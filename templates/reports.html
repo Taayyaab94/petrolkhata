@@ -69,6 +69,11 @@
     <div class="label">Other Income</div>
     <div class="value">Rs {{ (total_other_income)|fmt }}</div>
   </div>
+  <div class="stat-card accent-green">
+    <div class="label">Tanker Deal Margin</div>
+    <div class="value">Rs {{ (tanker_margin)|fmt }}</div>
+    <div class="sub">Rs {{ (tanker_revenue)|fmt }} sold &minus; Rs {{ (tanker_cost)|fmt }} cost &middot; {{ (tanker_liters)|fmt }} L pass-through</div>
+  </div>
   <div class="stat-card accent-red">
     <div class="label">Product Purchases</div>
     <div class="value">Rs {{ (total_product_purchases_cost)|fmt }}</div>
@@ -204,6 +209,29 @@
         </tr>
         {% else %}
         <tr><td colspan="5">No non-fuel sales on this date.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Direct Sales from Tanker</h3></div>
+    <p class="hint-sm">Pass-through deals: fuel that went straight from the supplier to the customer without entering a tank. Deliberately absent from Total Sales, Litres Sold and every tank figure above - only the margin is this pump&#39;s.</p>
+    <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Fuel</th><th>Litres</th><th>Sold (Rs)</th><th>Cost (Rs)</th><th>Margin (Rs)</th></tr></thead>
+      <tbody>
+        {% for d in tanker_deals %}
+        <tr>
+          <td>{{ d.fuel_type.name }}{% if d.note %} &middot; {{ d.note }}{% endif %}</td>
+          <td>{{ (d.liters)|fmt }}</td>
+          <td>{{ (d.sale_amount)|fmt }}</td>
+          <td>{{ (d.purchase_cost)|fmt }}</td>
+          <td>{{ (d.margin)|fmt }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">No tanker deals on this date.</td></tr>
         {% endfor %}
       </tbody>
     </table>

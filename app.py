@@ -153,6 +153,7 @@ from models import (
     Tank,
     TankDip,
     TankDipChart,
+    TankerDeal,
     User,
 )
 
@@ -1206,6 +1207,10 @@ BACKUP_MODELS = [
     ProductPurchase,
     ProductSale,
     OtherIncome,
+    # Pass-through tanker deals - not a stock table, but it carries real
+    # money on both sides, so a backup that skipped it would restore an
+    # incomplete ledger.
+    TankerDeal,
 ]
 
 
@@ -2317,6 +2322,13 @@ def get_feed_for_date(entry_date, full_visibility):
         events.append({"kind": "other_income", "sort": oi.recorded_at, "obj": oi})
     for nt in NozzleTesting.query.filter_by(entry_date=entry_date).all():
         events.append({"kind": "nozzle_testing", "sort": nt.recorded_at, "obj": nt})
+    # A pass-through tanker deal (see TankerDeal in models.py) shows on
+    # the day's feed like any other entry, but as ONE row carrying its own
+    # margin rather than a sale row and a purchase row - it is a single
+    # deal, and splitting it would make it look like the pump both bought
+    # stock and dispensed fuel, which is exactly what it did not do.
+    for td in TankerDeal.query.filter_by(entry_date=entry_date).all():
+        events.append({"kind": "tanker_deal", "sort": td.recorded_at, "obj": td})
 
     if full_visibility:
         for e in Expense.query.filter_by(entry_date=entry_date).all():
@@ -2525,6 +2537,27 @@ def ledger():
     accounts_supplier_first = prioritize_accounts(accounts, "supplier")
     accounts_employee_first = prioritize_accounts(accounts, "employee")
     accounts_owner_first = prioritize_accounts(accounts, "owner")
+    # Everything the Receipt / Payment-to-Supplier forms need to reshape
+    # themselves in place when the picked account turns out to be a parent
+    # with sub-accounts. Built here, in one pass over the account list
+    # already loaded above, rather than queried per account: Account.children
+    # is lazy="selectin", so the whole tree came back with that one query.
+    #
+    # Only parents appear as keys - the overwhelmingly common childless
+    # account is simply absent from the blob, and the form's JS treats
+    # "not in here" as "behave exactly as it always has". That is what
+    # keeps the ordinary single-amount path untouched.
+    account_groups = {
+        str(a.id): {
+            "name": a.name,
+            "children": [
+                {"id": c.id, "name": c.name, "balance": c.balance}
+                for c in sorted(a.children, key=lambda c: c.name.lower())
+            ],
+        }
+        for a in accounts
+        if a.children
+    }
     bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
 
     # Sorted by category first so the Non-Fuel Sale/Product Purchase
@@ -2635,6 +2668,7 @@ def ledger():
         accounts_supplier_first=accounts_supplier_first,
         accounts_employee_first=accounts_employee_first,
         accounts_owner_first=accounts_owner_first,
+        account_groups=account_groups,
         bank_accounts=bank_accounts,
         bank_balances_by_id=bank_balances_by_id,
         products=products,
@@ -3555,9 +3589,164 @@ def resolve_receipt_account(form):
     return resolve_account(form, "account_id", "new_account_name", "customer", "account", "new_account_phone")
 
 
+def resolve_group_allocation(parent, form, entry_date, amount, direction="receivable"):
+    """Work out how one payment recorded against a PARENT account should be
+    split across its sub-accounts. Returns (allocations, total, error) where
+    allocations is the [{"account": <Account>, "amount": float}] shape
+    allocate_group_payment() already produces, so both callers can turn it
+    into ordinary per-child rows without knowing which mode produced it.
+
+    This decides only the split - it creates no rows and moves no money. The
+    caller writes one perfectly ordinary Receipt / SupplierPayment per
+    allocation, exactly the row that typing that payment in by hand on that
+    sub-account would have created, so every balance, statement and report
+    downstream keeps seeing plain entries and needs to know nothing at all
+    about groups.
+
+    Two modes, from the form's alloc_mode field:
+
+    - "auto" (default): one lump sum, split oldest-debt-first by
+      allocate_group_payment() (ledger_logic.py). The lump sum is the
+      form's ordinary single Amount field.
+    - "manual": one figure typed per sub-account, in sub_amount_<child_id>
+      fields. Blank or 0 means "this sub-account is not part of this
+      payment" - that is the whole of the partial-group case, which is why
+      there is no separate tick-box step. The total is whatever the typed
+      figures add up to; the single Amount field is not used at all.
+
+    OVER-PAYMENT IS REFUSED IN BOTH MODES, never absorbed. In auto mode
+    that is allocate_group_payment()'s leftover; in manual mode it is the
+    per-child check that no typed figure exceeds that child's own balance.
+    They are the same rule seen from two angles: this app never silently
+    invents an advance or a credit balance on an account nobody chose. An
+    owner who genuinely wants to overpay records a direct entry on that
+    one sub-account, where the resulting negative balance is an explicit,
+    visible decision.
+
+    DELIBERATE: a parent that carries its OWN direct balance as well as
+    having children is not paid down by this at all - in either mode the
+    money goes only to the sub-accounts. A parent's own balance is settled
+    by picking... nothing else; there is no way to reach it from here,
+    because a form that sometimes silently paid the parent and sometimes
+    the children would be unreadable. To settle a parent's own balance,
+    move its sub-accounts out first, or record against a sub-account.
+
+    Sub-accounts are one level deep by construction (see _validate_parent),
+    so there is no recursion to do here.
+
+    DIRECTION. Account.balance is positive when the account owes the pump
+    and negative when the pump owes the account, so "how much can this
+    child absorb" is read off the opposite sign on the two forms. The
+    Receipt form takes the default direction="receivable"; the
+    Payment-to-Supplier form passes direction="payable", where a child's
+    outstanding figure - and therefore the manual-mode per-child cap - is
+    `-balance`. Both modes must agree on this or the two over-payment
+    refusals would disagree with each other: capping a supplier against
+    its raw (negative) balance refuses every payment, which is the bug
+    this parameter exists to fix.
+    """
+    children = sorted(parent.children, key=lambda c: c.name.lower())
+    alloc_mode = form.get("alloc_mode", "auto")
+    payable = direction == "payable"
+
+    def outstanding_for(child):
+        """What this child can absorb in THIS direction, as a positive
+        number - always 0 or more, so a wrong-signed child simply caps at
+        zero and takes no part in the payment."""
+        balance = child.balance
+        return max(round(-balance if payable else balance, 2), 0.0)
+
+    if alloc_mode != "manual":
+        if not amount or amount <= 0:
+            return None, 0.0, "Amount must be a positive number."
+        allocations, leftover = allocate_group_payment(children, amount, entry_date, direction=direction)
+        if leftover > 0.01:
+            owed = round(amount - leftover, 2)
+            direction_phrase = "owed to" if payable else "owed across"
+            return None, 0.0, (
+                f"Rs {format_number(amount)} is more than the Rs {format_number(owed)} "
+                f"currently {direction_phrase} {parent.name}'s sub-accounts."
+            )
+        return allocations, round(amount, 2), None
+
+    children_by_id = {c.id: c for c in children}
+    typed = {}
+    for key in form:
+        if not key.startswith("sub_amount_"):
+            continue
+        try:
+            child_id = int(key[len("sub_amount_") :])
+        except ValueError:
+            child_id = None
+        # Not silently dropped: a posted field naming something that isn't
+        # a sub-account of THIS parent means the form was tampered with or
+        # is stale against a regrouping that happened in another tab, and
+        # quietly ignoring it would record a payment whose shape the owner
+        # did not actually authorise.
+        if child_id is None or child_id not in children_by_id:
+            return None, 0.0, f"One of the submitted sub-accounts doesn't belong to {parent.name}."
+        typed[child_id] = form.get(key, "").strip()
+
+    allocations = []
+    # Iterate children (not the form) so the resulting rows land in a
+    # stable, name-sorted order regardless of how the browser serialised
+    # the fields.
+    for child in children:
+        raw = typed.get(child.id, "")
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            return None, 0.0, f"\"{raw}\" is not a valid amount for {child.name}."
+        if value == 0:
+            continue
+        if value < 0:
+            return None, 0.0, f"The amount for {child.name} can't be negative."
+        # The manual-mode equivalent of auto mode's leftover check, read
+        # in whichever direction this form is running in.
+        cap = outstanding_for(child)
+        if value > cap + 0.01:
+            owes_phrase = "is currently owed" if payable else "currently owes"
+            return None, 0.0, (
+                f"Rs {format_number(value)} is more than the Rs {format_number(cap)} "
+                f"{child.name} {owes_phrase}."
+            )
+        allocations.append({"account": child, "amount": round(value, 2)})
+
+    if not allocations:
+        return None, 0.0, "Enter an amount for at least one sub-account."
+
+    return allocations, round(sum(a["amount"] for a in allocations), 2), None
+
+
+def group_allocation_summary(parent, total, allocations, verb):
+    """The flash line for a completed group payment - names every
+    sub-account and its share, because the whole point of the group form
+    is that the owner typed one number and the app decided several, and a
+    decision the app made on the owner's behalf has to be shown back."""
+    parts = ", ".join(f"{a['account'].name} Rs {format_number(a['amount'])}" for a in allocations)
+    return (
+        f"{verb} Rs {format_number(total)} across {len(allocations)} of "
+        f"{parent.name}'s sub-account(s): {parts}."
+    )
+
+
 @app.route("/ledger/receipt", methods=["POST"])
 @login_required
 def ledger_receipt():
+    """Money received from an account. When the picked account is an
+    ordinary (childless) one - which is every account unless someone has
+    deliberately grouped some - this behaves exactly as it always has: one
+    amount, one Receipt row, nothing else consulted.
+
+    When the picked account is a PARENT with sub-accounts, the same form
+    instead records one ordinary Receipt per sub-account, split by
+    resolve_group_allocation() (see its docstring for the two modes and
+    for why an over-payment is refused rather than absorbed). Nothing new
+    is stored either way - a group payment is just several plain receipts
+    written in one go.
+    """
     entry_date = parse_date_param(request.form.get("entry_date"))
     account, error = resolve_receipt_account(request.form)
     amount = request.form.get("amount", type=float)
@@ -3567,6 +3756,34 @@ def ledger_receipt():
     if error:
         db.session.rollback()
         flash(error, "error")
+    elif account.children:
+        allocations, total, group_error = resolve_group_allocation(
+            account, request.form, entry_date, amount
+        )
+        if group_error:
+            # resolve_payment_method() can db.session.add() a quick-added
+            # bank account, so every rejection rolls back rather than
+            # leaving that half-made row sitting in the session.
+            db.session.rollback()
+            flash(group_error, "error")
+        elif method_error:
+            db.session.rollback()
+            flash(method_error, "error")
+        else:
+            for allocation in allocations:
+                db.session.add(
+                    Receipt(
+                        account_id=allocation["account"].id,
+                        entry_date=entry_date,
+                        amount=allocation["amount"],
+                        method=method,
+                        bank_account_id=bank_account.id if bank_account else None,
+                        note=note or None,
+                        user_id=current_user.id,
+                    )
+                )
+            db.session.commit()
+            flash(group_allocation_summary(account, total, allocations, "Recorded"), "success")
     elif not amount or amount <= 0:
         db.session.rollback()
         flash("Amount must be a positive number.", "error")
@@ -3917,6 +4134,140 @@ def ledger_purchase():
     return redirect(url_for("ledger", date=entry_date))
 
 
+@app.route("/ledger/tanker-sale", methods=["POST"])
+@login_required
+@owner_required
+def ledger_tanker_sale():
+    """Record a Direct Sale from Tanker - fuel bought from a supplier and
+    sent straight to a customer without ever entering the pump's tanks
+    (see TankerDeal's docstring in models.py for why this is its own
+    entry kind and not a DirectSale).
+
+    Owner-only, matching ledger_purchase(): this commits the pump to a
+    supplier bill, which is the same reason a fuel delivery is owner-only.
+
+    There is deliberately NO shift field. A shift exists to split a day's
+    DISPENSING between crews; nothing was dispensed here, so attributing
+    the deal to a shift would put pass-through money into a shift's cash
+    handover reconciliation, where it does not belong.
+
+    The two sides are resolved independently - each has its own payment
+    type, its own bank picker (two DISTINCT form field names,
+    purchase_paid_via / sale_paid_via, so one form can carry both without
+    resolve_payment_method() reading the wrong one) and its own account
+    picker. A deal can perfectly well be bought in cash and sold on
+    credit, or bought on credit and received into a bank.
+
+    The cash guard is only applied to a cash-method PURCHASE, exactly as
+    ledger_purchase() applies it, and deliberately against the full
+    purchase_cost rather than the deal's net: the money leaves the drawer
+    when the tanker is paid for, whether or not the customer settles the
+    same day, so netting a credit-sale side against it would wave through
+    an outflow the register genuinely cannot cover.
+    """
+    entry_date = parse_date_param(request.form.get("entry_date"))
+    fuel_type_id = request.form.get("fuel_type_id", type=int)
+    liters = request.form.get("liters", type=float)
+    purchase_cost = request.form.get("purchase_cost", type=float)
+    sale_amount = request.form.get("sale_amount", type=float)
+    note = request.form.get("note", "").strip()
+
+    purchase_payment_type = request.form.get("purchase_payment_type", "cash")
+    if purchase_payment_type not in ("cash", "credit"):
+        purchase_payment_type = "cash"
+    sale_payment_type = request.form.get("sale_payment_type", "cash")
+    if sale_payment_type not in ("cash", "credit"):
+        sale_payment_type = "cash"
+
+    fuel_type = db.session.get(FuelType, fuel_type_id) if fuel_type_id else None
+
+    # Buy side. resolve_payment_method() collapses "cash" vs a chosen bank
+    # into (method, bank_account) - a "bank" method is stored as
+    # purchase_payment_type == "bank" here (unlike StockPurchase, which
+    # keeps a separate method column), so the stored payment type is
+    # always exactly one of cash | bank | credit.
+    supplier = None
+    supplier_error = None
+    purchase_bank_account = None
+    purchase_method_error = None
+    if purchase_payment_type == "credit":
+        supplier, supplier_error = resolve_supplier(request.form)
+    else:
+        purchase_payment_type, purchase_bank_account, purchase_method_error = resolve_payment_method(
+            request.form, field="purchase_paid_via", new_field="new_purchase_bank_account_name"
+        )
+
+    # Sell side, resolved the same way against its own field names.
+    customer = None
+    customer_error = None
+    sale_bank_account = None
+    sale_method_error = None
+    if sale_payment_type == "credit":
+        customer, customer_error = resolve_customer(request.form)
+    else:
+        sale_payment_type, sale_bank_account, sale_method_error = resolve_payment_method(
+            request.form, field="sale_paid_via", new_field="new_sale_bank_account_name"
+        )
+
+    if not fuel_type:
+        db.session.rollback()
+        flash("Please choose a valid fuel type.", "error")
+    elif not liters or liters <= 0:
+        db.session.rollback()
+        flash("Liters must be a positive number.", "error")
+    elif not purchase_cost or purchase_cost <= 0:
+        db.session.rollback()
+        flash(
+            "Purchase cost must be a positive number - without it the amount owed to "
+            "the supplier, and the whole margin on this deal, would silently be zero.",
+            "error",
+        )
+    elif not sale_amount or sale_amount <= 0:
+        db.session.rollback()
+        flash("Sale amount must be a positive number.", "error")
+    elif supplier_error:
+        db.session.rollback()
+        flash(supplier_error, "error")
+    elif purchase_method_error:
+        db.session.rollback()
+        flash(purchase_method_error, "error")
+    elif customer_error:
+        db.session.rollback()
+        flash(customer_error, "error")
+    elif sale_method_error:
+        db.session.rollback()
+        flash(sale_method_error, "error")
+    elif purchase_payment_type == "cash" and would_overdraw_cash(purchase_cost, entry_date):
+        db.session.rollback()
+        flash(cash_shortfall_message(entry_date), "error")
+    else:
+        deal = TankerDeal(
+            entry_date=entry_date,
+            fuel_type_id=fuel_type.id,
+            liters=liters,
+            purchase_cost=purchase_cost,
+            purchase_payment_type=purchase_payment_type,
+            purchase_bank_account_id=purchase_bank_account.id if purchase_bank_account else None,
+            supplier_account_id=supplier.id if supplier else None,
+            sale_amount=sale_amount,
+            sale_payment_type=sale_payment_type,
+            sale_bank_account_id=sale_bank_account.id if sale_bank_account else None,
+            customer_account_id=customer.id if customer else None,
+            note=note or None,
+            user_id=current_user.id,
+        )
+        db.session.add(deal)
+        db.session.commit()
+        margin = round(sale_amount - purchase_cost, 2)
+        flash(
+            f"Tanker deal recorded: sold Rs {format_number(sale_amount)} against "
+            f"Rs {format_number(purchase_cost)} cost - margin Rs {format_number(margin)}.",
+            "success",
+        )
+
+    return redirect(url_for("ledger", date=entry_date))
+
+
 @app.route("/ledger/product-sale", methods=["POST"])
 @login_required
 def ledger_product_sale():
@@ -4144,6 +4495,16 @@ def ledger_product_purchase():
 @login_required
 @owner_required
 def ledger_supplier_payment():
+    """Money paid out to a supplier. Mirrors ledger_receipt() exactly:
+    an ordinary (childless) supplier takes the untouched single-amount
+    path, and a PARENT supplier records one ordinary SupplierPayment per
+    sub-account via resolve_group_allocation().
+
+    The cash-overdraw guard is checked against the TOTAL of the split, not
+    per share, and before any row is written - the till is drained once by
+    the whole payment, so splitting it across sub-accounts must not let a
+    payment through that a single payment of the same size would refuse.
+    """
     entry_date = parse_date_param(request.form.get("entry_date"))
     supplier, error = resolve_supplier(request.form)
     amount = request.form.get("amount", type=float)
@@ -4153,6 +4514,34 @@ def ledger_supplier_payment():
     if error:
         db.session.rollback()
         flash(error, "error")
+    elif supplier.children:
+        allocations, total, group_error = resolve_group_allocation(
+            supplier, request.form, entry_date, amount, direction="payable"
+        )
+        if group_error:
+            db.session.rollback()
+            flash(group_error, "error")
+        elif method_error:
+            db.session.rollback()
+            flash(method_error, "error")
+        elif method == "cash" and would_overdraw_cash(total, entry_date):
+            db.session.rollback()
+            flash(cash_shortfall_message(entry_date), "error")
+        else:
+            for allocation in allocations:
+                db.session.add(
+                    SupplierPayment(
+                        account_id=allocation["account"].id,
+                        entry_date=entry_date,
+                        amount=allocation["amount"],
+                        method=method,
+                        bank_account_id=bank_account.id if bank_account else None,
+                        note=note or None,
+                        user_id=current_user.id,
+                    )
+                )
+            db.session.commit()
+            flash(group_allocation_summary(supplier, total, allocations, "Paid"), "success")
     elif not amount or amount <= 0:
         db.session.rollback()
         flash("Payment amount must be a positive number.", "error")
@@ -4331,6 +4720,7 @@ DELETABLE_ENTRIES = {
     "product-purchase": (ProductPurchase, "product purchase"),
     "nozzle-testing": (NozzleTesting, "testing entry"),
     "other-income": (OtherIncome, "other income entry"),
+    "tanker-deal": (TankerDeal, "tanker deal"),
 }
 
 
@@ -4633,7 +5023,8 @@ def monthly_narrative(start, end, ctx, prior_ctx, prior_month_label, best_day):
                 "title": "The month closed at a loss",
                 "detail": (
                     f"Net profit for {start.strftime('%B %Y')} is Rs {format_number(ctx['net_profit'])}. "
-                    f"Total gross margin Rs {format_number(ctx['total_gross_margin'])} plus other income "
+                    f"Total gross margin Rs {format_number(ctx['total_gross_margin'])}, tanker deal margin "
+                    f"Rs {format_number(ctx['tanker_margin'])} and other income "
                     f"Rs {format_number(ctx['other_income_total'])} did not cover Rs {format_number(ctx['expenses_total'])} "
                     f"of expenses and Rs {format_number(ctx['salaries_total'])} of salaries."
                 ),
@@ -4855,6 +5246,13 @@ def profit_walkthrough(ctx):
     )
     subtotal_row("Total Gross Margin", r["total_gross_margin"], "Fuel + product gross margin")
     add_row(
+        "Tanker Deal Margin", r["tanker_margin"],
+        f"Pass-through deals - Rs {format_number(r['tanker_revenue'])} sold against "
+        f"Rs {format_number(r['tanker_cost'])} cost on {format_number(r['tanker_liters'])} L. "
+        "No tank stock involved: this fuel went straight from the supplier to the "
+        "customer, so it is not in Fuel Revenue or Cost of Fuel Sold above.",
+    )
+    add_row(
         "Other Income", r["other_income_total"],
         "Rent, side-business share and similar - no associated cost",
     )
@@ -4862,7 +5260,7 @@ def profit_walkthrough(ctx):
     less_row("Salaries", r["salaries_total"], "Full salary earned, before deductions")
     total_row(
         "Net Profit", r["net_profit"],
-        "Total gross margin + other income − expenses − salaries",
+        "Total gross margin + tanker deal margin + other income − expenses − salaries",
     )
     return rows
 
@@ -5391,10 +5789,33 @@ def _group_aging(account, children, as_of_date):
     }
 
 
-def _accounts_context(kind, type_filter):
+def _accounts_context(kind, type_filter, q=""):
     """Shared by the Accounts page and its PDF/Excel export, so the two
     can never quietly drift apart - same filters, same rows, same aging
-    totals, just rendered differently."""
+    totals, just rendered differently.
+
+    q is the name search box. It is applied HERE, not in the view, for
+    that same reason: an export that silently ignored the search would
+    hand the owner a document that does not match the screen it was
+    exported from. It filters by name only, case-insensitively, on a
+    plain "contains" match - a khata search is someone half-remembering a
+    name, not a query language.
+
+    WHAT q DELIBERATELY DOES NOT TOUCH: aging_totals. Those are the
+    headline "how old is the money owed to you" figures and are computed
+    from every account in the type filter (see the invariant note further
+    down). Narrowing them to whatever the owner happened to type into a
+    search box would make a headline total mean something different from
+    one keystroke to the next.
+    """
+    q = (q or "").strip()
+
+    def matches_search(name):
+        """Case-insensitive substring match, done in Python rather than as
+        a SQL ilike so bank accounts and the synthetic Cash-in-Hand row -
+        which are not Account rows and never go through that query - are
+        filtered by exactly the same rule as accounts are."""
+        return not q or q.casefold() in (name or "").casefold()
     if type_filter in ("bank", "cash"):
         # Debtor/creditor is a concept that only applies to customer/
         # supplier/employee accounts - bank accounts and cash-in-hand are
@@ -5421,6 +5842,12 @@ def _accounts_context(kind, type_filter):
             # A parent shows the group total, because its children are not
             # on this list to be seen separately - and every filter and
             # sort below then works off whatever is actually displayed.
+            # Searched on the PARENT's name only, matching what the page
+            # lists: a sub-account is not a row here, so matching one
+            # would surface a row whose name does not contain the search
+            # text and give no clue why.
+            if not matches_search(a.name):
+                continue
             balance = a.group_balance if children else a.balance
             aging = _group_aging(a, children, date.today())
             rows.append(
@@ -5432,6 +5859,7 @@ def _accounts_context(kind, type_filter):
                     "aging": aging,
                     "child_count": len(children),
                     "is_group": bool(children),
+                    "notes": a.notes,
                 }
             )
 
@@ -5440,9 +5868,11 @@ def _accounts_context(kind, type_filter):
             # Bank accounts (and cash-in-hand) are the pump's own money,
             # not a debitor/creditor relationship, so they only show up
             # under "All" - not under the Debitors/Creditors filter.
+            if not matches_search(b.name):
+                continue
             rows.append({"kind": "bank", "obj": b, "name": b.name, "balance": b.balance})
 
-    if kind == "all" and type_filter in ("all", "cash"):
+    if kind == "all" and type_filter in ("all", "cash") and matches_search("Cash in Hand"):
         cash_account = get_cash_account()
         rows.append(
             {
@@ -5497,10 +5927,33 @@ def _accounts_context(kind, type_filter):
             for bucket, value in aging["buckets"].items():
                 aging_totals[bucket] = round(aging_totals[bucket] + value, 2)
 
+    # The summary band at the top of the page. Computed from the rows
+    # actually on screen - unlike aging_totals above, which is a headline
+    # figure with a fixed meaning - because this band is a description OF
+    # THIS LIST, so it has to move with the filters and the search or it
+    # would be describing a list nobody is looking at.
+    #
+    # BANK AND CASH ROWS ARE EXCLUDED FROM THE MONEY FIGURES, deliberately.
+    # They are the pump's OWN money, not a debitor/creditor relationship
+    # with anyone (the same reason they only ever appear under "All", and
+    # the same reason the page says so in prose). Folding a negative cash
+    # balance into "You Owe" would claim the pump owes its own till money.
+    # They still count as rows, though - the count describes the list.
+    party_rows = [r for r in rows if r["kind"] == "account"]
+    total_owed_to_you = round(sum(r["balance"] for r in party_rows if r["balance"] > 0), 2)
+    total_you_owe = round(-sum(r["balance"] for r in party_rows if r["balance"] < 0), 2)
+
     return {
         "rows": rows,
         "kind": kind,
         "type_filter": type_filter,
+        "q": q,
+        "summary": {
+            "owed_to_you": total_owed_to_you,
+            "you_owe": total_you_owe,
+            "net": round(total_owed_to_you - total_you_owe, 2),
+            "count": len(rows),
+        },
         "expenses": expenses,
         "bank_accounts": bank_accounts,
         "parent_candidates": parent_candidates,
@@ -5514,21 +5967,23 @@ def _accounts_context(kind, type_filter):
 def accounts():
     kind = request.args.get("kind", "all")
     type_filter = request.args.get("type", "all")
-    ctx = _accounts_context(kind, type_filter)
+    q = request.args.get("q", "")
+    ctx = _accounts_context(kind, type_filter, q)
     return render_template("accounts.html", today=date.today(), **ctx)
 
 
 @app.route("/accounts/export")
 @login_required
 def accounts_export():
-    """Mirrors accounts() - same kind/type filters, same rows and aging
-    totals - as either a PDF or an Excel workbook. Available to staff too,
+    """Mirrors accounts() - same kind/type filters, same name search, same
+    rows and aging totals - as either a PDF or an Excel workbook. Available to staff too,
     matching the page itself (owner-only content there is limited to the
     Expenses/Add-account panels, which this export doesn't include)."""
     fmt = _resolve_export_format()
     kind = request.args.get("kind", "all")
     type_filter = request.args.get("type", "all")
-    ctx = _accounts_context(kind, type_filter)
+    q = request.args.get("q", "")
+    ctx = _accounts_context(kind, type_filter, q)
 
     def oldest_label(row):
         aging = row.get("aging")
@@ -5568,6 +6023,8 @@ def accounts_export():
         filter_bits.append(kind)
     if type_filter != "all":
         filter_bits.append(type_filter)
+    if ctx["q"]:
+        filter_bits.append('search "' + ctx["q"] + '"')
     subtitle = f"As of {date.today().isoformat()}" + (f" - {' / '.join(filter_bits)}" if filter_bits else "")
 
     return _send_export(
@@ -5690,6 +6147,11 @@ def account_edit(account_id):
     # again through this same path.
     parent_account_id = _parent_id_from_form(request.form)
     parent_error = _validate_parent(account, parent_account_id)
+    # Free-text context (see Account.notes). Normalised to None when blank
+    # so "no note" is one value in the database rather than two - the
+    # Accounts list's note indicator tests truthiness, and an account
+    # whose note was cleared must stop showing one.
+    notes = request.form.get("notes", "").strip()
 
     if not name:
         flash("Please enter a name.", "error")
@@ -5702,6 +6164,7 @@ def account_edit(account_id):
         account.phone = phone or None
         account.account_type = account_type
         account.parent_account_id = parent_account_id
+        account.notes = notes or None
         db.session.commit()
         flash("Account details updated.", "success")
 
@@ -5757,107 +6220,6 @@ def account_delete(account_id):
         flash(f'Deleted "{name}".', "success")
 
     return redirect(url_for("accounts"))
-
-
-@app.route("/accounts/<int:account_id>/group-payment", methods=["POST"])
-@login_required
-@owner_required
-def account_group_payment(account_id):
-    """One lump sum from a parent account, split across the ticked
-    sub-accounts oldest-debt-first (see allocate_group_payment() in
-    ledger_logic.py) and recorded as one ORDINARY Receipt per
-    sub-account.
-
-    Nothing new is stored: each allocation becomes exactly the Receipt row
-    that typing that payment in by hand on that sub-account would have
-    created, with the same fields ledger_receipt() uses. Every balance,
-    statement and report therefore sees plain receipts and needs to know
-    nothing at all about groups.
-
-    DELIBERATE: an over-payment is REJECTED, not absorbed. If the amount
-    exceeds what the selected sub-accounts currently owe, the whole thing
-    is refused rather than parking the surplus somewhere - this app never
-    silently invents an advance or a credit balance on an account nobody
-    chose. An owner who genuinely wants to overpay one account can record
-    a direct receipt on that account, where the resulting negative balance
-    is an explicit, visible decision.
-    """
-    account = db.session.get(Account, account_id) or abort(404)
-    entry_date = parse_date_param(request.form.get("entry_date"))
-    amount = request.form.get("amount", type=float)
-    note = request.form.get("note", "").strip()
-    selected_ids = request.form.getlist("sub_account_ids")
-    # resolve_payment_method() can db.session.add() a quick-added bank
-    # account, so every rejection below rolls back rather than leaving
-    # that half-made row sitting in the session.
-    method, bank_account, method_error = resolve_payment_method(request.form)
-
-    children_by_id = {c.id: c for c in account.children}
-
-    if not children_by_id:
-        db.session.rollback()
-        flash(f"{account.name} has no sub-accounts to pay for.", "error")
-        return redirect(url_for("account_detail", account_id=account.id))
-
-    if not amount or amount <= 0:
-        db.session.rollback()
-        flash("Amount must be a positive number.", "error")
-        return redirect(url_for("account_detail", account_id=account.id))
-
-    if not selected_ids:
-        db.session.rollback()
-        flash("Please tick at least one sub-account to pay for.", "error")
-        return redirect(url_for("account_detail", account_id=account.id))
-
-    selected = []
-    for raw in selected_ids:
-        try:
-            child = children_by_id[int(raw)]
-        except (ValueError, KeyError):
-            # Not silently ignored: a posted id that isn't a child of this
-            # account means the form was tampered with or is stale, and
-            # quietly dropping it would record a payment the owner did not
-            # actually authorise the shape of.
-            db.session.rollback()
-            flash("One of the selected sub-accounts doesn't belong to this account.", "error")
-            return redirect(url_for("account_detail", account_id=account.id))
-        selected.append(child)
-
-    if method_error:
-        db.session.rollback()
-        flash(method_error, "error")
-        return redirect(url_for("account_detail", account_id=account.id))
-
-    allocations, leftover = allocate_group_payment(selected, amount, entry_date)
-    if leftover > 0.01:
-        owed = round(amount - leftover, 2)
-        db.session.rollback()
-        flash(
-            f"Rs {format_number(amount)} is more than the Rs {format_number(owed)} "
-            f"currently owed across the selected sub-accounts.",
-            "error",
-        )
-        return redirect(url_for("account_detail", account_id=account.id))
-
-    for allocation in allocations:
-        db.session.add(
-            Receipt(
-                account_id=allocation["account"].id,
-                entry_date=entry_date,
-                amount=allocation["amount"],
-                method=method,
-                bank_account_id=bank_account.id if bank_account else None,
-                note=note or None,
-                user_id=current_user.id,
-            )
-        )
-    db.session.commit()
-
-    summary = ", ".join(
-        f"{a['account'].name} Rs {format_number(a['amount'])}" for a in allocations
-    )
-    flash(f"Recorded Rs {format_number(amount)} across {len(allocations)} sub-account(s): {summary}.", "success")
-    return redirect(url_for("account_detail", account_id=account.id))
 
 
 @app.route("/accounts/entry/credit/<int:entry_id>/edit", methods=["POST"])
@@ -6636,6 +6998,25 @@ def _reports_context(selected_date):
     total_other_income = sum((oi.amount for oi in other_income_entries), 0.0)
     cash_other_income_total = sum((oi.amount for oi in other_income_entries if oi.method == "cash"), 0.0)
 
+    # Pass-through tanker deals (see TankerDeal in models.py). Reported as
+    # their own four figures and NEVER folded into total_sales,
+    # total_liters, by_fuel or the tank rows below: no fuel left a tank
+    # and none was dispensed, so adding them there would inflate litres
+    # sold and corrupt every per-litre figure derived from it. Only the
+    # cash-method sides move net_cash_flow, exactly the same distinction
+    # cash_purchases_total / cash_product_sales_total already make.
+    tanker_deals = TankerDeal.query.filter_by(entry_date=selected_date).order_by(TankerDeal.recorded_at).all()
+    tanker_liters = sum((d.liters for d in tanker_deals), 0.0)
+    tanker_revenue = sum((d.sale_amount for d in tanker_deals), 0.0)
+    tanker_cost = sum((d.purchase_cost for d in tanker_deals), 0.0)
+    tanker_margin = round(tanker_revenue - tanker_cost, 2)
+    cash_tanker_sales_total = sum(
+        (d.sale_amount for d in tanker_deals if d.sale_payment_type == "cash"), 0.0
+    )
+    cash_tanker_purchases_total = sum(
+        (d.purchase_cost for d in tanker_deals if d.purchase_payment_type == "cash"), 0.0
+    )
+
     tanks = Tank.query.order_by(Tank.number).all()
     tank_rows = []
     for t in tanks:
@@ -6663,6 +7044,8 @@ def _reports_context(selected_date):
         + cash_product_sales_total
         - cash_product_purchases_total
         + cash_other_income_total
+        + cash_tanker_sales_total
+        - cash_tanker_purchases_total
     )
     outstanding_credit = sum((b for a in Account.query.all() if (b := a.balance) > 0), 0.0)
     # Date-aware closing balances for the SELECTED date, not the all-time
@@ -6714,6 +7097,11 @@ def _reports_context(selected_date):
         "total_product_purchases_cost": total_product_purchases_cost,
         "other_income_entries": other_income_entries,
         "total_other_income": total_other_income,
+        "tanker_deals": tanker_deals,
+        "tanker_liters": tanker_liters,
+        "tanker_revenue": tanker_revenue,
+        "tanker_cost": tanker_cost,
+        "tanker_margin": tanker_margin,
     }
 
 
@@ -6749,6 +7137,7 @@ def reports_export():
         ("Non-Fuel Sales (units)", ctx["total_product_sales_units"]),
         ("Non-Fuel Sales (Rs)", ctx["total_product_sales_amount"]),
         ("Other Income (Rs)", ctx["total_other_income"]),
+        ("Tanker Deal Margin (Rs)", ctx["tanker_margin"]),
         ("Product Purchases (units)", ctx["total_product_purchases_units"]),
         ("Product Purchases (Rs)", ctx["total_product_purchases_cost"]),
         ("Expenses (Rs)", ctx["total_expenses"]),
@@ -6943,7 +7332,8 @@ def _reports_monthly_context(start, end):
     Sales Returns = Net Fuel Revenue - Cost of Fuel Sold = Fuel Gross
     Margin; then Product Revenue - Cost of Products Sold = Product Gross
     Margin; Fuel Gross Margin + Product Gross Margin = Total Gross Margin
-    + Other Income - Expenses - Salaries = Net Profit. cogs_for_period() nets sales
+    + Tanker Deal Margin + Other Income - Expenses - Salaries = Net
+    Profit. cogs_for_period() nets sales
     returns into COGS/margin already (see its docstring) - net_revenue
     below is the ONLY other place a return is subtracted, so net_profit
     must never subtract sales_returns_amount again on top of gross_margin,
@@ -7081,7 +7471,33 @@ def _reports_monthly_context(start, end):
     # double-count the same refund - that was the bug this comment is
     # guarding against. Net Profit is Total Gross Margin (fuel + product)
     # plus Other Income, minus operating costs.
-    net_profit = round(total_gross_margin + other_income_total - expenses_total - salaries_total, 2)
+    # Pass-through tanker deals (see TankerDeal in models.py) - their own
+    # revenue/cost/margin, deliberately kept OUT of revenue, liters_sold,
+    # cogs and gross_margin above. Nothing was dispensed from a tank and
+    # the cost is this one tanker's exact invoice, not a weighted average,
+    # so folding it into those would both inflate litres sold and make
+    # Cost of Fuel Sold mean two different things at once. It is a real
+    # profit though, so it is added into net_profit as its own line, the
+    # same pure-addition way other_income_total is.
+    tanker_liters = float(
+        db.session.query(func.coalesce(func.sum(TankerDeal.liters), 0))
+        .filter(TankerDeal.entry_date >= start, TankerDeal.entry_date <= end)
+        .scalar()
+    )
+    tanker_revenue = float(
+        db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0))
+        .filter(TankerDeal.entry_date >= start, TankerDeal.entry_date <= end)
+        .scalar()
+    )
+    tanker_cost = float(
+        db.session.query(func.coalesce(func.sum(TankerDeal.purchase_cost), 0))
+        .filter(TankerDeal.entry_date >= start, TankerDeal.entry_date <= end)
+        .scalar()
+    )
+    tanker_margin = round(tanker_revenue - tanker_cost, 2)
+    net_profit = round(
+        total_gross_margin + tanker_margin + other_income_total - expenses_total - salaries_total, 2
+    )
 
     return {
         "revenue": revenue,
@@ -7097,6 +7513,10 @@ def _reports_monthly_context(start, end):
         "product_commission": product_commission,
         "product_category_detail": product_category_detail,
         "total_gross_margin": total_gross_margin,
+        "tanker_liters": tanker_liters,
+        "tanker_revenue": tanker_revenue,
+        "tanker_cost": tanker_cost,
+        "tanker_margin": tanker_margin,
         "other_income_total": other_income_total,
         "expenses_total": expenses_total,
         "expenses_by_category": expenses_by_category,
@@ -7359,6 +7779,7 @@ def reports_monthly_export():
                 ("Less: Cost of Products Sold (Rs)", ctx["product_cost"]),
                 ("Product Gross Margin (Rs)", ctx["product_commission"]),
                 ("Total Gross Margin (Rs)", ctx["total_gross_margin"]),
+                ("Tanker Deal Margin (Rs)", ctx["tanker_margin"]),
                 ("Other Income (Rs)", ctx["other_income_total"]),
                 ("Less: Expenses (Rs)", ctx["expenses_total"]),
                 ("Less: Salaries (Rs)", ctx["salaries_total"]),
@@ -7605,6 +8026,24 @@ def reports_trends():
     product_margin_series = [
         round(product_revenue_by_day.get(d, 0) - product_cost_by_day.get(d, 0), 2) for d in all_dates
     ]
+    # Per-day pass-through tanker margin (see TankerDeal in models.py),
+    # grouped by date the same way every other term here is, and added to
+    # profit as its OWN addend - never into sales_by_day (which also backs
+    # cash_series and the by-fuel litre/rupee charts, all of which mean
+    # fuel actually dispensed) and never into cogs_by_day (a weighted
+    # per-litre cost this deal has no part in). This mirrors
+    # _profit_series_for_window() in ledger_logic.py line for line, and is
+    # what keeps this page reconciling with _reports_monthly_context()'s
+    # net_profit, which adds tanker_margin the same separate way.
+    tanker_margin_by_day = {}
+    for entry_date_val, sale_amount, purchase_cost in (
+        db.session.query(TankerDeal.entry_date, TankerDeal.sale_amount, TankerDeal.purchase_cost)
+        .filter(TankerDeal.entry_date >= start, TankerDeal.entry_date <= end)
+        .all()
+    ):
+        tanker_margin_by_day[entry_date_val] = round(
+            tanker_margin_by_day.get(entry_date_val, 0) + (sale_amount - purchase_cost), 2
+        )
     profit_series = [
         round(
             (sales_by_day.get(d, 0) - returns_amount_by_day.get(d, 0))  # net fuel revenue
@@ -7612,7 +8051,8 @@ def reports_trends():
             - expenses_by_day.get(d, 0)
             - salaries_by_day.get(d, 0)
             + product_margin_series[i]
-            + other_income_by_day.get(d, 0),
+            + other_income_by_day.get(d, 0)
+            + tanker_margin_by_day.get(d, 0),
             2,
         )
         for i, d in enumerate(all_dates)

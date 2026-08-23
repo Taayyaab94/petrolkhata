@@ -1874,3 +1874,155 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
 .range-toggle { display: flex; gap: 8px; }
 
 .product-compact .table td { padding: 6px 8px; }
+
+/* ---------- accounts: search, compact account list, per-account note ----------
+   The Accounts page used to be a six-column table in which the one figure
+   the owner actually came for - the balance - was set in the same size and
+   weight as the phone number next to it. This block replaces that table
+   with a list of rows built on a three-track grid (identity / money /
+   actions) so the hierarchy can be stated once, in CSS, instead of being
+   fought column by column: the name and the number are the only two things
+   set above body size, everything else is deliberately quiet.
+
+   Tokens only, as everywhere else in this file - the sign colours are the
+   same --pos / --neg the rest of the app uses for "in our favour" and
+   "against us", so a row here reads the same way a stat card does, in
+   either theme. */
+
+.acct-search {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  align-items: center;
+  margin-bottom: var(--s3);
+}
+
+/* Wide enough to hold a real account name, but capped so it does not
+   stretch to the full content width on a desktop and read as a form. */
+.acct-search input[type="search"] { flex: 1 1 260px; max-width: 420px; }
+.acct-search-count { margin-left: var(--s1); }
+
+.acct-list { display: flex; flex-direction: column; }
+
+.acct-item {
+  display: grid;
+  /* identity takes the slack; the money column is sized to its own
+     content so the figures line up down the page; actions sit last. */
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--s3) var(--s4);
+  align-items: center;
+  /* Tight vertical padding on purpose: the row is already two lines tall
+     (name, then its badges), so anything more turns a 40-account khata
+     into four screens of scrolling. */
+  padding: var(--s2) var(--s3) var(--s2) var(--s4);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.acct-item:last-child { border-bottom: none; }
+.acct-item:hover { background: var(--surface-2); }
+
+/* The sign rail. This is the "distinct treatment" the balance gets
+   instead of a words-only hint: the row itself is tinted at its leading
+   edge, so scanning the list tells you who owes whom before you read a
+   single digit. A settled account gets no rail at all - nothing to say. */
+.acct-item.is-pos { box-shadow: inset 3px 0 0 var(--pos); }
+.acct-item.is-neg { box-shadow: inset 3px 0 0 var(--neg); }
+.acct-item.is-zero { box-shadow: inset 3px 0 0 var(--border-strong); }
+
+.acct-ident { min-width: 0; }
+
+.acct-name {
+  font-size: 1.02rem;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.acct-name a { color: var(--ink); text-decoration: none; }
+.acct-name a:hover { color: var(--accent); }
+
+.acct-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s2);
+  align-items: center;
+  margin-top: 5px;
+}
+
+/* The note indicator: presence only, never the note itself - the full
+   text is the title attribute and the account's own page. Gold rather
+   than a money colour, because a note is interface, not a figure. */
+.acct-note-flag {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+  cursor: help;
+}
+
+.acct-amount { text-align: right; min-width: 0; }
+
+.acct-figure {
+  font-size: 1.12rem;
+  font-weight: 650;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  white-space: nowrap;
+}
+
+.acct-item.is-pos .acct-figure { color: var(--pos); }
+.acct-item.is-neg .acct-figure { color: var(--neg); }
+.acct-item.is-zero .acct-figure { color: var(--muted); }
+
+.acct-direction {
+  font-size: 0.72rem;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 2px;
+}
+
+/* Deliberately the lightest thing in the row: these are always available
+   and never the reason anyone opened the page, so they must not compete
+   with the name or the number. */
+.acct-actions {
+  display: flex;
+  gap: var(--s3);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.acct-actions a { color: var(--muted); text-decoration: none; }
+.acct-actions a:hover { color: var(--accent); text-decoration: underline; }
+
+.acct-empty { padding: var(--s5) var(--s4); color: var(--muted); text-align: center; }
+
+/* A note on the account detail page - shown to everyone, editable by the
+   owner through the ordinary Account Details form. white-space:pre-wrap
+   so the line breaks the owner typed survive. */
+.account-note-panel { border-left: 3px solid var(--accent); }
+
+.account-note-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+  margin-bottom: var(--s1);
+}
+
+.account-note-body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+
+/* A textarea inside a .form-grid needs the full width of the grid - a
+   3-row box squeezed into a 160px auto-fit track is unusable. */
+.form-grid-wide { grid-column: 1 / -1; }
+
+@media (max-width: 640px) {
+  /* Two tracks instead of three: the actions drop under the identity
+     column so the money column keeps its own line and stays legible. */
+  .acct-item {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: var(--s2);
+  }
+  .acct-actions { grid-column: 1 / -1; }
+}

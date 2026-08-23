@@ -45,6 +45,7 @@ from models import (
     Tank,
     TankDip,
     TankDipChart,
+    TankerDeal,
 )
 
 # --------------------------------------------------------------------------
@@ -1230,6 +1231,14 @@ def credit_aging(account, as_of_date):
         # defensive guard account_ledger_events() uses for this backref.
         if oi.method == "credit":
             debits.append({"date": oi.entry_date, "amount": oi.amount})
+    for d in account.tanker_sales:
+        # A pass-through tanker sold to this customer on credit is money
+        # they owe from that date onward - a dated DEBIT, exactly like a
+        # CreditGiven, mirroring Account.balance's
+        # tanker_sales_credit_total term. customer_account_id is only ever
+        # set for sale_payment_type == "credit", so this backref never
+        # picks up a cash/bank-settled deal.
+        debits.append({"date": d.entry_date, "amount": d.sale_amount})
 
     credits_total = (
         sum(r.amount for r in account.receipts)
@@ -1239,6 +1248,12 @@ def credit_aging(account, as_of_date):
         # reduces what this account owes, the same direction as a
         # receipt - mirrors the identical guard in account_ledger_events().
         + sum(sr.amount for sr in account.sales_returns if sr.method == "credit")
+        # A pass-through tanker bought from this supplier on credit is
+        # money the pump owes them - the same direction as the fuel
+        # stock-purchase-on-credit term above, mirroring Account.balance's
+        # tanker_purchases_credit_total. supplier_account_id is only ever
+        # set for purchase_payment_type == "credit".
+        + sum(d.purchase_cost for d in account.tanker_purchases)
         + (-account.opening_balance if account.opening_balance < 0 else 0)
     )
     # ProductPurchase.total_cost can be NEGATIVE (a return to the supplier
@@ -1294,7 +1309,29 @@ def credit_aging(account, as_of_date):
     }
 
 
-def allocate_group_payment(children, amount, as_of_date):
+def _payable_oldest_credit_purchase_date(account):
+    """The earliest date on which this account sold the pump something on
+    credit - the oldest StockPurchase / ProductPurchase with
+    payment_type == "credit", plus the purchase side of any TankerDeal
+    booked against it (supplier_account_id is only ever set when
+    purchase_payment_type == "credit", but the filter is written out
+    anyway so the intent survives a future widening of that convention).
+
+    This is the same signal payables_schedule() ages a supplier by (see
+    its docstring for why an approximation is the honest best available
+    here), extended with the TankerDeal purchase side, which is a credit
+    purchase from that supplier in every way that matters to Account.balance
+    but is not one of the two purchase tables payables_schedule() reads.
+
+    Returns None when the account has no credit purchase on file at all.
+    """
+    dates = [p.entry_date for p in account.stock_purchases if p.payment_type == "credit"]
+    dates += [p.entry_date for p in account.product_purchases if p.payment_type == "credit"]
+    dates += [d.entry_date for d in account.tanker_purchases if d.purchase_payment_type == "credit"]
+    return min(dates) if dates else None
+
+
+def allocate_group_payment(children, amount, as_of_date, direction="receivable"):
     """Split one lump-sum payment across a parent account's sub-accounts,
     oldest debt first, and report what each of them should be credited.
 
@@ -1304,15 +1341,46 @@ def allocate_group_payment(children, amount, as_of_date):
     sub-account has been carrying unpaid money the longest gets settled
     first, then the next, until the lump sum runs out.
 
-    Only sub-accounts with a positive balance are considered - a settled
-    account (balance 0) or one the pump actually owes money to (negative
-    balance) has nothing to pay off, so handing it part of a payment would
-    be inventing an advance rather than clearing a debt.
+    TWO DIRECTIONS, ONE WALK
+    ------------------------
+    Account.balance is signed: POSITIVE means the account owes the pump
+    (a customer receivable), NEGATIVE means the pump owes the account (a
+    supplier payable). The Receipt form collects money in; the
+    Payment-to-Supplier form pays money out. Both are "settle the oldest
+    debt first across a group", but they read opposite signs, so the
+    caller says which one it means:
 
-    Ordering is by each child's oldest still-unpaid debit, taken straight
-    from credit_aging(child, as_of_date)["oldest_date"]. A child whose
-    balance is positive but which has no dated debit left after the FIFO
-    walk (oldest_date None) sorts LAST - there is no age to prioritise it
+    - direction="receivable" (the default, and exactly what this function
+      has always done): only children with balance > 0 take part, the
+      amount available to clear is `balance`, and age comes from
+      credit_aging(child, as_of_date)["oldest_date"] - a true FIFO walk
+      of that account's own debits and credits.
+    - direction="payable": only children with balance < 0 take part, the
+      amount available to clear is `-balance` (what the pump owes them),
+      and age comes from the oldest credit PURCHASE on file for that
+      child.
+
+    The default is what keeps the Receipt path bit-for-bit unchanged: a
+    caller that says nothing gets the receivable behaviour it always got.
+
+    HONESTY NOTE ON THE PAYABLE SIDE (mirroring payables_schedule()'s own
+    note, and for exactly the same reason): ageing a payable by its oldest
+    credit purchase is an approximation, not a FIFO settlement walk.
+    Supplier payments in this ledger are posted against the account as a
+    whole and are never matched to a specific invoice, so there is no way
+    to know which purchase(s) an earlier payment actually cleared. What
+    the ordering really says is "we have owed this supplier something,
+    continuously, since at least this date" - which is the right thing to
+    prioritise by, but it is not a claim about one open invoice.
+
+    A child carrying the WRONG sign for the direction is skipped, never
+    paid: a settled account (balance 0), or a supplier-direction child
+    that actually owes the pump money, has nothing to clear, so handing it
+    part of a payment would be inventing an advance rather than clearing a
+    debt.
+
+    A child that is in the right direction but has no dated debt to age it
+    by (oldest_date None) sorts LAST - there is no age to prioritise it
     by. Name is the tie-break purely so the result is deterministic when
     two children share an oldest date.
 
@@ -1328,13 +1396,20 @@ def allocate_group_payment(children, amount, as_of_date):
     Receipt, exactly like a receipt typed in by hand on that sub-account,
     so nothing downstream has to learn about groups at all.
     """
+    payable = direction == "payable"
     candidates = []
     for child in children:
         balance = child.balance
-        if balance <= 0:
+        # Outstanding is always the POSITIVE amount this child can absorb,
+        # so the walk below is identical for both directions.
+        outstanding = -balance if payable else balance
+        if outstanding <= 0:
             continue
-        aging = credit_aging(child, as_of_date)
-        candidates.append({"account": child, "balance": balance, "oldest_date": aging["oldest_date"]})
+        if payable:
+            oldest_date = _payable_oldest_credit_purchase_date(child)
+        else:
+            oldest_date = credit_aging(child, as_of_date)["oldest_date"]
+        candidates.append({"account": child, "balance": outstanding, "oldest_date": oldest_date})
 
     # None (no dated debt found) must sort AFTER every real date, hence
     # the leading 0/1 flag rather than trying to compare None to a date.
@@ -1473,6 +1548,21 @@ def account_ledger_events(account):
             events.append(
                 {"kind": "product_purchase", "entry_date": pp.entry_date, "sort_key": (pp.entry_date, pp.recorded_at), "obj": pp, "delta": -(pp.total_cost or 0)}
             )
+    # Both sides of a pass-through tanker deal (see TankerDeal in
+    # models.py). Two separate backrefs, never one - supplier_account_id
+    # and customer_account_id are distinct columns, each only ever set for
+    # its own side's "credit" payment type, so neither loop needs a guard
+    # and the same account acting as both supplier and customer on
+    # different deals still gets each one counted exactly once, in the
+    # right direction. Signs mirror Account.balance exactly.
+    for d in account.tanker_sales:
+        events.append(
+            {"kind": "tanker_sale", "entry_date": d.entry_date, "sort_key": (d.entry_date, d.recorded_at), "obj": d, "delta": d.sale_amount}
+        )
+    for d in account.tanker_purchases:
+        events.append(
+            {"kind": "tanker_purchase", "entry_date": d.entry_date, "sort_key": (d.entry_date, d.recorded_at), "obj": d, "delta": -d.purchase_cost}
+        )
 
     events.sort(key=lambda e: e["sort_key"])
     running = 0.0
@@ -1557,6 +1647,20 @@ def cash_account_balance(cash_account):
         .filter(OtherIncome.method == "cash")
         .scalar()
     )
+    # Both sides of a pass-through tanker deal (see TankerDeal in
+    # models.py), each filtered on its OWN payment type - a deal can be
+    # bought in cash and sold on credit, or any other combination, so the
+    # two sides are two independent sums, never one net figure.
+    total_cash_tanker_purchases = (
+        db.session.query(func.coalesce(func.sum(TankerDeal.purchase_cost), 0))
+        .filter(TankerDeal.purchase_payment_type == "cash")
+        .scalar()
+    )
+    total_cash_tanker_sales = (
+        db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0))
+        .filter(TankerDeal.sale_payment_type == "cash")
+        .scalar()
+    )
     return round(
         cash_account.opening_balance
         + total_sales
@@ -1572,7 +1676,9 @@ def cash_account_balance(cash_account):
         - total_cash_returns
         + total_cash_product_sales
         - total_cash_product_purchases
-        + total_cash_other_income,
+        + total_cash_other_income
+        - total_cash_tanker_purchases
+        + total_cash_tanker_sales,
         2,
     )
 
@@ -1715,6 +1821,23 @@ def _cash_daily_net_changes():
         db.session.query(OtherIncome.entry_date, func.sum(OtherIncome.amount))
         .filter(OtherIncome.method == "cash")
         .group_by(OtherIncome.entry_date)
+        .all()
+    )
+    # Pass-through tanker deals (see TankerDeal in models.py): a
+    # cash-method purchase is cash OUT, a cash-method sale is cash IN. Two
+    # separate grouped queries because the two sides carry their own
+    # independent payment types - one deal can be cash out and credit in.
+    add(
+        db.session.query(TankerDeal.entry_date, func.sum(TankerDeal.purchase_cost))
+        .filter(TankerDeal.purchase_payment_type == "cash")
+        .group_by(TankerDeal.entry_date)
+        .all(),
+        sign=-1,
+    )
+    add(
+        db.session.query(TankerDeal.entry_date, func.sum(TankerDeal.sale_amount))
+        .filter(TankerDeal.sale_payment_type == "cash")
+        .group_by(TankerDeal.entry_date)
         .all()
     )
 
@@ -1904,6 +2027,19 @@ def cash_account_ledger_events(cash_account):
     for oi in OtherIncome.query.filter_by(method="cash").all():
         events.append(
             {"kind": "other_income", "entry_date": oi.entry_date, "sort_key": (oi.entry_date, oi.recorded_at), "obj": oi, "delta": oi.amount}
+        )
+    # Pass-through tanker deals (see TankerDeal in models.py). Each side
+    # is its own row rather than one net row: the two sides can settle by
+    # different methods entirely, and a deal bought in cash but sold on
+    # credit must show only the outflow here - netting them would hide
+    # that the register really did go down by the full purchase cost.
+    for d in TankerDeal.query.filter_by(purchase_payment_type="cash").all():
+        events.append(
+            {"kind": "tanker_purchase", "entry_date": d.entry_date, "sort_key": (d.entry_date, d.recorded_at), "obj": d, "delta": -d.purchase_cost}
+        )
+    for d in TankerDeal.query.filter_by(sale_payment_type="cash").all():
+        events.append(
+            {"kind": "tanker_sale", "entry_date": d.entry_date, "sort_key": (d.entry_date, d.recorded_at), "obj": d, "delta": d.sale_amount}
         )
 
     events.sort(key=lambda e: e["sort_key"])
@@ -2248,6 +2384,20 @@ def bank_account_ledger_events(bank_account):
         events.append(
             {"kind": "other_income", "entry_date": oi.entry_date, "sort_key": (oi.entry_date, oi.recorded_at), "obj": oi, "delta": oi.amount}
         )
+    # Bank-method sides of a pass-through tanker deal (see TankerDeal in
+    # models.py). No payment-type filter needed on either loop:
+    # purchase_bank_account_id / sale_bank_account_id are only ever set for
+    # their own side's "bank" payment type, exactly as other_income_entries
+    # above relies on. Separate backrefs, so a deal routing BOTH sides
+    # through this same bank correctly shows two rows, out then in.
+    for d in bank_account.tanker_purchases_paid:
+        events.append(
+            {"kind": "tanker_purchase", "entry_date": d.entry_date, "sort_key": (d.entry_date, d.recorded_at), "obj": d, "delta": -d.purchase_cost}
+        )
+    for d in bank_account.tanker_sales_received:
+        events.append(
+            {"kind": "tanker_sale", "entry_date": d.entry_date, "sort_key": (d.entry_date, d.recorded_at), "obj": d, "delta": d.sale_amount}
+        )
 
     events.sort(key=lambda e: e["sort_key"])
     running = 0.0
@@ -2368,6 +2518,28 @@ def bank_account_balance_as_of(bank_account, as_of_date):
         .filter(OtherIncome.bank_account_id == bank_account.id, OtherIncome.entry_date <= as_of_date)
         .scalar()
     )
+    # Bank-method sides of a pass-through tanker deal (see TankerDeal in
+    # models.py) - a purchase paid from this bank takes money out, a sale
+    # received into it puts money in. Mirrors BankAccount.balance's own two
+    # terms exactly. No payment-type filter needed in the SQL for the same
+    # reason other_income_total above needs none: each bank_account_id
+    # column is only ever set for its own side's "bank" payment type.
+    tanker_purchases_total = (
+        db.session.query(func.coalesce(func.sum(TankerDeal.purchase_cost), 0))
+        .filter(
+            TankerDeal.purchase_bank_account_id == bank_account.id,
+            TankerDeal.entry_date <= as_of_date,
+        )
+        .scalar()
+    )
+    tanker_sales_total = (
+        db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0))
+        .filter(
+            TankerDeal.sale_bank_account_id == bank_account.id,
+            TankerDeal.entry_date <= as_of_date,
+        )
+        .scalar()
+    )
     # The opening balance is anchored on its own opening_balance_date (or
     # created_at.date() if unset - same fallback _cash_daily_net_changes()
     # uses for the cash account) and only counted once as_of_date has
@@ -2396,7 +2568,9 @@ def bank_account_balance_as_of(bank_account, as_of_date):
         - sales_returns_total
         + product_sales_total
         - product_purchases_total
-        + other_income_total,
+        + other_income_total
+        - tanker_purchases_total
+        + tanker_sales_total,
         2,
     )
 
@@ -2820,7 +2994,10 @@ def daily_margin(entry_date, costs=None):
 
     total_margin folds in other_income with no cost side (a pure
     addition, not a revenue-minus-cost margin) - the same treatment
-    _reports_monthly_context() gives it on the way to net profit."""
+    _reports_monthly_context() gives it on the way to net profit - plus
+    tanker_margin, the pass-through-deal profit that is deliberately its
+    own category rather than part of fuel_margin (see the comment on it
+    below, and TankerDeal's docstring in models.py)."""
     revenue = float(
         db.session.query(func.coalesce(func.sum(Sale.total_amount), 0))
         .filter(Sale.entry_date == entry_date)
@@ -2852,7 +3029,29 @@ def daily_margin(entry_date, costs=None):
         .filter(OtherIncome.entry_date == entry_date)
         .scalar()
     )
-    total_margin = round(fuel_margin + product_margin + other_income, 2)
+    # Pass-through tanker deals (see TankerDeal in models.py) get their
+    # OWN margin key and are deliberately NOT folded into fuel_margin:
+    # fuel_margin is revenue on litres dispensed from the pump's own tanks
+    # less their weighted-average cost, and fuel_liters/margin_per_liter
+    # above are derived from it. A tanker deal dispensed no litres and
+    # carries its own exact cost, so adding it to fuel_margin would leave
+    # margin_per_liter dividing a profit that includes pass-through money
+    # by a litre count that excludes the pass-through litres - two
+    # different meanings in one number. It IS part of the day's total
+    # profit, so it goes into total_margin, the same pure-addition way
+    # other_income does.
+    tanker_revenue = float(
+        db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0))
+        .filter(TankerDeal.entry_date == entry_date)
+        .scalar()
+    )
+    tanker_cost = float(
+        db.session.query(func.coalesce(func.sum(TankerDeal.purchase_cost), 0))
+        .filter(TankerDeal.entry_date == entry_date)
+        .scalar()
+    )
+    tanker_margin = round(tanker_revenue - tanker_cost, 2)
+    total_margin = round(fuel_margin + product_margin + other_income + tanker_margin, 2)
 
     return {
         "fuel_revenue": net_revenue,
@@ -2864,6 +3063,9 @@ def daily_margin(entry_date, costs=None):
         "product_cost": product_cost,
         "product_margin": product_margin,
         "other_income": other_income,
+        "tanker_revenue": tanker_revenue,
+        "tanker_cost": tanker_cost,
+        "tanker_margin": tanker_margin,
         "total_margin": total_margin,
         "by_fuel": by_fuel,
     }
@@ -3710,12 +3912,25 @@ def cash_movement_for_date(entry_date):
             ProductPurchase.method == "cash",
         )
     )
+    # Both sides of a pass-through tanker deal, each on its own payment
+    # type (see TankerDeal in models.py) - _cash_daily_net_changes() adds
+    # exactly these two terms, so they must be itemized here too or this
+    # card stops closing on any date carrying one.
+    cash_tanker_purchases = scalar(
+        db.session.query(func.coalesce(func.sum(TankerDeal.purchase_cost), 0))
+        .filter(TankerDeal.entry_date == entry_date, TankerDeal.purchase_payment_type == "cash")
+    )
+    cash_tanker_sales = scalar(
+        db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0))
+        .filter(TankerDeal.entry_date == entry_date, TankerDeal.sale_payment_type == "cash")
+    )
 
     inflows = [
         {"label": "Cash sales", "amount": round(cash_sales, 2)},
         {"label": "Receipts", "amount": round(cash_receipts, 2)},
         {"label": "Product sales", "amount": round(cash_product_sales, 2)},
         {"label": "Other income", "amount": round(cash_other_income, 2)},
+        {"label": "Tanker sales", "amount": round(cash_tanker_sales, 2)},
     ]
     outflows = [
         {"label": "Expenses", "amount": round(cash_expenses, 2)},
@@ -3726,6 +3941,7 @@ def cash_movement_for_date(entry_date):
         {"label": "Deposited to bank", "amount": round(cash_deposits, 2)},
         {"label": "Sales returns refunded", "amount": round(cash_sales_returns, 2)},
         {"label": "Product purchases", "amount": round(cash_product_purchases, 2)},
+        {"label": "Tanker purchases", "amount": round(cash_tanker_purchases, 2)},
     ]
 
     total_in = round(sum(row["amount"] for row in inflows), 2)
@@ -3846,12 +4062,31 @@ def cash_movement_for_period(start, end):
             ProductPurchase.method == "cash",
         )
     )
+    # Both sides of a pass-through tanker deal - same two terms
+    # cash_movement_for_date() itemizes, widened to the period.
+    cash_tanker_purchases = scalar(
+        db.session.query(func.coalesce(func.sum(TankerDeal.purchase_cost), 0))
+        .filter(
+            TankerDeal.entry_date >= start,
+            TankerDeal.entry_date <= end,
+            TankerDeal.purchase_payment_type == "cash",
+        )
+    )
+    cash_tanker_sales = scalar(
+        db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0))
+        .filter(
+            TankerDeal.entry_date >= start,
+            TankerDeal.entry_date <= end,
+            TankerDeal.sale_payment_type == "cash",
+        )
+    )
 
     inflows = [
         {"label": "Cash sales", "amount": round(cash_sales, 2)},
         {"label": "Receipts", "amount": round(cash_receipts, 2)},
         {"label": "Product sales", "amount": round(cash_product_sales, 2)},
         {"label": "Other income", "amount": round(cash_other_income, 2)},
+        {"label": "Tanker sales", "amount": round(cash_tanker_sales, 2)},
     ]
     outflows = [
         {"label": "Expenses", "amount": round(cash_expenses, 2)},
@@ -3862,6 +4097,7 @@ def cash_movement_for_period(start, end):
         {"label": "Deposited to bank", "amount": round(cash_deposits, 2)},
         {"label": "Sales returns refunded", "amount": round(cash_sales_returns, 2)},
         {"label": "Product purchases", "amount": round(cash_product_purchases, 2)},
+        {"label": "Tanker purchases", "amount": round(cash_tanker_purchases, 2)},
     ]
 
     total_in = round(sum(row["amount"] for row in inflows), 2)
@@ -4018,6 +4254,25 @@ def _profit_series_for_window(start, end_date):
     product_margin_series = [
         round(product_revenue_by_day.get(d, 0) - product_cost_by_day.get(d, 0), 2) for d in all_dates
     ]
+    # Pass-through tanker margin per day (see TankerDeal in models.py) -
+    # grouped by date the same way every other term above is. It is added
+    # to profit as its own term, NOT into sales_by_day and NOT into
+    # cogs_by_day: sales_by_day also backs dashboard_trend_series()'s
+    # cash_series and litres/rupees-by-fuel figures, all of which mean
+    # fuel dispensed from the pump's own tanks, and cogs_by_day is a
+    # per-litre weighted-average cost this deal has no part in. Keeping it
+    # a separate addend is what makes this series agree with
+    # _reports_monthly_context()'s net_profit, which adds tanker_margin
+    # the same separate way.
+    tanker_margin_by_day = {}
+    for entry_date_val, sale_amount, purchase_cost in (
+        db.session.query(TankerDeal.entry_date, TankerDeal.sale_amount, TankerDeal.purchase_cost)
+        .filter(TankerDeal.entry_date >= start, TankerDeal.entry_date <= end_date)
+        .all()
+    ):
+        tanker_margin_by_day[entry_date_val] = round(
+            tanker_margin_by_day.get(entry_date_val, 0) + (sale_amount - purchase_cost), 2
+        )
     profit_series = [
         round(
             (sales_by_day.get(d, 0) - returns_amount_by_day.get(d, 0))  # net fuel revenue
@@ -4025,7 +4280,8 @@ def _profit_series_for_window(start, end_date):
             - expenses_by_day.get(d, 0)
             - salaries_by_day.get(d, 0)
             + product_margin_series[i]
-            + other_income_by_day.get(d, 0),
+            + other_income_by_day.get(d, 0)
+            + tanker_margin_by_day.get(d, 0),
             2,
         )
         for i, d in enumerate(all_dates)

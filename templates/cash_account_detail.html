@@ -100,6 +100,14 @@
         <td><span class="badge badge-ok">Other Income</span></td>
         <td>{{ e.obj.description }}</td>
         <td>+{{ (e.obj.amount)|fmt }}</td>
+        {% elif e.kind == "tanker_purchase" %}
+        <td><span class="badge badge-low">Tanker Deal Purchase</span></td>
+        <td>{{ (e.obj.liters)|fmt }} L {{ e.obj.fuel_type.name }} pass-through - never entered a tank{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>-{{ (e.obj.purchase_cost)|fmt }}</td>
+        {% elif e.kind == "tanker_sale" %}
+        <td><span class="badge badge-ok">Tanker Deal Sale</span></td>
+        <td>{{ (e.obj.liters)|fmt }} L {{ e.obj.fuel_type.name }} pass-through - never entered a tank{% if e.obj.note %} - {{ e.obj.note }}{% endif %}</td>
+        <td>+{{ (e.obj.sale_amount)|fmt }}</td>
         {% endif %}
         <td>{{ (e.running_balance)|fmt }}</td>
         <td>{{ e.obj.user.label if e.obj and e.obj.user else "-" }}</td>

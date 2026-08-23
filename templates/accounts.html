@@ -10,72 +10,115 @@
     <div class="export-menu">
       <button type="button" class="btn btn-ghost btn-sm export-toggle" aria-expanded="false">Export</button>
       <div class="export-menu-items" hidden>
-        <a href="{{ url_for('accounts_export', format='pdf', kind=kind, type=type_filter) }}">PDF</a>
-        <a href="{{ url_for('accounts_export', format='xlsx', kind=kind, type=type_filter) }}">Excel</a>
+        <a href="{{ url_for('accounts_export', format='pdf', kind=kind, type=type_filter, q=q) }}">PDF</a>
+        <a href="{{ url_for('accounts_export', format='xlsx', kind=kind, type=type_filter, q=q) }}">Excel</a>
       </div>
     </div>
     <a href="{{ url_for('ledger') }}" class="btn">Open Ledger &rarr;</a>
   </div>
 </div>
 
+<form method="get" action="{{ url_for('accounts') }}" class="acct-search">
+  <input type="hidden" name="kind" value="{{ kind }}">
+  <input type="hidden" name="type" value="{{ type_filter }}">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search accounts by name..." aria-label="Search accounts by name">
+  <button type="submit" class="btn btn-sm">Search</button>
+  {% if q %}
+  <a href="{{ url_for('accounts', kind=kind, type=type_filter) }}" class="btn btn-ghost btn-sm">Clear</a>
+  <span class="hint-sm acct-search-count">{{ summary.count }} account{{ "" if summary.count == 1 else "s" }} match{{ "es" if summary.count == 1 else "" }} &ldquo;{{ q }}&rdquo;</span>
+  {% endif %}
+</form>
+
 <div class="filter-row">
   {% if type_filter not in ('bank', 'cash') %}
   <div class="filter-group">
-    <a href="{{ url_for('accounts', kind='all', type=type_filter) }}" class="filter-pill {{ 'active' if kind == 'all' }}">All</a>
-    <a href="{{ url_for('accounts', kind='debitors', type=type_filter) }}" class="filter-pill {{ 'active' if kind == 'debitors' }}">Debitors <span class="hint-sm">(owe us)</span></a>
-    <a href="{{ url_for('accounts', kind='creditors', type=type_filter) }}" class="filter-pill {{ 'active' if kind == 'creditors' }}">Creditors <span class="hint-sm">(we owe)</span></a>
+    <a href="{{ url_for('accounts', kind='all', type=type_filter, q=q) }}" class="filter-pill {{ 'active' if kind == 'all' }}">All</a>
+    <a href="{{ url_for('accounts', kind='debitors', type=type_filter, q=q) }}" class="filter-pill {{ 'active' if kind == 'debitors' }}">Debitors <span class="hint-sm">(owe us)</span></a>
+    <a href="{{ url_for('accounts', kind='creditors', type=type_filter, q=q) }}" class="filter-pill {{ 'active' if kind == 'creditors' }}">Creditors <span class="hint-sm">(we owe)</span></a>
   </div>
   {% endif %}
   <div class="filter-group">
-    <a href="{{ url_for('accounts', kind=kind, type='all') }}" class="filter-pill {{ 'active' if type_filter == 'all' }}">All types</a>
-    <a href="{{ url_for('accounts', kind=kind, type='customer') }}" class="filter-pill {{ 'active' if type_filter == 'customer' }}">Customers</a>
-    <a href="{{ url_for('accounts', kind=kind, type='supplier') }}" class="filter-pill {{ 'active' if type_filter == 'supplier' }}">Suppliers</a>
-    <a href="{{ url_for('accounts', kind=kind, type='employee') }}" class="filter-pill {{ 'active' if type_filter == 'employee' }}">Employees</a>
-    <a href="{{ url_for('accounts', kind='all', type='bank') }}" class="filter-pill {{ 'active' if type_filter == 'bank' }}">Bank Accounts</a>
-    <a href="{{ url_for('accounts', kind='all', type='cash') }}" class="filter-pill {{ 'active' if type_filter == 'cash' }}">Cash in Hand</a>
+    <a href="{{ url_for('accounts', kind=kind, type='all', q=q) }}" class="filter-pill {{ 'active' if type_filter == 'all' }}">All types</a>
+    <a href="{{ url_for('accounts', kind=kind, type='customer', q=q) }}" class="filter-pill {{ 'active' if type_filter == 'customer' }}">Customers</a>
+    <a href="{{ url_for('accounts', kind=kind, type='supplier', q=q) }}" class="filter-pill {{ 'active' if type_filter == 'supplier' }}">Suppliers</a>
+    <a href="{{ url_for('accounts', kind=kind, type='employee', q=q) }}" class="filter-pill {{ 'active' if type_filter == 'employee' }}">Employees</a>
+    <a href="{{ url_for('accounts', kind='all', type='bank', q=q) }}" class="filter-pill {{ 'active' if type_filter == 'bank' }}">Bank Accounts</a>
+    <a href="{{ url_for('accounts', kind='all', type='cash', q=q) }}" class="filter-pill {{ 'active' if type_filter == 'cash' }}">Cash in Hand</a>
   </div>
 </div>
 <p class="hint">An account's type label is just for organizing/searching - any account can have both credit given to it and credit taken from it (e.g. another pump you sometimes buy from and sometimes sell to). The Debitors/Creditors split above is based purely on each account's current balance, so an account can move between the two as its balance changes. Bank accounts are the pump's own money, not a debitor/creditor relationship, so they only appear under "All".</p>
 
-<div class="panel">
-  <div class="table-wrap">
-  <table class="table">
-    <thead><tr><th>Name</th><th>Type</th><th>Phone</th><th>Balance (Rs)</th><th>Oldest Unpaid</th><th></th></tr></thead>
-    <tbody>
-      {% for r in rows %}
-      <tr class="{{ 'row-low' if r.balance != 0 else '' }}">
-        <td>{{ r.name }}{% if r.is_group %} <span class="badge">{{ r.child_count }} sub-accounts</span>{% endif %}</td>
-        <td><span class="badge">{{ {"bank": "Bank Account", "cash": "Cash"}.get(r.kind) or r.obj.account_type|capitalize }}</span></td>
-        <td>{{ r.obj.phone or "-" if r.kind == "account" else "-" }}</td>
-        {% if r.kind == "bank" %}
-        <td>{{ (r.balance)|fmt }}</td>
-        <td>-</td>
-        <td><a href="{{ url_for('bank_account_detail', bank_account_id=r.obj.id) }}">View history</a></td>
-        {% elif r.kind == "cash" %}
-        <td>{{ (r.balance)|fmt }}</td>
-        <td>-</td>
-        <td><a href="{{ url_for('cash_account_detail') }}">View history</a></td>
-        {% else %}
-        <td>
-          {{ (r.balance)|fmt }} <span class="hint-sm">{{ "owed to you" if r.balance > 0 else ("you owe" if r.balance < 0 else "") }}</span>
-          {% if r.is_group %}<div class="hint-sm">group total</div>{% endif %}
-        </td>
-        <td>
+<div class="stat-row">
+  <div class="stat-card accent-green">
+    <div class="label">Owed To You</div>
+    <div class="value">Rs {{ (summary.owed_to_you)|fmt }}</div>
+    <div class="sub">across the customer/supplier/employee rows below</div>
+  </div>
+  <div class="stat-card accent-red">
+    <div class="label">You Owe</div>
+    <div class="value">Rs {{ (summary.you_owe)|fmt }}</div>
+    <div class="sub">across the customer/supplier/employee rows below</div>
+  </div>
+  <div class="stat-card {{ 'accent-green' if summary.net > 0 else ('accent-red' if summary.net < 0 else '') }}">
+    <div class="label">Net Position</div>
+    <div class="value">Rs {{ (summary.net|abs)|fmt }}</div>
+    <div class="sub">{{ "in your favour" if summary.net > 0 else ("against you" if summary.net < 0 else "square") }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Accounts Listed</div>
+    <div class="value">{{ summary.count }}</div>
+    <div class="sub">a group counts once, as one row</div>
+  </div>
+</div>
+
+<div class="panel panel-tight">
+  <div class="acct-list">
+    {% for r in rows %}
+    <div class="acct-item {{ 'is-pos' if r.balance > 0 else ('is-neg' if r.balance < 0 else 'is-zero') }}">
+      <div class="acct-ident">
+        <div class="acct-name">
+          {% if r.kind == "bank" %}<a href="{{ url_for('bank_account_detail', bank_account_id=r.obj.id) }}">{{ r.name }}</a>
+          {% elif r.kind == "cash" %}<a href="{{ url_for('cash_account_detail') }}">{{ r.name }}</a>
+          {% else %}<a href="{{ url_for('account_detail', account_id=r.obj.id) }}">{{ r.name }}</a>{% endif %}
+        </div>
+        <div class="acct-meta">
+          <span class="badge">{{ {"bank": "Bank Account", "cash": "Cash"}.get(r.kind) or r.obj.account_type|capitalize }}</span>
+          {% if r.is_group %}<span class="badge">{{ r.child_count }} sub-account{{ "" if r.child_count == 1 else "s" }}</span>{% endif %}
+          {% if r.notes %}<span class="badge acct-note-flag" title="{{ r.notes }}" aria-label="This account has a note">Note</span>{% endif %}
           {% if r.aging and r.aging.oldest_days is not none %}
-            <span class="badge {{ 'badge-low' if r.aging.oldest_days > 60 else '' }}">{{ r.aging.oldest_days }} days</span>
-          {% else %}-{% endif %}
-        </td>
-        <td>
-          <a href="{{ url_for('account_detail', account_id=r.obj.id) }}">View history</a>
-          &middot; <a href="{{ url_for('account_statement', account_id=r.obj.id) }}">Statement</a>
-        </td>
+          <span class="badge {{ 'badge-low' if r.aging.oldest_days > 60 else '' }}">{{ r.aging.oldest_days }} days unpaid</span>
+          {% endif %}
+          {% if r.kind == "account" and r.obj.phone %}<span class="hint-sm">{{ r.obj.phone }}</span>{% endif %}
+        </div>
+      </div>
+      <div class="acct-amount">
+        <div class="acct-figure">Rs {{ (r.balance|abs)|fmt }}</div>
+        <div class="acct-direction">
+          {% if r.kind in ("bank", "cash") %}{{ "in hand" if r.kind == "cash" else "in the bank" }}{% if r.balance < 0 %} (overdrawn){% endif %}
+          {% elif r.balance > 0 %}owed to you
+          {% elif r.balance < 0 %}you owe
+          {% else %}settled{% endif %}
+          {% if r.is_group %} &middot; group total{% endif %}
+        </div>
+      </div>
+      <div class="acct-actions">
+        {% if r.kind == "bank" %}
+        <a href="{{ url_for('bank_account_detail', bank_account_id=r.obj.id) }}">History</a>
+        {% elif r.kind == "cash" %}
+        <a href="{{ url_for('cash_account_detail') }}">History</a>
+        {% else %}
+        <a href="{{ url_for('account_detail', account_id=r.obj.id) }}">History</a>
+        <a href="{{ url_for('account_statement', account_id=r.obj.id) }}">Statement</a>
         {% endif %}
-      </tr>
-      {% else %}
-      <tr><td colspan="6">No accounts match this filter.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+      </div>
+    </div>
+    {% else %}
+    <div class="acct-empty">
+      {% if q %}No accounts match &ldquo;{{ q }}&rdquo;{% if kind != 'all' or type_filter != 'all' %} in this filter{% endif %}.
+      <a href="{{ url_for('accounts', kind=kind, type=type_filter, q=q) }}">Clear the search</a>
+      {% else %}No accounts match this filter.{% endif %}
+    </div>
+    {% endfor %}
   </div>
 </div>
 
@@ -130,7 +173,7 @@
         <td colspan="7">
           <form method="post" action="{{ url_for('account_entry_expense_edit', entry_id=e.id) }}" class="form-grid">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="next" value="{{ url_for('accounts', kind=kind, type=type_filter) }}">
+            <input type="hidden" name="next" value="{{ url_for('accounts', kind=kind, type=type_filter, q=q) }}">
             <label>Date
               <input type="date" name="entry_date" value="{{ e.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
             </label>
@@ -156,7 +199,7 @@
           <form method="post" action="{{ url_for('entry_delete', kind='expense', entry_id=e.id) }}" style="margin-top:10px;"
                 onsubmit="return confirm('Delete this expense ({{ e.category }})? This cannot be undone.');">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="next" value="{{ url_for('accounts', kind=kind, type=type_filter) }}">
+            <input type="hidden" name="next" value="{{ url_for('accounts', kind=kind, type=type_filter, q=q) }}">
             <button type="submit" class="btn btn-sm btn-danger">Delete</button>
           </form>
         </td>

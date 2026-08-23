@@ -70,6 +70,8 @@
           {% elif e.kind == "product_sale" %}Non-Fuel Sale
           {% elif e.kind == "product_purchase" %}Product Purchase (Credit)
           {% elif e.kind == "other_income" %}Other Income
+          {% elif e.kind == "tanker_sale" %}Tanker Deal (Credit Sale)
+          {% elif e.kind == "tanker_purchase" %}Tanker Deal (Credit Purchase)
           {% endif %}
         </td>
         <td>
@@ -85,6 +87,8 @@
             {{ (e.obj.quantity)|fmt }} {{ e.obj.product.unit }} {{ e.obj.product.label }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
           {% elif e.kind == "other_income" %}
             {{ e.obj.description }}
+          {% elif e.kind in ("tanker_sale", "tanker_purchase") %}
+            {{ (e.obj.liters)|fmt }} L {{ e.obj.fuel_type.name }} pass-through - never entered a tank{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
           {% elif e.obj %}
             {{ "Via " + e.obj.bank_account.name if e.obj.method == "bank" else "Cash" }}{% if e.obj.note %} &middot; {{ e.obj.note }}{% endif %}
           {% else %}-{% endif %}
