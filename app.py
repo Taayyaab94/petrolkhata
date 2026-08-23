@@ -6939,7 +6939,10 @@ def _reports_context(selected_date):
 
     bank_sales = BankSale.query.filter_by(entry_date=selected_date).all()
     total_bank_sales = sum((b.amount for b in bank_sales), 0.0)
-    cash_sales = total_sales - total_credit_given - total_bank_sales
+    # cash_sales is deliberately NOT computed here: total_sales,
+    # total_credit_given and total_bank_sales all still gain their
+    # pass-through tanker terms further down (see the tanker block), and
+    # cash is the remainder once all three are final.
 
     payments = Receipt.query.filter_by(entry_date=selected_date).all()
     total_payments = sum((p.amount for p in payments), 0.0)
@@ -6998,24 +7001,48 @@ def _reports_context(selected_date):
     total_other_income = sum((oi.amount for oi in other_income_entries), 0.0)
     cash_other_income_total = sum((oi.amount for oi in other_income_entries if oi.method == "cash"), 0.0)
 
-    # Pass-through tanker deals (see TankerDeal in models.py). Reported as
-    # their own four figures and NEVER folded into total_sales,
-    # total_liters, by_fuel or the tank rows below: no fuel left a tank
-    # and none was dispensed, so adding them there would inflate litres
-    # sold and corrupt every per-litre figure derived from it. Only the
-    # cash-method sides move net_cash_flow, exactly the same distinction
-    # cash_purchases_total / cash_product_sales_total already make.
+    # Pass-through tanker deals (see TankerDeal in models.py). Their SALE
+    # side is money collected on this date, so it does count in the
+    # collected-money cards - Total Sales / Credit Given / Bank Sales,
+    # and therefore Cash Sales as the remainder - matching
+    # sales_breakdown_for_date() on the Ledger. They are still NEVER
+    # folded into total_liters, by_fuel or the tank rows: no fuel left a
+    # tank and none was dispensed, so adding them there would inflate
+    # litres sold and corrupt every per-litre figure derived from it. The
+    # tanker_* keys below stay as they are - they are the PROFIT view
+    # (the "Tanker Deal Margin" card), which is a different question from
+    # how the money came in.
     tanker_deals = TankerDeal.query.filter_by(entry_date=selected_date).order_by(TankerDeal.recorded_at).all()
     tanker_liters = sum((d.liters for d in tanker_deals), 0.0)
     tanker_revenue = sum((d.sale_amount for d in tanker_deals), 0.0)
     tanker_cost = sum((d.purchase_cost for d in tanker_deals), 0.0)
     tanker_margin = round(tanker_revenue - tanker_cost, 2)
+    tanker_credit_sales_total = sum(
+        (d.sale_amount for d in tanker_deals if d.sale_payment_type == "credit"), 0.0
+    )
+    tanker_bank_sales_total = sum(
+        (d.sale_amount for d in tanker_deals if d.sale_payment_type == "bank"), 0.0
+    )
     cash_tanker_sales_total = sum(
         (d.sale_amount for d in tanker_deals if d.sale_payment_type == "cash"), 0.0
     )
     cash_tanker_purchases_total = sum(
         (d.purchase_cost for d in tanker_deals if d.purchase_payment_type == "cash"), 0.0
     )
+
+    # The pump-only figures are kept under their own names because
+    # net_cash_flow below still needs them: it adds the cash-settled
+    # tanker sale as its own explicit term, so it must not also read a
+    # total_sales that already contains it.
+    pump_sales_total = total_sales
+    pump_credit_given = total_credit_given
+    total_sales += tanker_revenue
+    total_credit_given += tanker_credit_sales_total
+    total_bank_sales += tanker_bank_sales_total
+    # Cash is the remainder, so a cash-settled tanker sale lands in it
+    # automatically - there is no fourth tanker term here, and nothing
+    # downstream may add cash_tanker_sales_total to cash_sales.
+    cash_sales = total_sales - total_credit_given - total_bank_sales
 
     tanks = Tank.query.order_by(Tank.number).all()
     tank_rows = []
@@ -7032,9 +7059,16 @@ def _reports_context(selected_date):
             }
         )
 
+    # Built from the PUMP-only sales/credit figures plus the cash-settled
+    # tanker sale as its own term. Using the tanker-inclusive total_sales /
+    # total_credit_given here instead would double-count a cash tanker sale
+    # (it is inside total_sales already) and would silently pull a
+    # BANK-settled tanker sale into a cash-flow figure. Same reason
+    # cash_movement_for_date() dropped its separate "Tanker sales" inflow
+    # once the breakdown started carrying it.
     net_cash_flow = (
-        total_sales
-        - total_credit_given
+        pump_sales_total
+        - pump_credit_given
         + total_payments
         - total_expenses
         - cash_purchases_total

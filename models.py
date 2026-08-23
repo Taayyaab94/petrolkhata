@@ -587,10 +587,14 @@ class TankerDeal(TenantScoped, db.Model):
 
     Per-litre / tank-based fuel figures, because this deal carries its own
     exact cost rather than a weighted average and dispensed no litres:
-    cogs_for_period(), fuel_sales_for_date(), sales_breakdown_for_date(),
-    daily_margin()'s per-fuel/per-litre detail (`by_fuel`, `fuel_liters`,
-    `margin_per_liter`), fuel_rate_cards(), revenue_mix_for_date()'s fuel
-    segment, and reprice_entries().
+    cogs_for_period(), fuel_sales_for_date(), daily_margin()'s
+    per-fuel/per-litre detail (`by_fuel`, `fuel_liters`,
+    `margin_per_liter`), fuel_rate_cards(), and reprice_entries().
+
+    Also the monthly income statement's `revenue`, for a different
+    reason: net_profit already adds tanker_margin as its own category, so
+    putting tanker revenue into revenue as well would count the deal
+    twice in profit.
 
     Those exclusions are as deliberate, and as load-bearing, as the
     inclusions below - a TankerDeal leaking into any of them is a real
@@ -601,10 +605,16 @@ class TankerDeal(TenantScoped, db.Model):
     Account.balance + credit_aging() + account_ledger_events() (a credit
     purchase is money owed to the supplier, a credit sale is money owed by
     the customer); the cash and bank balance/movement functions (a
-    cash/bank-method side really does move cash or a bank account); and
-    profit, as its OWN margin category - daily_margin()["tanker_margin"],
-    the Daily/Monthly Report contexts, and the Dashboard/Trends profit
-    series - never folded into fuel margin.
+    cash/bank-method side really does move cash or a bank account); the
+    daily money-COLLECTED breakdown - sales_breakdown_for_date() and the
+    Daily Report's Total/Credit/Bank/Cash cards - where the SALE side
+    counts by how it was settled (and hence revenue_mix_for_date(), which
+    reads that breakdown), though only on the whole-date call, since a
+    TankerDeal carries no shift_id and must never reach an attendant's
+    expected till cash; and profit, as its OWN margin category -
+    daily_margin()["tanker_margin"], the Daily/Monthly Report contexts,
+    and the Dashboard/Trends profit series - never folded into fuel
+    margin.
     """
 
     id = db.Column(db.Integer, primary_key=True)

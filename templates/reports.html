@@ -26,7 +26,7 @@
   <div class="stat-card accent-brand">
     <div class="label">Total Sales</div>
     <div class="value">Rs {{ (total_sales)|fmt }}</div>
-    <div class="sub">{{ (total_liters)|fmt }} L sold</div>
+    <div class="sub">{{ (total_liters)|fmt }} L sold - incl. tanker deals</div>
   </div>
   <div class="stat-card">
     <div class="label">Testing</div>
@@ -217,7 +217,7 @@
 
   <div class="panel">
     <div class="panel-head"><h3>Direct Sales from Tanker</h3></div>
-    <p class="hint-sm">Pass-through deals: fuel that went straight from the supplier to the customer without entering a tank. Deliberately absent from Total Sales, Litres Sold and every tank figure above - only the margin is this pump&#39;s.</p>
+    <p class="hint-sm">Pass-through deals: fuel that went straight from the supplier to the customer without entering a tank. The money collected is counted in Total Sales and in Cash / Bank / Credit above, according to how each deal was settled. Litres Sold and every tank figure stay tanker-free - nothing was dispensed - and only the margin is this pump&#39;s.</p>
     <div class="table-wrap">
     <table class="table">
       <thead><tr><th>Fuel</th><th>Litres</th><th>Sold (Rs)</th><th>Cost (Rs)</th><th>Margin (Rs)</th></tr></thead>

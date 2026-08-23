@@ -814,14 +814,48 @@ def credit_discounts_for_period(start=None, end=None, fuel_type_id=None, shift_i
 
 
 def sales_breakdown_for_date(entry_date, shift_id=None):
-    """Total nozzle + direct sales for entry_date, split by how they were
-    collected: credit (owed by a customer), bank (reconciled to a bank
-    account), and cash (whatever's left over).
+    """Total nozzle + direct sales for entry_date, PLUS pass-through
+    tanker sales, split by how the money was collected: credit (owed by a
+    customer), bank (reconciled to a bank account), and cash (whatever's
+    left over).
 
-    Passing shift_id narrows every component to that one shift, which is
-    what makes a per-shift cash reconciliation possible - summing the
-    breakdowns of every shift on a date gives exactly the whole-date
-    breakdown, since all three tables carry the same shift_id."""
+    WHY TANKER SALES ARE IN HERE AT ALL
+    -----------------------------------
+    This is the money-COLLECTED view, not a litres/COGS view. A tanker
+    deal (see TankerDeal in models.py) is real revenue collected on the
+    date - on a customer's account, into a bank, or in cash - so leaving
+    it out made "Cash Sales = Total - Credit - Bank" describe only part
+    of the day's takings. It is added ONLY as the three money terms
+    below; a pass-through deal still dispenses no litres and carries no
+    weighted-average cost, so every litre/COGS/margin-per-litre/tank
+    figure stays tanker-free exactly as TankerDeal's docstring says. In
+    particular the monthly income statement's `revenue` deliberately does
+    NOT use this function: profit already picks tanker up once, as its
+    own `tanker_margin` category.
+    `cash` is derived (total - credit - bank), so a cash-settled tanker
+    sale falls into it automatically - there is no separate cash term,
+    and anything that treats this function's `cash` as the day's cash
+    sales must NOT add cash tanker sales a second time on top (see
+    cash_movement_for_date() and cash_account_ledger_events(), which each
+    itemize the tanker side separately and therefore net it back out of /
+    leave it out of their cash-sales term).
+
+    Passing shift_id narrows the pump-sale components to that one shift,
+    which is what makes a per-shift cash reconciliation possible: summing
+    every shift's breakdown on a date reproduces the whole-date figures
+    FOR THE PUMP-SALE COMPONENTS (Sale/DirectSale/CreditGiven/BankSale
+    all carry the same shift_id). That identity no longer extends to the
+    whole number: TankerDeal has NO shift_id, so tanker sales appear only
+    in the whole-date (shift_id is None) figure and in no shift's.
+
+    That is deliberate, not an oversight:
+    - a tanker deal is not a dispensing event and cannot be attributed to
+      a shift, so a shift-scoped breakdown has nothing to attribute;
+    - handover_rows_for_date() and attendant_variance_summary() use the
+      SHIFT-scoped call to compute the cash an attendant is expected to
+      hand over. A tanker deal is an owner-level transaction that never
+      passes through an attendant's till, so letting it in there would
+      invent a false shortfall the size of the deal."""
     sale_q = db.session.query(func.coalesce(func.sum(Sale.total_amount), 0)).filter(
         Sale.entry_date == entry_date
     )
@@ -848,6 +882,22 @@ def sales_breakdown_for_date(entry_date, shift_id=None):
     # was never actually collected.
     total = round(total - credit_discounts_for_period(entry_date, entry_date, shift_id=shift_id), 2)
     credit, bank = credit_q.scalar(), bank_q.scalar()
+
+    if shift_id is None:
+        # Whole-date only - see the docstring: TankerDeal has no shift_id
+        # and must never reach an attendant's expected till cash.
+        tanker_q = db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0)).filter(
+            TankerDeal.entry_date == entry_date
+        )
+        tanker_total = float(tanker_q.scalar() or 0)
+        tanker_credit = float(
+            tanker_q.filter(TankerDeal.sale_payment_type == "credit").scalar() or 0
+        )
+        tanker_bank = float(tanker_q.filter(TankerDeal.sale_payment_type == "bank").scalar() or 0)
+        total = round(total + tanker_total, 2)
+        credit = round(credit + tanker_credit, 2)
+        bank = round(bank + tanker_bank, 2)
+
     cash = round(total - credit - bank, 2)
     return {"total": total, "credit": credit, "bank": bank, "cash": cash}
 
@@ -1971,16 +2021,33 @@ def cash_account_ledger_events(cash_account):
     # shown after it.
     sale_dates = {row[0] for row in db.session.query(Sale.entry_date).distinct().all()}
     sale_dates |= {row[0] for row in db.session.query(DirectSale.entry_date).distinct().all()}
+    # sales_breakdown_for_date()'s `cash` now INCLUDES cash-settled tanker
+    # sales (it folds tanker into total/credit/bank and derives cash as the
+    # remainder). This list itemizes every cash-settled TankerDeal as its
+    # own "tanker_sale" event further down - deliberately, so the owner can
+    # see the deal in the cash history - so the pump cash-sales row here
+    # must be tanker-free or a cash tanker deal would be counted twice and
+    # cash-in-hand shown on this page would drift away from
+    # cash_account_balance()/_cash_daily_net_changes(), which both build
+    # their cash-sales term from the pump tables directly and add the
+    # tanker side exactly once on top.
+    cash_tanker_sales_by_date = dict(
+        db.session.query(TankerDeal.entry_date, func.sum(TankerDeal.sale_amount))
+        .filter(TankerDeal.sale_payment_type == "cash")
+        .group_by(TankerDeal.entry_date)
+        .all()
+    )
     for d in sale_dates:
         breakdown = sales_breakdown_for_date(d)
-        if breakdown["cash"]:
+        pump_cash = round(breakdown["cash"] - float(cash_tanker_sales_by_date.get(d, 0) or 0), 2)
+        if pump_cash:
             events.append(
                 {
                     "kind": "cash_sales",
                     "entry_date": d,
                     "sort_key": (d, datetime.min.replace(minute=1)),
                     "obj": None,
-                    "delta": breakdown["cash"],
+                    "delta": pump_cash,
                 }
             )
 
@@ -3912,17 +3979,22 @@ def cash_movement_for_date(entry_date):
             ProductPurchase.method == "cash",
         )
     )
-    # Both sides of a pass-through tanker deal, each on its own payment
-    # type (see TankerDeal in models.py) - _cash_daily_net_changes() adds
-    # exactly these two terms, so they must be itemized here too or this
-    # card stops closing on any date carrying one.
+    # The PURCHASE side of a pass-through tanker deal (see TankerDeal in
+    # models.py) - a cost, not a sale, so it is its own outflow row and
+    # appears nowhere in the sales breakdown.
+    #
+    # There is deliberately NO matching "Tanker sales" INFLOW row: a
+    # cash-settled tanker sale is already inside `cash_sales` above,
+    # because sales_breakdown_for_date() now folds tanker sales into
+    # total/credit/bank and derives cash as the remainder. Adding it
+    # again here would double-count it and break this card's
+    # opening + total_in - total_out == closing invariant by exactly the
+    # cash tanker amount. _cash_daily_net_changes(), which this card is
+    # reconciled against, still counts that sale exactly once - via its
+    # own tanker-sales term, not via the breakdown.
     cash_tanker_purchases = scalar(
         db.session.query(func.coalesce(func.sum(TankerDeal.purchase_cost), 0))
         .filter(TankerDeal.entry_date == entry_date, TankerDeal.purchase_payment_type == "cash")
-    )
-    cash_tanker_sales = scalar(
-        db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0))
-        .filter(TankerDeal.entry_date == entry_date, TankerDeal.sale_payment_type == "cash")
     )
 
     inflows = [
@@ -3930,7 +4002,6 @@ def cash_movement_for_date(entry_date):
         {"label": "Receipts", "amount": round(cash_receipts, 2)},
         {"label": "Product sales", "amount": round(cash_product_sales, 2)},
         {"label": "Other income", "amount": round(cash_other_income, 2)},
-        {"label": "Tanker sales", "amount": round(cash_tanker_sales, 2)},
     ]
     outflows = [
         {"label": "Expenses", "amount": round(cash_expenses, 2)},
@@ -4004,6 +4075,17 @@ def cash_movement_for_period(start, end):
         db.session.query(func.coalesce(func.sum(BankSale.amount), 0))
         .filter(BankSale.entry_date >= start, BankSale.entry_date <= end)
     )
+    # Tanker sales, on exactly the same three terms sales_breakdown_for_date()
+    # adds for a single date (total / credit / bank, cash falling out as the
+    # remainder). This function builds its own range-scoped figure instead of
+    # calling that one, so the terms have to be repeated here or the period
+    # card would disagree with the sum of its days.
+    tanker_q = db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0)).filter(
+        TankerDeal.entry_date >= start, TankerDeal.entry_date <= end
+    )
+    gross = round(gross + scalar(tanker_q), 2)
+    credit += scalar(tanker_q.filter(TankerDeal.sale_payment_type == "credit"))
+    bank += scalar(tanker_q.filter(TankerDeal.sale_payment_type == "bank"))
     cash_sales = round(gross - credit - bank, 2)
 
     cash_receipts = scalar(
@@ -4062,8 +4144,10 @@ def cash_movement_for_period(start, end):
             ProductPurchase.method == "cash",
         )
     )
-    # Both sides of a pass-through tanker deal - same two terms
-    # cash_movement_for_date() itemizes, widened to the period.
+    # The purchase side of a pass-through tanker deal - same term
+    # cash_movement_for_date() itemizes, widened to the period, and for
+    # the same reason there is no matching "Tanker sales" inflow: the
+    # cash-settled sale is already inside `cash_sales` above.
     cash_tanker_purchases = scalar(
         db.session.query(func.coalesce(func.sum(TankerDeal.purchase_cost), 0))
         .filter(
@@ -4072,21 +4156,12 @@ def cash_movement_for_period(start, end):
             TankerDeal.purchase_payment_type == "cash",
         )
     )
-    cash_tanker_sales = scalar(
-        db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0))
-        .filter(
-            TankerDeal.entry_date >= start,
-            TankerDeal.entry_date <= end,
-            TankerDeal.sale_payment_type == "cash",
-        )
-    )
 
     inflows = [
         {"label": "Cash sales", "amount": round(cash_sales, 2)},
         {"label": "Receipts", "amount": round(cash_receipts, 2)},
         {"label": "Product sales", "amount": round(cash_product_sales, 2)},
         {"label": "Other income", "amount": round(cash_other_income, 2)},
-        {"label": "Tanker sales", "amount": round(cash_tanker_sales, 2)},
     ]
     outflows = [
         {"label": "Expenses", "amount": round(cash_expenses, 2)},
