@@ -443,67 +443,15 @@ class Account(TenantScoped, db.Model):
     @property
     def balance(self):
         """Positive balance = this account owes the pump money (debitor).
-        Negative balance = the pump owes this account money (creditor)."""
-        credit_given_total = sum(c.amount for c in self.credit_entries)
-        receipts_total = sum(r.amount for r in self.receipts)
-        purchases_credit_total = sum(
-            (p.cost or 0) for p in self.stock_purchases if p.payment_type == "credit"
-        )
-        supplier_payments_total = sum(p.amount for p in self.supplier_payments)
-        loans_total = sum(l.amount for l in self.employee_loans)
-        # Only the deducted portion of a salary touches this balance - the
-        # part actually handed over is pay, not a change in what's owed.
-        salary_deductions_total = sum(s.deduction_amount for s in self.salary_payments)
-        # A sales return refunded "on the customer's account" (method ==
-        # "credit") reduces what they owe, the same direction as a receipt -
-        # account_id is only ever set on a SalesReturn for that method, so
-        # every row in this backref already qualifies.
-        sales_returns_total = sum(sr.amount for sr in self.sales_returns)
-        # A non-fuel sale "on the customer's account" (method == "credit")
-        # increases what they owe, the same direction as credit_given_total
-        # above - account_id is only ever set on a ProductSale for that
-        # method. A product purchase "on credit" (payment_type == "credit")
-        # increases what the pump owes a supplier, the same direction as
-        # purchases_credit_total; total_cost already carries the sign for a
-        # return-to-supplier (see ProductPurchase's docstring in models.py),
-        # so no special case is needed for that here either.
-        product_sales_credit_total = sum(ps.amount for ps in self.product_sales if ps.method == "credit")
-        product_purchases_credit_total = sum(
-            (pp.total_cost or 0) for pp in self.product_purchases if pp.payment_type == "credit"
-        )
-        # Other Income recorded "on account" (method == "credit") increases
-        # what this account owes, the same direction as product_sales_credit_total
-        # above - account_id is only ever set on an OtherIncome row for that
-        # method.
-        other_income_credit_total = sum(oi.amount for oi in self.other_income_entries if oi.method == "credit")
-        # A pass-through tanker deal (see TankerDeal) can touch this
-        # account from EITHER side, and the two must never cross - hence
-        # the two distinct backrefs. A tanker bought on credit is money
-        # the pump owes this supplier, exactly the same direction as
-        # purchases_credit_total above; a tanker sold on credit is money
-        # this customer owes the pump, exactly the same direction as
-        # credit_given_total. supplier_account_id/customer_account_id are
-        # only ever set for their own "credit" payment type, so every row
-        # in either backref already qualifies with no filter needed - same
-        # convention as product_sales_credit_total above.
-        tanker_purchases_credit_total = sum(d.purchase_cost for d in self.tanker_purchases)
-        tanker_sales_credit_total = sum(d.sale_amount for d in self.tanker_sales)
-        return round(
-            self.opening_balance
-            + credit_given_total
-            - receipts_total
-            - purchases_credit_total
-            + supplier_payments_total
-            + loans_total
-            - salary_deductions_total
-            - sales_returns_total
-            + product_sales_credit_total
-            - product_purchases_credit_total
-            + other_income_credit_total
-            - tanker_purchases_credit_total
-            + tanker_sales_credit_total,
-            2,
-        )
+        Negative balance = the pump owes this account money (creditor).
+
+        The signed terms summed here are ACCOUNT_TERMS in balance_terms.py -
+        see that module for the term-by-term transcription of what used to
+        be inline here, including every comment explaining why a given
+        term needs (or doesn't need) a filter."""
+        from balance_terms import ACCOUNT_TERMS, sum_via_relationships
+
+        return round(sum_via_relationships(self, ACCOUNT_TERMS, start=self.opening_balance), 2)
 
 
 class Sale(TenantScoped, db.Model):
@@ -1004,64 +952,17 @@ class BankAccount(TenantScoped, db.Model):
 
     @property
     def balance(self):
-        sales_total = sum(s.amount for s in self.bank_sales)
-        deposits_total = sum(d.amount for d in self.deposits)
-        receipts_total = sum(r.amount for r in self.receipts)
-        loans_total = sum(l.amount for l in self.employee_loans_paid)
-        expenses_total = sum(e.amount for e in self.expenses)
-        fuel_purchases_total = sum(
-            (p.cost or 0) for p in self.fuel_purchases if p.payment_type == "cash"
-        )
-        supplier_payments_total = sum(p.amount for p in self.supplier_payments_paid)
-        # Only the net handed over leaves the bank - the deducted portion
-        # of a salary never moves as money, it just settles an advance.
-        salaries_total = sum(s.net_paid for s in self.salary_payments_paid)
-        # A sales return refunded out of this bank (method == "bank")
-        # leaves the same way a loan/expense/purchase paid via this bank
-        # does - bank_account_id is only ever set on a SalesReturn for
-        # that method, so every row in this backref already qualifies.
-        sales_returns_total = sum(sr.amount for sr in self.sales_returns)
-        # bank_account_id is only ever set on a ProductSale for method ==
-        # "bank" (a non-fuel sale received into this bank), and on a
-        # ProductPurchase for a cash-paid (payment_type == "cash") delivery
-        # settled via this bank - the payment_type check below mirrors
-        # fuel_purchases_total's above, and total_cost's sign already
-        # handles a return-to-supplier with no special case needed.
-        product_sales_total = sum(ps.amount for ps in self.product_sales if ps.method == "bank")
-        product_purchases_total = sum(
-            (pp.total_cost or 0) for pp in self.product_purchases if pp.payment_type == "cash"
-        )
-        # other_income_entries is only ever populated with method == "bank"
-        # rows for this bank account (see OtherIncome and
-        # ledger_other_income() in app.py) - no method filter needed here,
-        # same reasoning as product_sales_total's docstring above it.
-        other_income_total = sum(oi.amount for oi in self.other_income_entries)
-        # Bank-method sides of a pass-through tanker deal (see TankerDeal).
-        # purchase_bank_account_id / sale_bank_account_id are only ever set
-        # for their own side's "bank" payment type, so neither backref
-        # needs a filter - same reasoning other_income_total above uses.
-        # The two are separate backrefs, not one shared list, so a deal
-        # whose purchase and sale both route through THIS bank still nets
-        # correctly (out by cost, in by sale) rather than counting once.
-        tanker_purchases_total = sum(d.purchase_cost for d in self.tanker_purchases_paid)
-        tanker_sales_total = sum(d.sale_amount for d in self.tanker_sales_received)
+        """The signed terms summed here are BANK_TERMS in balance_terms.py -
+        the same 14 terms bank_account_balance_as_of() sums via SQL (see
+        that function's docstring in ledger_logic.py, which documents that
+        the mirroring is deliberate). See balance_terms.py for the
+        term-by-term transcription of what used to be inline here,
+        including every comment explaining why a given term needs (or
+        doesn't need) a filter."""
+        from balance_terms import BANK_TERMS, sum_via_relationships
+
         return round(
-            self.opening_balance
-            + sales_total
-            + deposits_total
-            + receipts_total
-            - loans_total
-            - expenses_total
-            - fuel_purchases_total
-            - supplier_payments_total
-            - salaries_total
-            - sales_returns_total
-            + product_sales_total
-            - product_purchases_total
-            + other_income_total
-            - tanker_purchases_total
-            + tanker_sales_total,
-            2,
+            sum_via_relationships(self, BANK_TERMS, start=self.opening_balance), 2
         )
 
 

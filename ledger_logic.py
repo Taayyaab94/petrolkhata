@@ -1246,7 +1246,13 @@ def credit_aging(account, as_of_date):
     (owed-to-us) balance; a settled or creditor account ages to nothing.
 
     CRITICAL INVARIANT: the debit and credit sides built here MUST mirror
-    Account.balance's terms EXACTLY, kind for kind and sign for sign - the
+    Account.balance's terms EXACTLY, kind for kind and sign for sign - see
+    ACCOUNT_TERMS in balance_terms.py for that canonical term list (this
+    function is NOT restructured to read it directly - aging's FIFO
+    bucketing needs each term's own date, where ACCOUNT_TERMS' consumers
+    only ever need a total, so mechanically sharing the table here would
+    be a bigger, riskier change than this pass is meant to make; the list
+    below must still be kept in step with it by hand) - the
     buckets this returns have to sum to that same account's .balance (see
     test_credit_aging_matches_balance_all_kinds() in the scratchpad, which
     asserts exactly that across every kind at once). This drifted three
@@ -1519,6 +1525,24 @@ def fuel_sales_for_date(entry_date):
     return by_fuel
 
 
+def _walk_running_balance(events, opening=0.0, key="sort_key"):
+    """Sort `events` by `key`, walk them oldest-first accumulating a
+    running balance into each event's "running_balance" key, then return
+    them reversed (newest first) - the shared tail of
+    account_ledger_events(), cash_account_ledger_events(), and
+    bank_account_ledger_events(), which were previously three
+    hand-copied, identical blocks of exactly this. Mutates and returns
+    the same list `events` was, matching what all three call sites
+    already relied on."""
+    events.sort(key=lambda e: e[key])
+    running = opening
+    for e in events:
+        running += e["delta"]
+        e["running_balance"] = round(running, 2)
+    events.reverse()
+    return events
+
+
 def account_ledger_events(account):
     """Full transaction history for one account (opening balance plus every
     entry kind that can be posted to it), each tagged with the running
@@ -1614,14 +1638,7 @@ def account_ledger_events(account):
             {"kind": "tanker_purchase", "entry_date": d.entry_date, "sort_key": (d.entry_date, d.recorded_at), "obj": d, "delta": -d.purchase_cost}
         )
 
-    events.sort(key=lambda e: e["sort_key"])
-    running = 0.0
-    for e in events:
-        running += e["delta"]
-        e["running_balance"] = round(running, 2)
-
-    events.reverse()
-    return events
+    return _walk_running_balance(events)
 
 
 def cash_account_balance(cash_account):
@@ -2109,14 +2126,7 @@ def cash_account_ledger_events(cash_account):
             {"kind": "tanker_sale", "entry_date": d.entry_date, "sort_key": (d.entry_date, d.recorded_at), "obj": d, "delta": d.sale_amount}
         )
 
-    events.sort(key=lambda e: e["sort_key"])
-    running = 0.0
-    for e in events:
-        running += e["delta"]
-        e["running_balance"] = round(running, 2)
-
-    events.reverse()
-    return events
+    return _walk_running_balance(events)
 
 
 # ------------------------------------------------------- product catalogue
@@ -2466,14 +2476,7 @@ def bank_account_ledger_events(bank_account):
             {"kind": "tanker_sale", "entry_date": d.entry_date, "sort_key": (d.entry_date, d.recorded_at), "obj": d, "delta": d.sale_amount}
         )
 
-    events.sort(key=lambda e: e["sort_key"])
-    running = 0.0
-    for e in events:
-        running += e["delta"]
-        e["running_balance"] = round(running, 2)
-
-    events.reverse()
-    return events
+    return _walk_running_balance(events)
 
 
 def bank_account_balance_as_of(bank_account, as_of_date):
@@ -2502,111 +2505,15 @@ def bank_account_balance_as_of(bank_account, as_of_date):
     Daily Report, Dashboard) that needs a balance as of a paged-to date.
     BankAccount.balance itself is deliberately left untouched for pages
     with no date to page against (Accounts, bank account detail, ...),
-    which must keep showing the current/all-time figure exactly as before."""
-    bank_sales_total = (
-        db.session.query(func.coalesce(func.sum(BankSale.amount), 0))
-        .filter(BankSale.bank_account_id == bank_account.id, BankSale.entry_date <= as_of_date)
-        .scalar()
-    )
-    deposits_total = (
-        db.session.query(func.coalesce(func.sum(CashDeposit.amount), 0))
-        .filter(CashDeposit.bank_account_id == bank_account.id, CashDeposit.entry_date <= as_of_date)
-        .scalar()
-    )
-    receipts_total = (
-        db.session.query(func.coalesce(func.sum(Receipt.amount), 0))
-        .filter(Receipt.bank_account_id == bank_account.id, Receipt.entry_date <= as_of_date)
-        .scalar()
-    )
-    loans_total = (
-        db.session.query(func.coalesce(func.sum(EmployeeLoan.amount), 0))
-        .filter(EmployeeLoan.bank_account_id == bank_account.id, EmployeeLoan.entry_date <= as_of_date)
-        .scalar()
-    )
-    expenses_total = (
-        db.session.query(func.coalesce(func.sum(Expense.amount), 0))
-        .filter(Expense.bank_account_id == bank_account.id, Expense.entry_date <= as_of_date)
-        .scalar()
-    )
-    fuel_purchases_total = (
-        db.session.query(func.coalesce(func.sum(StockPurchase.cost), 0))
-        .filter(
-            StockPurchase.bank_account_id == bank_account.id,
-            StockPurchase.payment_type == "cash",
-            StockPurchase.entry_date <= as_of_date,
-        )
-        .scalar()
-    )
-    supplier_payments_total = (
-        db.session.query(func.coalesce(func.sum(SupplierPayment.amount), 0))
-        .filter(SupplierPayment.bank_account_id == bank_account.id, SupplierPayment.entry_date <= as_of_date)
-        .scalar()
-    )
-    salaries_total = (
-        db.session.query(
-            func.coalesce(func.sum(SalaryPayment.gross_amount - SalaryPayment.deduction_amount), 0)
-        )
-        .filter(SalaryPayment.bank_account_id == bank_account.id, SalaryPayment.entry_date <= as_of_date)
-        .scalar()
-    )
-    sales_returns_total = (
-        db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0))
-        .filter(
-            SalesReturn.bank_account_id == bank_account.id,
-            SalesReturn.method == "bank",
-            SalesReturn.entry_date <= as_of_date,
-        )
-        .scalar()
-    )
-    product_sales_total = (
-        db.session.query(func.coalesce(func.sum(ProductSale.amount), 0))
-        .filter(
-            ProductSale.bank_account_id == bank_account.id,
-            ProductSale.method == "bank",
-            ProductSale.entry_date <= as_of_date,
-        )
-        .scalar()
-    )
-    product_purchases_total = (
-        db.session.query(func.coalesce(func.sum(ProductPurchase.total_cost), 0))
-        .filter(
-            ProductPurchase.bank_account_id == bank_account.id,
-            ProductPurchase.payment_type == "cash",
-            ProductPurchase.entry_date <= as_of_date,
-        )
-        .scalar()
-    )
-    # No method == "bank" filter needed in the SQL itself - bank_account_id
-    # is only ever set on an OtherIncome row for method == "bank" (see the
-    # route), exactly as deposits_total/receipts_total above already rely
-    # on for their own bank_account_id filter.
-    other_income_total = (
-        db.session.query(func.coalesce(func.sum(OtherIncome.amount), 0))
-        .filter(OtherIncome.bank_account_id == bank_account.id, OtherIncome.entry_date <= as_of_date)
-        .scalar()
-    )
-    # Bank-method sides of a pass-through tanker deal (see TankerDeal in
-    # models.py) - a purchase paid from this bank takes money out, a sale
-    # received into it puts money in. Mirrors BankAccount.balance's own two
-    # terms exactly. No payment-type filter needed in the SQL for the same
-    # reason other_income_total above needs none: each bank_account_id
-    # column is only ever set for its own side's "bank" payment type.
-    tanker_purchases_total = (
-        db.session.query(func.coalesce(func.sum(TankerDeal.purchase_cost), 0))
-        .filter(
-            TankerDeal.purchase_bank_account_id == bank_account.id,
-            TankerDeal.entry_date <= as_of_date,
-        )
-        .scalar()
-    )
-    tanker_sales_total = (
-        db.session.query(func.coalesce(func.sum(TankerDeal.sale_amount), 0))
-        .filter(
-            TankerDeal.sale_bank_account_id == bank_account.id,
-            TankerDeal.entry_date <= as_of_date,
-        )
-        .scalar()
-    )
+    which must keep showing the current/all-time figure exactly as before.
+
+    The terms summed here are BANK_TERMS in balance_terms.py - the same 14
+    terms BankAccount.balance sums via Python relationship backrefs (see
+    that property in models.py). sum_via_sql() runs one explicit SQL sum
+    per term, adding `entry_date <= as_of_date` to each - see that
+    function's docstring in balance_terms.py."""
+    from balance_terms import BANK_TERMS, sum_via_sql
+
     # The opening balance is anchored on its own opening_balance_date (or
     # created_at.date() if unset - same fallback _cash_daily_net_changes()
     # uses for the cash account) and only counted once as_of_date has
@@ -2623,21 +2530,13 @@ def bank_account_balance_as_of(bank_account, as_of_date):
     opening_date = bank_account.opening_balance_date or bank_account.created_at.date()
     opening = bank_account.opening_balance if as_of_date >= opening_date else 0.0
     return round(
-        opening
-        + bank_sales_total
-        + deposits_total
-        + receipts_total
-        - loans_total
-        - expenses_total
-        - fuel_purchases_total
-        - supplier_payments_total
-        - salaries_total
-        - sales_returns_total
-        + product_sales_total
-        - product_purchases_total
-        + other_income_total
-        - tanker_purchases_total
-        + tanker_sales_total,
+        sum_via_sql(
+            bank_account.id,
+            BANK_TERMS,
+            date_column="entry_date",
+            as_of=as_of_date,
+            start=opening,
+        ),
         2,
     )
 
