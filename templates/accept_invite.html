@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<!-- No-flash theme bootstrap - see templates/base.html for the full
+     explanation. -->
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem("pk-theme");
+    if (t === "light" || t === "dark") {
+      document.documentElement.dataset.theme = t;
+    }
+  } catch (e) { /* localStorage unavailable (private mode, etc.) - stay dark */ }
+})();
+</script>
+<title>Petrol Khata - Accept Invite</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="login-shell">
+  <div class="login-box">
+    <div class="mark">P</div>
+    <h1>Join {{ pump.name if pump else "Petrol Khata" }}</h1>
+    <p class="tagline">You've been invited as {{ (user.role or "staff")|capitalize }}. Set your own password to finish.</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-list">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>Email
+        <input type="email" value="{{ user.email }}" readonly>
+      </label>
+      <label>Username
+        <input type="text" name="username" value="{{ username }}" required maxlength="80" autofocus>
+      </label>
+      <label>Password <span class="hint-sm">at least 10 characters</span>
+        <input type="password" name="password" required minlength="10" autocomplete="new-password">
+      </label>
+      <label>Confirm password
+        <input type="password" name="confirm_password" required minlength="10" autocomplete="new-password">
+      </label>
+      <button type="submit" class="btn btn-block">Accept Invite &amp; Log In</button>
+    </form>
+    <p class="tagline" style="margin-top:var(--s4);">
+      Already have an account? <a href="{{ url_for('login') }}">Log in</a>
+    </p>
+  </div>
+</div>
+</body>
+</html>

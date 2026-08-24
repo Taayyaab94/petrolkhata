@@ -47,6 +47,16 @@ def _log(message):
     print(f"{timestamp} [email_service] {message}", file=sys.stderr, flush=True)
 
 
+def is_configured():
+    """True when a provider key is present, i.e. send_email() will
+    actually attempt delivery instead of logging."""
+    return bool(os.environ.get("RESEND_API_KEY"))
+
+
+def sender_address():
+    return os.environ.get("MAIL_FROM", DEFAULT_MAIL_FROM)
+
+
 def send_email(to, subject, html):
     """Best-effort send; never raises. Returns True if handed off to the
     provider successfully, False otherwise (including "no provider

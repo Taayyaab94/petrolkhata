@@ -22,22 +22,43 @@
         <td>
           {% if u.email %}
             {{ u.email }}
-            {% if u.email_verified_at %}<span class="badge badge-ok">Verified</span>{% else %}<span class="badge badge-low">Unverified</span>{% endif %}
+            {% if u.is_pending_invite %}
+            {% elif u.email_verified_at %}<span class="badge badge-ok">Verified</span>{% else %}<span class="badge badge-low">Unverified</span>{% endif %}
           {% else %}
             <span class="hint-sm">-</span>
           {% endif %}
         </td>
         <td><span class="badge">{{ u.role|capitalize }}</span></td>
-        <td>{% if u.is_active_user %}<span class="badge badge-ok">Active</span>{% else %}<span class="badge badge-low">Deactivated</span>{% endif %}</td>
         <td>
+          {% if u.is_pending_invite %}
+            <span class="badge badge-warn">Pending invite</span>
+          {% elif u.is_active_user %}
+            <span class="badge badge-ok">Active</span>
+          {% else %}
+            <span class="badge badge-low">Deactivated</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if not u.is_pending_invite %}
           <form method="post" action="{{ url_for('settings_reset_user_password', user_id=u.id) }}" class="inline-edit-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="password" name="password" placeholder="New password" required minlength="10">
             <button type="submit" class="btn btn-sm">Set</button>
           </form>
+          {% endif %}
         </td>
         <td>
-          {% if u.id != current_user.id %}
+          {% if u.is_pending_invite %}
+          <form method="post" action="{{ url_for('settings_resend_invite', user_id=u.id) }}" class="inline-edit-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-ghost">Resend</button>
+          </form>
+          <form method="post" action="{{ url_for('settings_cancel_invite', user_id=u.id) }}" class="inline-edit-form"
+                onsubmit="return confirm('Cancel the invitation to {{ u.username }}?');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm btn-ghost">Cancel</button>
+          </form>
+          {% elif u.id != current_user.id %}
           <form method="post" action="{{ url_for('settings_toggle_user', user_id=u.id) }}" class="inline-edit-form"
                 onsubmit="return confirm('{{ 'Deactivate' if u.is_active_user else 'Reactivate' }} {{ u.username }}?');">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -50,17 +71,41 @@
     </tbody>
   </table>
   </div>
-  <h3 style="margin-top:18px;">Add a User</h3>
-  <form method="post" action="{{ url_for('settings_add_user') }}" class="form-grid">
+
+  {% if invite_link %}
+  <div class="panel" style="margin-top:18px; background: var(--accent-soft); border-color: var(--accent);">
+    <p class="hint">Invite link - copy this and send it to them yourself (works even though email isn't shown as delivered):</p>
+    <div class="inline-edit-form">
+      <input type="text" id="invite-link-box" value="{{ invite_link }}" readonly style="flex:1; min-width:260px;" onclick="this.select();">
+      <button type="button" class="btn btn-sm" onclick="pkCopyInviteLink()">Copy</button>
+    </div>
+  </div>
+  <script>
+    function pkCopyInviteLink() {
+      var box = document.getElementById("invite-link-box");
+      box.select();
+      box.setSelectionRange(0, 99999);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(box.value).catch(function () { document.execCommand("copy"); });
+      } else {
+        document.execCommand("copy");
+      }
+    }
+  </script>
+  {% endif %}
+
+  <h3 style="margin-top:18px;">Invite a User</h3>
+  <p class="hint">The invitee sets their own password through a one-time link - the owner never has to know or type it for them.</p>
+  <form method="post" action="{{ url_for('settings_invite_user') }}" class="form-grid">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <label>Username
-      <input type="text" name="username" required>
+    <label>Email
+      <input type="email" name="email" required>
     </label>
     <label>Full name (optional)
       <input type="text" name="display_name">
     </label>
-    <label>Email (optional)
-      <input type="email" name="email">
+    <label>Username
+      <input type="text" name="username" required>
     </label>
     <label>Role
       <select name="role" required>
@@ -68,10 +113,53 @@
         <option value="owner">Owner</option>
       </select>
     </label>
-    <label>Password <span class="hint-sm">at least 10 characters</span>
-      <input type="password" name="password" required minlength="10">
-    </label>
-    <button type="submit" class="btn">Add User</button>
+    <button type="submit" class="btn">Send Invite</button>
+  </form>
+
+  <details class="acct-details" style="margin-top:18px;">
+    <summary>Add a user without an email address</summary>
+    <p class="hint">For staff who have no email - you set their password directly and tell them out of band. Prefer Invite a User above whenever an email address is available.</p>
+    <form method="post" action="{{ url_for('settings_add_user') }}" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>Username
+        <input type="text" name="username" required>
+      </label>
+      <label>Full name (optional)
+        <input type="text" name="display_name">
+      </label>
+      <label>Email (optional)
+        <input type="email" name="email">
+      </label>
+      <label>Role
+        <select name="role" required>
+          <option value="staff">Staff</option>
+          <option value="owner">Owner</option>
+        </select>
+      </label>
+      <label>Password <span class="hint-sm">at least 10 characters</span>
+        <input type="password" name="password" required minlength="10">
+      </label>
+      <button type="submit" class="btn">Add User</button>
+    </form>
+  </details>
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Email delivery</h3></div>
+  {% if email_configured %}
+    <p class="hint"><span class="badge badge-ok">Configured</span> Sending as {{ email_sender }}.</p>
+  {% else %}
+    <p class="hint"><span class="badge badge-warn">Not configured</span> Verification and invite emails are not being delivered. Invite links are shown here instead so you can pass them on. See <code>docs/EMAIL_AND_AUTH_SETUP.md</code> for how to turn email on.</p>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <div class="panel-head"><h3>Pump Name</h3></div>
+  <p class="hint">Shown on invite emails and throughout the app.</p>
+  <form method="post" action="{{ url_for('settings_rename_pump') }}" class="inline-edit-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="text" name="name" value="{{ pump.name if pump else '' }}" maxlength="120" required style="flex:1; min-width:220px;">
+    <button type="submit" class="btn btn-sm">Save</button>
   </form>
 </div>
 

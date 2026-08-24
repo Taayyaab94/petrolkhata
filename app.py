@@ -435,6 +435,7 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 MIN_PASSWORD_LENGTH = 10  # financial app - length beats complexity rules
 RESET_TOKEN_TTL_HOURS = 1
 VERIFY_TOKEN_TTL_HOURS = 24
+INVITE_TOKEN_TTL_HOURS = 168  # 7 days
 
 
 def _password_errors(password, confirm, username, email):
@@ -584,6 +585,26 @@ def _send_verification_email(user):
     email_service.send_email(user.email, "Verify your Petrol Khata email", html)
 
 
+def _send_invite_email(user, inviter, link):
+    """Mirrors _send_verification_email's style, but returns the
+    send_email() result (True/False) rather than discarding it -
+    settings_invite_user needs that to decide which flash message to
+    show (see its own comment)."""
+    if not user.email:
+        return False
+    pump = db.session.get(Pump, user.pump_id)
+    pump_name = pump.name if pump else "Petrol Khata"
+    html = (
+        f"<p>Hello,</p>"
+        f"<p>{inviter.label} has invited you to join <strong>{pump_name}</strong> "
+        f"on Petrol Khata as a <strong>{user.role}</strong>. Click the link below "
+        f"to set your own password and finish setting up your account. It expires "
+        f"in {INVITE_TOKEN_TTL_HOURS // 24} days and can only be used once:</p>"
+        f'<p><a href="{link}">{link}</a></p>'
+    )
+    return email_service.send_email(user.email, f"You've been invited to {pump_name}", html)
+
+
 @app.before_request
 def enforce_setup_flow():
     if request.endpoint in (
@@ -614,6 +635,10 @@ def enforce_setup_flow():
         # bounce them before Authlib ever got to redirect them to Google.
         "google_login",
         "google_callback",
+        # An invitee's pump may have no setup done yet (they're staff, not
+        # the owner who runs the wizard) - accept_invite has to be
+        # reachable before/around that exactly like signup/verify above.
+        "accept_invite",
     ):
         return
     if not current_user.is_authenticated:
@@ -1148,6 +1173,96 @@ def resend_verification():
     return redirect(request.referrer or url_for("ledger"))
 
 
+@app.route("/accept-invite/<token>", methods=["GET", "POST"])
+def accept_invite(token):
+    """Public. Modeled line-for-line on reset_password() above - same
+    _find_valid_token usage, same re-validate-right-before-writing
+    defence against a token spent in a parallel tab. `token` is the raw,
+    unhashed value from the emailed/copied link."""
+    if current_user.is_authenticated:
+        return redirect(url_for("ledger"))
+
+    candidate = _find_valid_token(token, "invite")
+    if not candidate:
+        flash("This invitation link is no longer valid. Ask the owner to send a new one.", "error")
+        return redirect(url_for("login"))
+
+    user = candidate.user
+    # unscoped(): this request is unauthenticated (there is no
+    # current_pump_id() to resolve yet), but Pump isn't TenantScoped in
+    # the first place - see models.py - so this plain get() needs no
+    # unscoped() wrapper at all; it's here purely to fetch the invited
+    # user's OWN pump for display, never anyone else's.
+    pump = db.session.get(Pump, user.pump_id)
+
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        confirm = request.form.get("confirm_password", "")
+
+        errors = []
+        if not username:
+            errors.append("Please enter a username.")
+        elif len(username) > 80:
+            errors.append("Username is too long (80 characters max).")
+        else:
+            # Scoped explicitly to the invited user's OWN pump
+            # (candidate.user.pump_id), not current_pump_id() - there is
+            # no authenticated session yet, so that would resolve to the
+            # unauthenticated sentinel and match nothing, silently
+            # letting any username through. Username collisions are only
+            # meaningful within one pump (see User.__table_args__).
+            with unscoped():
+                taken = User.query.filter(
+                    User.pump_id == user.pump_id,
+                    User.id != user.id,
+                    func.lower(User.username) == username.lower(),
+                ).first() is not None
+            if taken:
+                errors.append(f'A user named "{username}" already exists on this pump.')
+
+        errors.extend(_password_errors(password, confirm, username, user.email))
+
+        if errors:
+            for e in errors:
+                flash(e, "error")
+            return render_template("accept_invite.html", token=token, user=user, pump=pump, username=username)
+
+        # Re-validate right before writing (same reasoning as
+        # reset_password): defends against the token expiring, or being
+        # accepted from a second tab, between the GET above and this
+        # POST.
+        candidate = _find_valid_token(token, "invite")
+        if not candidate:
+            flash("This invitation link is no longer valid. Ask the owner to send a new one.", "error")
+            return redirect(url_for("login"))
+
+        user = candidate.user
+        with unscoped():
+            taken = User.query.filter(
+                User.pump_id == user.pump_id,
+                User.id != user.id,
+                func.lower(User.username) == username.lower(),
+            ).first() is not None
+        if taken:
+            flash(f'A user named "{username}" already exists on this pump.', "error")
+            return render_template("accept_invite.html", token=token, user=user, pump=pump, username=username)
+
+        user.username = username
+        user.set_password(password)
+        user.is_active_user = True
+        # Receiving the link proves control of the mailbox - the same
+        # reasoning verify_email() already uses.
+        user.email_verified_at = datetime.now()
+        candidate.used_at = datetime.now()
+        db.session.commit()
+        login_user(user)
+        flash(f"Welcome to {pump.name if pump else 'Petrol Khata'}!", "success")
+        return redirect(url_for("ledger"))
+
+    return render_template("accept_invite.html", token=token, user=user, pump=pump, username=user.username)
+
+
 @app.route("/")
 @login_required
 def home():
@@ -1379,6 +1494,12 @@ def settings():
     product_stock_rows = {
         row["product"].id: row for row in product_stock_summary(today, products=products)
     }
+    pump = db.session.get(Pump, current_user.pump_id)
+    # session.pop: the invite/resend link is meant to be shown exactly
+    # once, right after the action that created it (see
+    # settings_invite_user/settings_resend_invite) - a later plain GET of
+    # /settings must not keep re-displaying a stale one.
+    invite_link = session.pop("pending_invite_link", None)
     return render_template(
         "settings.html",
         tanks=tanks,
@@ -1393,6 +1514,10 @@ def settings():
         products=products,
         product_stock_rows=product_stock_rows,
         today=today,
+        pump=pump,
+        invite_link=invite_link,
+        email_configured=email_service.is_configured(),
+        email_sender=email_service.sender_address(),
     )
 
 
@@ -2367,6 +2492,171 @@ def settings_add_user():
     return redirect(url_for("settings"))
 
 
+def _issue_and_flash_invite(user, inviter):
+    """Shared by settings_invite_user and settings_resend_invite: issue a
+    fresh invite token, try to email it, and set up the flash/session
+    state the Settings page reads back (see settings()'s
+    session.pop("pending_invite_link", ...)).
+
+    Wrapped exactly like forgot_password() wraps its own issue+send: a
+    failure here must not 500 the settings page, and must not leave the
+    (already-committed) user row stranded with no way to invite them
+    again - Resend covers that, so there's nothing else to unwind."""
+    try:
+        raw = _issue_auth_token(user, "invite", INVITE_TOKEN_TTL_HOURS)
+        link = url_for("accept_invite", token=raw, _external=True)
+        sent = _send_invite_email(user, inviter, link)
+    except Exception:
+        app.logger.exception("invite: failed to issue/send for user %s", user.id)
+        flash(
+            "Could not create the invite link right now - please try Resend again shortly.",
+            "error",
+        )
+        return
+
+    session["pending_invite_link"] = link
+    if email_service.is_configured() and sent:
+        flash(f"Invitation sent to {user.email}.", "success")
+    else:
+        flash(
+            "Email isn't configured on this deployment, so nothing was sent. "
+            "Copy the invite link below and pass it on yourself.",
+            "warning",
+        )
+
+
+@app.route("/settings/invite-user", methods=["POST"])
+@login_required
+@owner_required
+def settings_invite_user():
+    """Invite-based user creation: the owner supplies an email/role, the
+    invitee sets their OWN password via accept_invite() - see the module
+    docstring at the top of this file's Spec B section. Mirrors
+    settings_add_user()'s validation for every field they share; the
+    difference is no password field at all and is_active_user starts
+    False."""
+    username = request.form.get("username", "").strip()
+    display_name = request.form.get("display_name", "").strip()
+    email = request.form.get("email", "").strip().lower()
+    role = request.form.get("role", "")
+
+    errors = []
+    if not username:
+        errors.append("Please enter a username.")
+    elif len(username) > 80:
+        errors.append("Username is too long (80 characters max).")
+    elif User.query.filter(func.lower(User.username) == username.lower()).first():
+        errors.append(f'A user named "{username}" already exists on this pump.')
+
+    if not email:
+        errors.append("Please enter an email address.")
+    elif not EMAIL_RE.match(email):
+        errors.append("That doesn't look like a valid email address.")
+    else:
+        # unscoped(): email is GLOBALLY unique (User.email), not per pump
+        # - see settings_add_user()'s identical comment above. Only ever
+        # produces a yes/no "is it taken" answer.
+        with unscoped():
+            email_taken = User.query.filter_by(email=email).first() is not None
+        if email_taken:
+            errors.append(f'"{email}" is already registered to another account.')
+
+    if role not in ("owner", "staff"):
+        errors.append("Please choose a role.")
+
+    if errors:
+        for e in errors:
+            flash(e, "error")
+        return redirect(url_for("settings"))
+
+    user = User(
+        username=username,
+        display_name=display_name or None,
+        email=email,
+        role=role,
+        is_active_user=False,
+        invited_at=datetime.now(),
+        email_verified_at=None,
+    )
+    user.set_unusable_password()
+    db.session.add(user)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash(
+            f'Could not invite "{username}" - that username or email is already in use.',
+            "error",
+        )
+        return redirect(url_for("settings"))
+
+    _issue_and_flash_invite(user, current_user)
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/users/<int:user_id>/resend-invite", methods=["POST"])
+@login_required
+@owner_required
+def settings_resend_invite(user_id):
+    """db.session.get() is tenant-filtered, so another pump's user (or
+    user id) 404s here exactly like every other /settings/users/<id>/...
+    route."""
+    user = db.session.get(User, user_id) or abort(404)
+    if not user.is_pending_invite:
+        flash("That invite is no longer pending.", "error")
+        return redirect(url_for("settings"))
+
+    _issue_and_flash_invite(user, current_user)
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/users/<int:user_id>/cancel-invite", methods=["POST"])
+@login_required
+@owner_required
+def settings_cancel_invite(user_id):
+    """Hard delete rather than the deactivate every other user path uses
+    (see settings_toggle_user) - safe ONLY here because a pending invitee
+    has never logged in: login() refuses inactive users, and their
+    password hash is the unusable sentinel (set_unusable_password), so
+    they cannot have authored any row. Deleting them therefore cannot
+    orphan any ledger row's user_id foreign key. Their PasswordResetToken
+    rows are deleted first (FK)."""
+    user = db.session.get(User, user_id) or abort(404)
+    if not user.is_pending_invite:
+        flash("That invite is no longer pending.", "error")
+        return redirect(url_for("settings"))
+
+    username = user.username
+    with unscoped():
+        PasswordResetToken.query.filter_by(user_id=user.id).delete()
+    db.session.delete(user)
+    db.session.commit()
+    flash(f'Invitation to "{username}" cancelled.', "success")
+    return redirect(url_for("settings"))
+
+
+@app.route("/settings/pump-name", methods=["POST"])
+@login_required
+@owner_required
+def settings_rename_pump():
+    """The pump name is set once at signup and, until now, could never be
+    corrected. Pump is NOT TenantScoped (see models.py) - loaded
+    explicitly by current_user.pump_id, never from a form field, so
+    there's no field an attacker could use to rename another pump."""
+    name = request.form.get("name", "").strip()
+    if not name:
+        flash("Pump name can't be empty.", "error")
+    elif len(name) > 120:
+        flash("Pump name is too long (120 characters max).", "error")
+    else:
+        pump = db.session.get(Pump, current_user.pump_id)
+        pump.name = name
+        db.session.commit()
+        flash("Pump name updated.", "success")
+
+    return redirect(url_for("settings"))
+
+
 @app.route("/settings/users/<int:user_id>/toggle", methods=["POST"])
 @login_required
 @owner_required
@@ -2378,7 +2668,19 @@ def settings_toggle_user(user_id):
     user = db.session.get(User, user_id) or abort(404)
     active_owners = User.query.filter_by(role="owner", is_active_user=True).count()
 
-    if user.id == current_user.id:
+    if user.is_pending_invite:
+        # Activating a pending invitee would be a one-way dead end: their
+        # password is the unusable sentinel, so they still could not log
+        # in, but is_pending_invite would flip to False and both Resend
+        # and Cancel would then refuse them - leaving a user who can
+        # never sign in, never be re-invited, and never be removed, while
+        # permanently holding their (globally unique) email address.
+        flash(
+            f'"{user.username}" has not accepted their invitation yet - '
+            "use Resend or Cancel instead.",
+            "error",
+        )
+    elif user.id == current_user.id:
         flash("You can't deactivate your own account.", "error")
     elif user.is_active_user and user.is_owner and active_owners <= 1:
         flash("There has to be at least one active owner.", "error")

@@ -104,6 +104,12 @@ class User(UserMixin, TenantScoped, db.Model):
     role = db.Column(db.String(20), nullable=False)  # "owner" or "staff"
     is_active_user = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
+    # Set only by settings_invite_user() (see app.py), never cleared. This
+    # is what makes "pending invite" distinguishable from "a real user who
+    # was deactivated" - see is_pending_invite below. Nullable with no
+    # backfill: every existing row was created directly (not invited), so
+    # it correctly reads as not-pending.
+    invited_at = db.Column(db.DateTime, nullable=True)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -143,6 +149,19 @@ class User(UserMixin, TenantScoped, db.Model):
     @property
     def is_owner(self):
         return self.role == "owner"
+
+    @property
+    def is_pending_invite(self):
+        """True for a user who was invited (settings_invite_user) but has
+        never accepted: they are inactive, have never verified an email
+        (accepting is what sets email_verified_at), and carry an
+        invited_at timestamp. Deliberately a derived property, not a
+        stored flag - it can't drift from the three columns it reads."""
+        return (
+            self.invited_at is not None
+            and not self.is_active_user
+            and self.email_verified_at is None
+        )
 
     @property
     def label(self):
@@ -1370,8 +1389,9 @@ class ProductPurchase(TenantScoped, db.Model):
 
 class PasswordResetToken(TenantScoped, db.Model):
     """A single-use, revocable, expiring token proving control of a
-    user's email address - used for both the "forgot password" flow and
-    (with purpose="verify") email verification, rather than two
+    user's email address - used for the "forgot password" flow
+    (purpose="reset"), email verification (purpose="verify"), and
+    accepting an owner's invite (purpose="invite"), rather than three
     near-identical tables. A stateless signed token (e.g. itsdangerous)
     was deliberately NOT used here: a stateless token can't be revoked or
     marked used before its expiry, and a password-reset link in
@@ -1402,7 +1422,7 @@ class PasswordResetToken(TenantScoped, db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    purpose = db.Column(db.String(10), nullable=False, default="reset")  # "reset" | "verify"
+    purpose = db.Column(db.String(10), nullable=False, default="reset")  # "reset" | "verify" | "invite"
     token_hash = db.Column(db.String(64), nullable=False)
     expires_at = db.Column(db.DateTime, nullable=False)
     used_at = db.Column(db.DateTime, nullable=True)

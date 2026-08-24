@@ -704,6 +704,7 @@ button { cursor: pointer; font-weight: 600; border: none; }
 .flash-error { background: var(--neg-soft); color: var(--neg); border-color: var(--neg-border); }
 .flash-success { background: var(--pos-soft); color: var(--pos); border-color: var(--pos-border); }
 .flash-info { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.flash-warning { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-border); }
 
 /* ---------- ledger screen ---------- */
 
