@@ -61,6 +61,66 @@ assert _TMP.replace("\\", "/") in A.app.config["SQLALCHEMY_DATABASE_URI"], \
 A.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False, SERVER_NAME="gm.test")
 
 
+# --------------------------------------------------------------- freezing ---
+# Several pages render values derived from TODAY: "82 days unpaid", "last
+# entry 84 days ago", and date-picker max="..." attributes. Left alone,
+# the baseline expires every midnight and --compare reports ~15 diffs for
+# code that did not change - which teaches whoever runs it to ignore the
+# output, destroying the only regression signal this app has. (Observed
+# for real: the clock rolled over mid-refactor and produced exactly that.)
+#
+# Freeze the clock rather than scrub the symptoms - scrubbing would also
+# blind the harness to a GENUINE change in those same figures. Modules
+# here do `from datetime import date, datetime`, binding the classes into
+# their own namespace, so freezing means rebinding the name inside each
+# project module; there is no single global to set. site-packages is
+# deliberately left alone so SQLAlchemy keeps the real classes.
+
+FROZEN_DATE = _dt.date(2026, 8, 24)
+FROZEN_NOW = _dt.datetime(2026, 8, 24, 12, 0, 0)
+
+
+class _FrozenDate(_dt.date):
+    @classmethod
+    def today(cls):
+        return FROZEN_DATE
+
+
+class _FrozenDateTime(_dt.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return FROZEN_NOW
+
+    @classmethod
+    def utcnow(cls):
+        return FROZEN_NOW
+
+    @classmethod
+    def today(cls):
+        return FROZEN_NOW
+
+
+def _freeze_clock():
+    import types
+    frozen = 0
+    for _name, mod in list(sys.modules.items()):
+        if not isinstance(mod, types.ModuleType):
+            continue
+        f = getattr(mod, "__file__", None) or ""
+        if not f.startswith(ROOT) or "site-packages" in f:
+            continue
+        if getattr(mod, "date", None) is _dt.date:
+            mod.date = _FrozenDate
+            frozen += 1
+        if getattr(mod, "datetime", None) is _dt.datetime:
+            mod.datetime = _FrozenDateTime
+            frozen += 1
+    return frozen
+
+
+_FROZEN_BINDINGS = _freeze_clock()
+
+
 # --------------------------------------------------------------- helpers ---
 
 def _jsonable(v, depth=0):
@@ -321,7 +381,8 @@ def main():
         with open(SNAPSHOT, "w", encoding="utf-8") as f:
             json.dump(snap, f, indent=1, sort_keys=True)
         flat = _flatten(snap)
-        print(f"Baseline saved: {len(flat)} recorded values -> {SNAPSHOT}")
+        print(f"Baseline saved: {len(flat)} recorded values "
+              f"({_FROZEN_BINDINGS} clock bindings frozen) -> {SNAPSHOT}")
         return 0
 
     if args.compare:
