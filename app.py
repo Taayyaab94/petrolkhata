@@ -32,6 +32,8 @@ from flask_wtf import CSRFProtect
 from sqlalchemy import func, inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload
+from werkzeug.middleware.proxy_fix import ProxyFix
+from authlib.integrations.flask_client import OAuth
 
 import charts
 from formatting import format_number
@@ -185,6 +187,15 @@ def get_or_create_secret_key():
 
 
 app = Flask(__name__)
+# Vercel terminates TLS at its own proxy and forwards to this app over
+# plain HTTP, setting X-Forwarded-Proto to say so. Without this,
+# url_for(..., _external=True) - which Google OAuth's redirect_uri
+# depends on - reports "http://", and Google rejects a http redirect_uri
+# outright. x_proto=1 trusts exactly one hop of that header, which is
+# correct here: Vercel's own edge is the only thing in front of this
+# app. Harmless locally (no proxy means no X-Forwarded-Proto, so this is
+# a no-op there).
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 app.config["SECRET_KEY"] = get_or_create_secret_key()
 if DATABASE_URL:
     # Postgres providers (Neon, Vercel Postgres, etc.) commonly hand out
@@ -223,6 +234,50 @@ migrate.init_app(
 )
 login_manager.init_app(app)
 csrf = CSRFProtect(app)
+
+# ------------------------------------------------------------ google ----
+
+app.config["GOOGLE_CLIENT_ID"] = os.environ.get("GOOGLE_CLIENT_ID")
+app.config["GOOGLE_CLIENT_SECRET"] = os.environ.get("GOOGLE_CLIENT_SECRET")
+
+if app.config["GOOGLE_CLIENT_ID"] and not os.environ.get("SECRET_KEY"):
+    # Authlib keeps the OAuth `state` value in the Flask session cookie,
+    # which is only readable back if SECRET_KEY (used to sign it) is
+    # stable across requests. get_or_create_secret_key() falls back to a
+    # per-instance file when SECRET_KEY isn't set in the environment -
+    # fine for plain cookie sessions, but on a serverless host that file
+    # doesn't survive a cold start, so a different key gets generated
+    # per instance and every Google callback's state check fails
+    # intermittently (whichever instance issued the redirect vs. whichever
+    # handles the callback).
+    app.logger.warning(
+        "GOOGLE_CLIENT_ID is set but SECRET_KEY is not - Google sign-in "
+        "needs a stable SECRET_KEY set in the environment, or sign-ins "
+        "will fail intermittently (especially on serverless)."
+    )
+
+# oauth.register() with a server_metadata_url does OpenID discovery lazily,
+# on first actual use of oauth.google (authorize_redirect/
+# authorize_access_token) - not at import/registration time - so this is
+# harmless to call even when the two config values above are empty
+# strings/None. Confirmed empirically: see the verification section.
+oauth = OAuth(app)
+oauth.register(
+    name="google",
+    client_id=app.config["GOOGLE_CLIENT_ID"],
+    client_secret=app.config["GOOGLE_CLIENT_SECRET"],
+    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+    client_kwargs={"scope": "openid email profile"},
+)
+
+
+def google_enabled():
+    return bool(app.config["GOOGLE_CLIENT_ID"]) and bool(app.config["GOOGLE_CLIENT_SECRET"])
+
+
+@app.context_processor
+def inject_google_enabled():
+    return {"google_enabled": google_enabled()}
 
 
 @login_manager.user_loader
@@ -549,6 +604,16 @@ def enforce_setup_flow():
         "reset_password",
         "verify_email",
         "resend_verification",
+        # Google sign-in: google_login redirects an unauthenticated
+        # visitor to Google, and google_callback is where they land back
+        # -  before login_user() has run - so both have to be reachable
+        # pre-authentication exactly like login/signup. google_login is
+        # also the "connect my account" entry point for an ALREADY
+        # authenticated owner/staff whose pump has no setup yet; letting
+        # this fall through to the setup-wizard redirect below would
+        # bounce them before Authlib ever got to redirect them to Google.
+        "google_login",
+        "google_callback",
     ):
         return
     if not current_user.is_authenticated:
@@ -681,18 +746,39 @@ def signup():
 
     No client-supplied pump id is ever read from the request - the pump
     is always a fresh row created right here, so there is no field an
-    attacker could set to attach themselves to an existing pump."""
+    attacker could set to attach themselves to an existing pump.
+
+    Google sign-in: if google_callback() (see below) couldn't resolve an
+    existing account for a Google identity, it stashes
+    session["pending_google"] = {"sub", "email", "name"} and sends the
+    visitor here instead of silently creating a pump for them. When that
+    key is present, this form pins the email (already Google-verified,
+    so re-typing it would let it drift, and re-checking a typo'd address
+    would just fail EMAIL_RE) and skips the password fields (a Google
+    signup sets no password - see User.set_unusable_password())."""
+    pending = session.get("pending_google")
+
     if current_user.is_authenticated:
+        # A stale pending-Google entry must not leak into a later, normal
+        # signup by some other visitor sharing this session/browser.
+        session.pop("pending_google", None)
         return redirect(url_for("ledger"))
 
-    form_values = {"pump_name": "", "email": "", "username": ""}
+    if pending:
+        form_values = {"pump_name": "", "email": pending["email"], "username": pending.get("name", "")}
+    else:
+        form_values = {"pump_name": "", "email": "", "username": ""}
 
     if request.method == "POST":
+        # Re-read rather than trust the GET-time snapshot above - the
+        # session is the source of truth for the life of this request.
+        pending = session.get("pending_google")
+
         pump_name = request.form.get("pump_name", "").strip()
-        email = request.form.get("email", "").strip().lower()
+        email = pending["email"] if pending else request.form.get("email", "").strip().lower()
         username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        confirm = request.form.get("confirm_password", "")
+        password = "" if pending else request.form.get("password", "")
+        confirm = "" if pending else request.form.get("confirm_password", "")
         form_values = {"pump_name": pump_name, "email": email, "username": username}
 
         errors = []
@@ -701,7 +787,7 @@ def signup():
 
         if not email:
             errors.append("Please enter an email address.")
-        elif not EMAIL_RE.match(email):
+        elif not pending and not EMAIL_RE.match(email):
             errors.append("That doesn't look like a valid email address.")
         else:
             # unscoped(): nobody is authenticated yet (this IS signup) -
@@ -710,7 +796,11 @@ def signup():
             # models.py), so this has to search every pump regardless.
             # Only used to decide whether to reject the signup with a
             # validation message - never returns another pump's row (or
-            # any of its fields) to the caller.
+            # any of its fields) to the caller. Re-checked here even for
+            # the pending-Google case (already checked once back in
+            # google_callback()) to close the race between that callback
+            # and this submit - two tabs, or two separate Google
+            # round-trips, completing for the same email in between.
             with unscoped():
                 email_taken = User.query.filter_by(email=email).first() is not None
             if email_taken:
@@ -721,12 +811,13 @@ def signup():
         elif len(username) > 80:
             errors.append("Username is too long (80 characters max).")
 
-        errors.extend(_password_errors(password, confirm, username, email))
+        if not pending:
+            errors.extend(_password_errors(password, confirm, username, email))
 
         if errors:
             for e in errors:
                 flash(e, "error")
-            return render_template("signup.html", **form_values)
+            return render_template("signup.html", pending_google=bool(pending), **form_values)
 
         pump = Pump(name=pump_name)
         db.session.add(pump)
@@ -744,7 +835,15 @@ def signup():
             is_active_user=True,
             pump_id=pump.id,
         )
-        owner.set_password(password)
+        if pending:
+            # Google verified this email and the visitor proved control
+            # of it by completing the OAuth round-trip - no separate
+            # verification email needed, and no password to set.
+            owner.set_unusable_password()
+            owner.google_sub = pending["sub"]
+            owner.email_verified_at = datetime.now()
+        else:
+            owner.set_password(password)
         db.session.add(owner)
         # Every pump needs its default shift (default_shift() /
         # book_stock() / every reading-credit-bank-sale route assumes
@@ -769,27 +868,155 @@ def signup():
                 "username may already be taken). Please try again.",
                 "error",
             )
-            return render_template("signup.html", **form_values)
+            return render_template("signup.html", pending_google=bool(pending), **form_values)
 
         login_user(owner)
+        session.pop("pending_google", None)
 
         # Verification email - best-effort, must never block signup
         # (Stage 2 spec: email verification is non-blocking). Runs AFTER
         # commit()+login_user() so current_user is now authenticated and
         # the ordinary before_flush auto-stamp in tenancy.py handles
         # this new token row's pump_id on its own - no unscoped()/
-        # explicit pump_id needed for this particular call.
-        try:
-            _send_verification_email(owner)
-        except Exception:
-            app.logger.exception(
-                "signup: failed to send verification email for user %s", owner.id
-            )
+        # explicit pump_id needed for this particular call. Skipped
+        # entirely for a Google signup: email_verified_at is already set
+        # above, Google having verified it is why we're here at all.
+        if not pending:
+            try:
+                _send_verification_email(owner)
+            except Exception:
+                app.logger.exception(
+                    "signup: failed to send verification email for user %s", owner.id
+                )
 
         flash(f'Welcome! "{pump.name}" is set up - let\'s add your tanks.', "success")
         return redirect(url_for("setup_tanks"))
 
-    return render_template("signup.html", **form_values)
+    return render_template("signup.html", pending_google=bool(pending), **form_values)
+
+
+@app.route("/auth/google")
+def google_login():
+    """Kicks off the Google OAuth round-trip. Reused for two different
+    purposes distinguished only by whether someone is already logged in:
+    a fresh sign-in/sign-up for an anonymous visitor, or "connect my
+    Google account" for an already-authenticated owner/staff member
+    visiting from Settings - see the google_link_mode flag below and its
+    handling in google_callback()."""
+    if not google_enabled():
+        flash("Google sign-in isn't configured.", "error")
+        return redirect(url_for("login"))
+
+    if current_user.is_authenticated:
+        session["google_link_mode"] = True
+
+    redirect_uri = url_for("google_callback", _external=True)
+    return oauth.google.authorize_redirect(redirect_uri)
+
+
+@app.route("/auth/google/callback")
+def google_callback():
+    """Where Google sends the visitor back after /auth/google. Every
+    exit from here is a flash()+redirect, never a raw exception surfaced
+    to the visitor - a mismatched `state` (CSRF check), the visitor
+    pressing Cancel on Google's consent screen, or a Google-side outage
+    are all routine, not server errors."""
+    if not google_enabled():
+        flash("Google sign-in isn't configured.", "error")
+        return redirect(url_for("login"))
+
+    try:
+        # authorize_access_token() verifies the `state` param against the
+        # one Authlib stashed in the session cookie at /auth/google, and
+        # (for an OpenID flow) the id_token's signature/nonce/audience.
+        token = oauth.google.authorize_access_token()
+        info = token.get("userinfo") or oauth.google.parse_id_token(token)
+    except Exception:
+        app.logger.exception("google_callback: OAuth exchange failed")
+        flash("Google sign-in didn't complete. Please try again.", "error")
+        return redirect(url_for("login"))
+
+    sub = info.get("sub")
+    email = (info.get("email") or "").strip().lower()
+    email_verified = info.get("email_verified")
+    name = info.get("name") or ""
+
+    if not sub or not email:
+        flash("Google didn't return the information we need to sign you in.", "error")
+        return redirect(url_for("login"))
+
+    # Hard rule, deliberately not softened: an unverified email could be
+    # set on a Google account by anyone, not just its true owner, so
+    # trusting it here would let an attacker sign in as / link to
+    # whichever of our users happens to share that address.
+    if email_verified is not True:
+        flash(
+            "Google hasn't verified that email address, so we can't sign "
+            "you in with it.",
+            "error",
+        )
+        return redirect(url_for("login"))
+
+    # Deliberately the SAME message login() uses for "no such user",
+    # "wrong password", and "deactivated" - see its comment. A disabled
+    # account must read identically here, not reveal that it exists.
+    generic_error = "Incorrect username/email or password."
+    link_mode = session.pop("google_link_mode", None)
+
+    if link_mode and current_user.is_authenticated:
+        # unscoped(): current_user is already resolved and trusted (the
+        # signed session cookie), but the LOOKUP below has to see every
+        # pump's users to know whether this google_sub is already taken
+        # by someone else - see tenancy.py's unscoped() docstring.
+        with unscoped():
+            other = User.query.filter_by(google_sub=sub).first()
+        if other is not None and other.id != current_user.id:
+            flash(
+                "That Google account is already linked to a different login.",
+                "error",
+            )
+            return redirect(url_for("settings"))
+
+        current_user.google_sub = sub
+        # Only mark OUR email verified if Google's email actually matches
+        # it - do NOT overwrite current_user.email with Google's, which
+        # could silently change who future logins/notifications reach.
+        if email == current_user.email:
+            current_user.email_verified_at = datetime.now()
+        db.session.commit()
+        flash("Google account connected.", "success")
+        return redirect(url_for("settings"))
+
+    # Sign-in ladder (not link mode) - see tenancy.py's unscoped()
+    # docstring for why every lookup here has to run unscoped: the
+    # request isn't authenticated yet, so current_pump_id() would filter
+    # every query down to the unauthenticated sentinel, matching nobody.
+    with unscoped():
+        user = User.query.filter_by(google_sub=sub).first()
+        linking = False
+        if user is None:
+            user = User.query.filter_by(email=email).first()
+            linking = user is not None
+
+    if user is not None:
+        if not user.is_active_user:
+            flash(generic_error, "error")
+            return redirect(url_for("login"))
+        if linking:
+            user.google_sub = sub
+            if user.email_verified_at is None:
+                user.email_verified_at = datetime.now()
+            db.session.commit()
+        login_user(user)
+        return redirect(url_for("ledger"))
+
+    # No account at all - do NOT silently create a pump for a stranger
+    # who merely owns a Google account. Send them through the normal
+    # signup form instead, pre-filled (see signup()'s pending_google
+    # handling above) so they still choose their pump name and username.
+    session["pending_google"] = {"sub": sub, "email": email, "name": name}
+    flash("Finish creating your pump to sign in with Google.", "info")
+    return redirect(url_for("signup"))
 
 
 @app.route("/forgot-password", methods=["GET", "POST"])
@@ -1213,6 +1440,30 @@ BACKUP_MODELS = [
     # incomplete ledger.
     TankerDeal,
 ]
+
+
+@app.route("/settings/google/disconnect", methods=["POST"])
+@login_required
+def google_disconnect():
+    """Unlink the CURRENT user's own Google account. Not owner_required:
+    any logged-in user (owner or staff) may manage their own link, same
+    as change_password()."""
+    if not current_user.has_usable_password:
+        # Clearing google_sub here would leave this user with no way to
+        # log in at all: set_unusable_password() stored a sentinel, not a
+        # hash, so no password they could type will ever authenticate.
+        flash(
+            "Set a password first (Change Password, or Forgot Password "
+            "if you don't have one) before disconnecting Google - "
+            "otherwise you'd lock yourself out.",
+            "error",
+        )
+        return redirect(url_for("settings"))
+
+    current_user.google_sub = None
+    db.session.commit()
+    flash("Google account disconnected.", "success")
+    return redirect(url_for("settings"))
 
 
 @app.route("/settings/export-backup")

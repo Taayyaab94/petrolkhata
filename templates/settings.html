@@ -76,6 +76,22 @@
 </div>
 
 <div class="panel">
+  <div class="panel-head"><h3>Your Google Account</h3></div>
+  {% if current_user.google_sub %}
+    <p class="hint">Your login ({{ current_user.email or current_user.username }}) is linked to a Google account, so you can also sign in with "Continue with Google" from the login page.</p>
+    <form method="post" action="{{ url_for('google_disconnect') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn btn-sm btn-ghost">Disconnect Google</button>
+    </form>
+  {% elif google_enabled %}
+    <p class="hint">Not linked. Connect your Google account to also be able to sign in with "Continue with Google", using this same login.</p>
+    <a class="btn btn-sm btn-ghost" href="{{ url_for('google_login') }}">Connect Google account</a>
+  {% else %}
+    <p class="hint">Google sign-in isn't configured for this pump.</p>
+  {% endif %}
+</div>
+
+<div class="panel">
   <div class="panel-head"><h3>Shifts</h3></div>
   <p class="hint">If the pump runs one shift a day, leave this alone - the single "Full Day" shift stays invisible everywhere. Add more (e.g. Morning / Evening / Night) to record readings, credit sales, bank sales and cash handovers per shift, which is what makes per-attendant cash reconciliation possible. Order controls how the meter-reading chain threads through the day.</p>
   <div class="table-wrap">

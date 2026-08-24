@@ -36,25 +36,39 @@
       {% endif %}
     {% endwith %}
 
+    {% if pending_google %}
+    <p class="hint-sm" style="margin-bottom:var(--s3);">Signing up with Google - just pick a pump name and username to finish.</p>
+    {% endif %}
+
     <form method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <label>Pump / business name
         <input type="text" name="pump_name" value="{{ pump_name }}" required autofocus>
       </label>
       <label>Email
+        {% if pending_google %}
+        <input type="email" name="email" value="{{ email }}" readonly>
+        {% else %}
         <input type="email" name="email" value="{{ email }}" required>
+        {% endif %}
       </label>
       <label>Username
         <input type="text" name="username" value="{{ username }}" required maxlength="80">
       </label>
+      {% if not pending_google %}
       <label>Password <span class="hint-sm">at least 10 characters</span>
         <input type="password" name="password" required minlength="10" autocomplete="new-password">
       </label>
       <label>Confirm password
         <input type="password" name="confirm_password" required minlength="10" autocomplete="new-password">
       </label>
+      {% endif %}
       <button type="submit" class="btn btn-block">Create Pump</button>
     </form>
+    {% if google_enabled and not pending_google %}
+    <p class="hint-sm" style="text-align:center;margin:var(--s3) 0;">or</p>
+    <a class="btn btn-block btn-ghost" href="{{ url_for('google_login') }}">Continue with Google</a>
+    {% endif %}
     <p class="tagline" style="margin-top:var(--s4);">
       Already have an account? <a href="{{ url_for('login') }}">Log in</a>
     </p>

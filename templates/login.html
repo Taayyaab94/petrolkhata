@@ -48,6 +48,10 @@
       </label>
       <button type="submit" class="btn btn-block">Log In</button>
     </form>
+    {% if google_enabled %}
+    <p class="hint-sm" style="text-align:center;margin:var(--s3) 0;">or</p>
+    <a class="btn btn-block btn-ghost" href="{{ url_for('google_login') }}">Continue with Google</a>
+    {% endif %}
     <p class="tagline" style="margin-top:var(--s4);">
       <a href="{{ url_for('forgot_password') }}">Forgot password?</a>
       &middot;

@@ -6,6 +6,11 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from extensions import db
 
+# Sentinel stored in User.password_hash for a login that has no password
+# at all (Google-only). Deliberately contains no "$" - see
+# User.set_unusable_password() for why that specific detail matters.
+UNUSABLE_PASSWORD = "!"
+
 
 class Pump(db.Model):
     """The tenant root. Every business table in this app (see
@@ -91,6 +96,11 @@ class User(UserMixin, TenantScoped, db.Model):
     email = db.Column(db.String(255), nullable=True, unique=True)
     email_verified_at = db.Column(db.DateTime, nullable=True)
     password_hash = db.Column(db.String(255), nullable=False)
+    # Google's `sub` claim - stable, and the only safe join key once a
+    # Google account is linked (a Google account's email can change;
+    # `sub` cannot). Nullable with no backfill: existing rows are
+    # untouched, and most users will never link Google at all.
+    google_sub = db.Column(db.String(255), nullable=True, unique=True)
     role = db.Column(db.String(20), nullable=False)  # "owner" or "staff"
     is_active_user = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
@@ -98,7 +108,36 @@ class User(UserMixin, TenantScoped, db.Model):
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
 
+    def set_unusable_password(self):
+        """Mark this login as "signs in with Google only, has no
+        password". Stores a sentinel rather than a real hash of a random
+        string: a random hash is indistinguishable from a genuine one, so
+        it leaves no way to answer has_usable_password, and
+        /settings/google/disconnect has to refuse to unlink a user's ONLY
+        way in. A stored boolean would answer it too, but at the cost of a
+        second source of truth that can drift from the hash it describes -
+        this app deliberately derives rather than stores such state.
+
+        The sentinel must contain no "$": werkzeug splits a hash on "$"
+        into method/salt/value, so a value without one fails that split
+        and check_password_hash returns False (verified on werkzeug
+        3.1.8). Prefixing a REAL hash instead would make the method read
+        as "!scrypt" and raise ValueError - which is why check_password
+        below short-circuits explicitly rather than relying on that
+        behaviour at all."""
+        self.password_hash = UNUSABLE_PASSWORD
+
+    @property
+    def has_usable_password(self):
+        """False for a Google-only login (see set_unusable_password).
+        Derived from the hash itself, so it can never disagree with it."""
+        return not (self.password_hash or "").startswith(UNUSABLE_PASSWORD)
+
     def check_password(self, password):
+        if not self.has_usable_password:
+            # No password exists, so nothing can match - never reaches
+            # werkzeug with a value it can't parse.
+            return False
         return check_password_hash(self.password_hash, password)
 
     @property
