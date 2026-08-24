@@ -4185,6 +4185,21 @@ def revenue_mix_for_date(entry_date):
     return {"segments": segments, "total": round(sum(s["amount"] for s in segments), 2)}
 
 
+def _group_sum_by_day(model, value_col, start, end, date_col="entry_date"):
+    """Sum `value_col` per distinct `date_col` value in [start, end]
+    inclusive, as a {date: total} dict. Shared by _profit_series_for_window()
+    here and reports_trends() in app.py, which independently grew the same
+    grouped-query shape for the same purpose - see each caller's own
+    docstring for why their day-by-day breakdowns otherwise have to agree."""
+    rows = (
+        db.session.query(getattr(model, date_col), func.sum(value_col))
+        .filter(getattr(model, date_col) >= start, getattr(model, date_col) <= end)
+        .group_by(getattr(model, date_col))
+        .all()
+    )
+    return {r[0]: r[1] or 0 for r in rows}
+
+
 def _profit_series_for_window(start, end_date):
     """Daily profit for [start, end_date] inclusive - the arithmetic
     dashboard_trend_series() needs for its own current window AND
@@ -4199,13 +4214,7 @@ def _profit_series_for_window(start, end_date):
     all_dates = [start + timedelta(days=i) for i in range((end_date - start).days + 1)]
 
     def group_sum(model, value_col, date_col="entry_date"):
-        rows = (
-            db.session.query(getattr(model, date_col), func.sum(value_col))
-            .filter(getattr(model, date_col) >= start, getattr(model, date_col) <= end_date)
-            .group_by(getattr(model, date_col))
-            .all()
-        )
-        return {r[0]: r[1] or 0 for r in rows}
+        return _group_sum_by_day(model, value_col, start, end_date, date_col)
 
     sales_by_day = group_sum(Sale, Sale.total_amount)
     for d, v in group_sum(DirectSale, DirectSale.total_amount).items():

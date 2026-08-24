@@ -75,6 +75,7 @@ from ledger_logic import (
     fuel_rate_cards,
     fuel_sales_for_date,
     fuel_totals_by_type,
+    _group_sum_by_day,
     handover_rows_for_date,
     humanize_since,
     inventory_insights,
@@ -3463,6 +3464,91 @@ def resolve_payment_method(form, field="paid_via", new_field="new_bank_account_n
     return "bank", bank_account, None
 
 
+def _resolve_entry_mode(form):
+    """liters-vs-amount toggle shared by ledger_credit() and
+    account_entry_credit_edit() - see ledger_credit()'s docstring for what
+    each mode means."""
+    entry_mode = form.get("entry_mode", "liters")
+    if entry_mode not in ("liters", "amount"):
+        entry_mode = "liters"
+    return entry_mode
+
+
+def _credit_amount_error(fuel, entry_date, entry_mode, liters_in, amount_in):
+    """The liters/amount cross-validation shared by ledger_credit() and
+    account_entry_credit_edit() (see ledger_credit()'s docstring for what
+    each entry_mode means). Assumes `fuel` is already known non-None.
+    Returns the flash error text, or None if the combination is valid."""
+    if entry_mode == "liters" and (not liters_in or liters_in <= 0):
+        return "Liters must be a positive number."
+    if entry_mode == "amount" and (not amount_in or amount_in <= 0):
+        return "Amount must be a positive number."
+    if entry_mode == "liters" and amount_in is not None and amount_in <= 0:
+        return "Amount must be a positive number."
+    if entry_mode == "amount" and liters_in is not None and liters_in <= 0:
+        return "Liters must be a positive number."
+    if entry_mode == "amount" and price_on_date(fuel, entry_date) <= 0:
+        return "This fuel has no price set yet - please set a price before recording credit by amount."
+    return None
+
+
+def _derive_credit_liters_amount(entry_mode, liters_in, amount_in, price):
+    """liters/amount derivation shared by ledger_credit() and
+    account_entry_credit_edit() - see ledger_credit()'s docstring for the
+    discount mechanics this implements."""
+    if entry_mode == "amount":
+        amount = amount_in
+        liters = round(liters_in, 2) if liters_in is not None else round(amount_in / price, 2)
+    else:
+        liters = liters_in
+        amount = round(amount_in, 2) if amount_in is not None else round(liters * price, 2)
+    return liters, amount
+
+
+def _amount_cash_overdraw_error(amount, entry_date):
+    """Shared "positive amount, then cash-overdraw" guard for simple new
+    cash/bank entries (bank sale, cash deposit): returns the flash error
+    text, or None if the amount is valid."""
+    if not amount or amount <= 0:
+        return "Amount must be a positive number."
+    if would_overdraw_cash(amount, entry_date):
+        return cash_shortfall_message(entry_date)
+    return None
+
+
+def _validate_amount_cash_edit(entry, entry_date, amount):
+    """Shared amount/cash-overdraw validation for the plain "amount only"
+    edit handlers (bank sale, cash deposit) whose bodies were otherwise
+    identical. Returns the flash error text, or None if the edit is
+    valid."""
+    if not amount or amount <= 0:
+        return "Amount must be a positive number."
+    if would_overdraw_cash(amount, entry_date, entry.amount, entry.entry_date):
+        return cash_shortfall_message(entry_date)
+    return None
+
+
+def _validate_cash_payment_edit(entry, entry_date, amount, form):
+    """Shared amount/payment-method/cash-overdraw validation for the
+    simple "amount + paid_via" edit handlers (supplier payment, employee
+    loan) whose bodies were otherwise identical. Returns
+    (method, bank_account, error) where error is the flash text to show
+    on failure, or None if the edit is valid."""
+    method, bank_account, method_error = resolve_payment_method(form)
+    old_cash_amount = entry.amount if entry.method == "cash" else 0
+    new_cash_amount = amount if (amount and method == "cash") else 0
+
+    if not amount or amount <= 0:
+        error = "Amount must be a positive number."
+    elif method_error:
+        error = method_error
+    elif would_overdraw_cash(new_cash_amount, entry_date, old_cash_amount, entry.entry_date):
+        error = cash_shortfall_message(entry_date)
+    else:
+        error = None
+    return method, bank_account, error
+
+
 def resolve_return_method(form, field="method"):
     """Refund method for a Sales Return: cash, a specific bank account
     (existing or quick-added inline, same __new__ convention as "Paid
@@ -4405,9 +4491,7 @@ def ledger_credit():
     entry_date = parse_date_param(request.form.get("entry_date"))
     customer, error = resolve_customer(request.form)
     fuel_type_id = request.form.get("fuel_type_id", type=int)
-    entry_mode = request.form.get("entry_mode", "liters")
-    if entry_mode not in ("liters", "amount"):
-        entry_mode = "liters"
+    entry_mode = _resolve_entry_mode(request.form)
     liters_in = request.form.get("liters", type=float)
     amount_in = request.form.get("amount", type=float)
     vehicle_number = request.form.get("vehicle_number", "").strip()
@@ -4422,29 +4506,12 @@ def ledger_credit():
     elif not fuel:
         db.session.rollback()
         flash("Please choose a valid fuel type.", "error")
-    elif entry_mode == "liters" and (not liters_in or liters_in <= 0):
+    elif (amount_error := _credit_amount_error(fuel, entry_date, entry_mode, liters_in, amount_in)):
         db.session.rollback()
-        flash("Liters must be a positive number.", "error")
-    elif entry_mode == "amount" and (not amount_in or amount_in <= 0):
-        db.session.rollback()
-        flash("Amount must be a positive number.", "error")
-    elif entry_mode == "liters" and amount_in is not None and amount_in <= 0:
-        db.session.rollback()
-        flash("Amount must be a positive number.", "error")
-    elif entry_mode == "amount" and liters_in is not None and liters_in <= 0:
-        db.session.rollback()
-        flash("Liters must be a positive number.", "error")
-    elif entry_mode == "amount" and price_on_date(fuel, entry_date) <= 0:
-        db.session.rollback()
-        flash("This fuel has no price set yet - please set a price before recording credit by amount.", "error")
+        flash(amount_error, "error")
     else:
         price = price_on_date(fuel, entry_date)
-        if entry_mode == "amount":
-            amount = amount_in
-            liters = round(liters_in, 2) if liters_in is not None else round(amount_in / price, 2)
-        else:
-            liters = liters_in
-            amount = round(amount_in, 2) if amount_in is not None else round(liters * price, 2)
+        liters, amount = _derive_credit_liters_amount(entry_mode, liters_in, amount_in, price)
         db.session.add(
             CreditGiven(
                 account_id=customer.id,
@@ -5145,12 +5212,9 @@ def ledger_bank_sale():
     if error:
         db.session.rollback()
         flash(error, "error")
-    elif not amount or amount <= 0:
+    elif (amount_error := _amount_cash_overdraw_error(amount, entry_date)):
         db.session.rollback()
-        flash("Amount must be a positive number.", "error")
-    elif would_overdraw_cash(amount, entry_date):
-        db.session.rollback()
-        flash(cash_shortfall_message(entry_date), "error")
+        flash(amount_error, "error")
     else:
         db.session.add(
             BankSale(
@@ -5180,12 +5244,9 @@ def ledger_cash_deposit():
     if error:
         db.session.rollback()
         flash(error, "error")
-    elif not amount or amount <= 0:
+    elif (amount_error := _amount_cash_overdraw_error(amount, entry_date)):
         db.session.rollback()
-        flash("Amount must be a positive number.", "error")
-    elif would_overdraw_cash(amount, entry_date):
-        db.session.rollback()
-        flash(cash_shortfall_message(entry_date), "error")
+        flash(amount_error, "error")
     else:
         db.session.add(
             CashDeposit(
@@ -7653,9 +7714,7 @@ def account_entry_credit_edit(entry_id):
     next_url = request.form.get("next") or url_for("account_detail", account_id=entry.account_id)
     entry_date = parse_date_param(request.form.get("entry_date"))
     fuel_type_id = request.form.get("fuel_type_id", type=int)
-    entry_mode = request.form.get("entry_mode", "liters")
-    if entry_mode not in ("liters", "amount"):
-        entry_mode = "liters"
+    entry_mode = _resolve_entry_mode(request.form)
     liters_in = request.form.get("liters", type=float)
     amount_in = request.form.get("amount", type=float)
     vehicle_number = request.form.get("vehicle_number", "").strip()
@@ -7664,24 +7723,11 @@ def account_entry_credit_edit(entry_id):
 
     if not fuel:
         flash("Please choose a valid fuel type.", "error")
-    elif entry_mode == "liters" and (not liters_in or liters_in <= 0):
-        flash("Liters must be a positive number.", "error")
-    elif entry_mode == "amount" and (not amount_in or amount_in <= 0):
-        flash("Amount must be a positive number.", "error")
-    elif entry_mode == "liters" and amount_in is not None and amount_in <= 0:
-        flash("Amount must be a positive number.", "error")
-    elif entry_mode == "amount" and liters_in is not None and liters_in <= 0:
-        flash("Liters must be a positive number.", "error")
-    elif entry_mode == "amount" and price_on_date(fuel, entry_date) <= 0:
-        flash("This fuel has no price set yet - please set a price before recording credit by amount.", "error")
+    elif (amount_error := _credit_amount_error(fuel, entry_date, entry_mode, liters_in, amount_in)):
+        flash(amount_error, "error")
     else:
         price = price_on_date(fuel, entry_date)
-        if entry_mode == "amount":
-            amount = amount_in
-            liters = round(liters_in, 2) if liters_in is not None else round(amount_in / price, 2)
-        else:
-            liters = liters_in
-            amount = round(amount_in, 2) if amount_in is not None else round(liters * price, 2)
+        liters, amount = _derive_credit_liters_amount(entry_mode, liters_in, amount_in, price)
         entry.entry_date = entry_date
         entry.fuel_type_id = fuel.id
         entry.liters = liters
@@ -7771,16 +7817,10 @@ def account_entry_supplier_payment_edit(entry_id):
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
-    method, bank_account, method_error = resolve_payment_method(request.form)
-    old_cash_amount = entry.amount if entry.method == "cash" else 0
-    new_cash_amount = amount if (amount and method == "cash") else 0
+    method, bank_account, error = _validate_cash_payment_edit(entry, entry_date, amount, request.form)
 
-    if not amount or amount <= 0:
-        flash("Amount must be a positive number.", "error")
-    elif method_error:
-        flash(method_error, "error")
-    elif would_overdraw_cash(new_cash_amount, entry_date, old_cash_amount, entry.entry_date):
-        flash(cash_shortfall_message(entry_date), "error")
+    if error:
+        flash(error, "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -7805,16 +7845,10 @@ def account_entry_employee_loan_edit(entry_id):
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
-    method, bank_account, method_error = resolve_payment_method(request.form)
-    old_cash_amount = entry.amount if entry.method == "cash" else 0
-    new_cash_amount = amount if (amount and method == "cash") else 0
+    method, bank_account, error = _validate_cash_payment_edit(entry, entry_date, amount, request.form)
 
-    if not amount or amount <= 0:
-        flash("Amount must be a positive number.", "error")
-    elif method_error:
-        flash(method_error, "error")
-    elif would_overdraw_cash(new_cash_amount, entry_date, old_cash_amount, entry.entry_date):
-        flash(cash_shortfall_message(entry_date), "error")
+    if error:
+        flash(error, "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -8163,11 +8197,10 @@ def account_entry_bank_sale_edit(entry_id):
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
+    error = _validate_amount_cash_edit(entry, entry_date, amount)
 
-    if not amount or amount <= 0:
-        flash("Amount must be a positive number.", "error")
-    elif would_overdraw_cash(amount, entry_date, entry.amount, entry.entry_date):
-        flash(cash_shortfall_message(entry_date), "error")
+    if error:
+        flash(error, "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -8186,11 +8219,10 @@ def account_entry_cash_deposit_edit(entry_id):
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
+    error = _validate_amount_cash_edit(entry, entry_date, amount)
 
-    if not amount or amount <= 0:
-        flash("Amount must be a positive number.", "error")
-    elif would_overdraw_cash(amount, entry_date, entry.amount, entry.entry_date):
-        flash(cash_shortfall_message(entry_date), "error")
+    if error:
+        flash(error, "error")
     else:
         entry.entry_date = entry_date
         entry.amount = amount
@@ -9370,13 +9402,7 @@ def reports_trends():
     label_fmt = "%b %d" if days <= 90 else "%b '%y"
 
     def group_sum(model, value_col, date_col="entry_date"):
-        rows = (
-            db.session.query(getattr(model, date_col), func.sum(value_col))
-            .filter(getattr(model, date_col) >= start, getattr(model, date_col) <= end)
-            .group_by(getattr(model, date_col))
-            .all()
-        )
-        return {r[0]: r[1] or 0 for r in rows}
+        return _group_sum_by_day(model, value_col, start, end, date_col)
 
     sales_by_day = group_sum(Sale, Sale.total_amount)
     # Fold DirectSale (see models.py) into the same by-day revenue totals
