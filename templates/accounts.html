@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% block title %}Petrol Khata - Accounts{% endblock %}
 {% block content %}
 <div class="page-head">
@@ -187,12 +188,7 @@
               <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.amount }}" required>
             </label>
             <label>Paid via
-              <select name="paid_via">
-                <option value="cash" {{ "selected" if e.method == "cash" }}>Cash</option>
-                {% for b in bank_accounts %}
-                <option value="{{ b.id }}" {{ "selected" if e.bank_account_id == b.id }}>{{ b.name }}</option>
-                {% endfor %}
-              </select>
+              {{ m.paidvia_edit_select(e.method, e.bank_account_id, bank_accounts) }}
             </label>
             <button type="submit" class="btn btn-sm">Save</button>
           </form>

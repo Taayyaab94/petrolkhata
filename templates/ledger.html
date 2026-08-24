@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% block title %}Petrol Khata - Ledger{% endblock %}
 {% block content %}
 {% set ledger_next = url_for('ledger', date=selected_date.isoformat(), shift=selected_shift.id) if selected_shift else url_for('ledger', date=selected_date.isoformat()) %}
@@ -330,25 +331,13 @@
             </select>
           </label>
           <label id="tanker-purchase-paidvia-field">Paid via
-            <select name="purchase_paid_via" class="paidvia-select" data-scope="tanker_purchase">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_new_select("purchase_paid_via", "tanker_purchase", bank_accounts) }}
           </label>
           <label class="new-paidvia-field" data-scope="tanker_purchase" style="display:none;">New bank account name
             <input type="text" name="new_purchase_bank_account_name">
           </label>
           <label id="tanker-supplier-field" style="display:none;">Supplier
-            <select name="supplier_id" class="supplier-select" data-scope="tanker">
-              <option value="">Select...</option>
-              <option value="__new__">+ Add new supplier</option>
-              {% for a in accounts_supplier_first %}
-              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
-              {% endfor %}
-            </select>
+            {{ m.new_account_select("supplier", "tanker", accounts_supplier_first) }}
           </label>
           <label class="new-supplier-field" data-scope="tanker" style="display:none;">New supplier name
             <input type="text" name="new_supplier_name">
@@ -365,25 +354,13 @@
             </select>
           </label>
           <label id="tanker-sale-paidvia-field">Received via
-            <select name="sale_paid_via" class="paidvia-select" data-scope="tanker_sale">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_new_select("sale_paid_via", "tanker_sale", bank_accounts) }}
           </label>
           <label class="new-paidvia-field" data-scope="tanker_sale" style="display:none;">New bank account name
             <input type="text" name="new_sale_bank_account_name">
           </label>
           <label id="tanker-customer-field" style="display:none;">Customer
-            <select name="customer_id" class="customer-select" data-scope="tanker">
-              <option value="">Select...</option>
-              <option value="__new__">+ Add new customer</option>
-              {% for a in accounts_customer_first %}
-              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
-              {% endfor %}
-            </select>
+            {{ m.new_account_select("customer", "tanker", accounts_customer_first) }}
           </label>
           <label class="new-customer-field" data-scope="tanker" style="display:none;">New customer name
             <input type="text" name="new_customer_name">
@@ -436,26 +413,13 @@
             <input type="number" step="0.01" min="0.01" name="liters" id="return_liters" required>
           </label>
           <label>Refund via
-            <select name="method" class="paidvia-select" data-scope="return" id="return_method">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-              <option value="credit">On customer's account</option>
-            </select>
+            {{ m.paidvia_new_select("method", "return", bank_accounts, id="return_method", allow_credit=True) }}
           </label>
           <label class="new-paidvia-field" data-scope="return" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
           </label>
           <label class="return-customer-field" style="display:none;">Customer
-            <select name="customer_id" class="customer-select" data-scope="return">
-              <option value="">Select...</option>
-              <option value="__new__">+ Add new customer</option>
-              {% for a in accounts_customer_first %}
-              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
-              {% endfor %}
-            </select>
+            {{ m.new_account_select("customer", "return", accounts_customer_first) }}
           </label>
           <label class="new-customer-field" data-scope="return" style="display:none;">New customer name
             <input type="text" name="new_customer_name">
@@ -531,26 +495,13 @@
             <input type="number" step="0.01" min="0.01" name="retail_rate_override" id="product_sale_price_override">
           </label>
           <label>Received via
-            <select name="method" class="paidvia-select" data-scope="product_sale" id="product_sale_method">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-              <option value="credit">On customer's account</option>
-            </select>
+            {{ m.paidvia_new_select("method", "product_sale", bank_accounts, id="product_sale_method", allow_credit=True) }}
           </label>
           <label class="new-paidvia-field" data-scope="product_sale" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
           </label>
           <label class="product-sale-customer-field" style="display:none;">Customer
-            <select name="customer_id" class="customer-select" data-scope="product_sale">
-              <option value="">Select...</option>
-              <option value="__new__">+ Add new customer</option>
-              {% for a in accounts_customer_first %}
-              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
-              {% endfor %}
-            </select>
+            {{ m.new_account_select("customer", "product_sale", accounts_customer_first) }}
           </label>
           <label class="new-customer-field" data-scope="product_sale" style="display:none;">New customer name
             <input type="text" name="new_customer_name">
@@ -611,26 +562,13 @@
             <input type="number" step="0.01" min="0.01" name="amount" required>
           </label>
           <label>Received via
-            <select name="method" class="paidvia-select" data-scope="other_income" id="other_income_method">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-              <option value="credit">On customer's account</option>
-            </select>
+            {{ m.paidvia_new_select("method", "other_income", bank_accounts, id="other_income_method", allow_credit=True) }}
           </label>
           <label class="new-paidvia-field" data-scope="other_income" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
           </label>
           <label class="other-income-customer-field" style="display:none;">Customer
-            <select name="customer_id" class="customer-select" data-scope="other_income">
-              <option value="">Select...</option>
-              <option value="__new__">+ Add new customer</option>
-              {% for a in accounts_customer_first %}
-              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
-              {% endfor %}
-            </select>
+            {{ m.new_account_select("customer", "other_income", accounts_customer_first) }}
           </label>
           <label class="new-customer-field" data-scope="other_income" style="display:none;">New customer name
             <input type="text" name="new_customer_name">
@@ -666,13 +604,7 @@
             <input type="number" step="0.01" min="0.01" name="amount" required>
           </label>
           <label>Paid via
-            <select name="paid_via" class="paidvia-select" data-scope="receipt">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_new_select("paid_via", "receipt", bank_accounts) }}
           </label>
           <label class="new-paidvia-field" data-scope="receipt" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
@@ -735,13 +667,7 @@
         <input type="hidden" name="shift_id" value="{{ selected_shift.id if selected_shift }}">
         <div class="form-grid">
           <label>Customer
-            <select name="customer_id" class="customer-select" data-scope="credit" required>
-              <option value="">Select...</option>
-              <option value="__new__">+ Add new customer</option>
-              {% for a in accounts_customer_first %}
-              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
-              {% endfor %}
-            </select>
+            {{ m.new_account_select("customer", "credit", accounts_customer_first, required=True) }}
           </label>
           <label class="new-customer-field" data-scope="credit" style="display:none;">New customer name
             <input type="text" name="new_customer_name">
@@ -829,13 +755,7 @@
             <input type="number" step="0.01" min="0.01" name="amount" required>
           </label>
           <label>Paid via
-            <select name="paid_via" class="paidvia-select" data-scope="expense">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_new_select("paid_via", "expense", bank_accounts) }}
           </label>
           <label class="new-paidvia-field" data-scope="expense" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
@@ -874,25 +794,13 @@
             </select>
           </label>
           <label id="purchase-paidvia-field">Paid via
-            <select name="paid_via" class="paidvia-select" data-scope="purchase_cash">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_new_select("paid_via", "purchase_cash", bank_accounts) }}
           </label>
           <label class="new-paidvia-field" data-scope="purchase_cash" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
           </label>
           <label id="purchase-supplier-field" style="display:none;">Supplier
-            <select name="supplier_id" class="supplier-select" data-scope="purchase">
-              <option value="">Select...</option>
-              <option value="__new__">+ Add new supplier</option>
-              {% for a in accounts_supplier_first %}
-              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
-              {% endfor %}
-            </select>
+            {{ m.new_account_select("supplier", "purchase", accounts_supplier_first) }}
           </label>
           <label class="new-supplier-field" data-scope="purchase" style="display:none;">New supplier name
             <input type="text" name="new_supplier_name">
@@ -934,25 +842,13 @@
             </select>
           </label>
           <label id="product-purchase-paidvia-field">Paid via
-            <select name="paid_via" class="paidvia-select" data-scope="product_purchase_cash">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_new_select("paid_via", "product_purchase_cash", bank_accounts) }}
           </label>
           <label class="new-paidvia-field" data-scope="product_purchase_cash" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
           </label>
           <label id="product-purchase-supplier-field" style="display:none;">Supplier
-            <select name="supplier_id" class="supplier-select" data-scope="product_purchase">
-              <option value="">Select...</option>
-              <option value="__new__">+ Add new supplier</option>
-              {% for a in accounts_supplier_first %}
-              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
-              {% endfor %}
-            </select>
+            {{ m.new_account_select("supplier", "product_purchase", accounts_supplier_first) }}
           </label>
           <label class="new-supplier-field" data-scope="product_purchase" style="display:none;">New supplier name
             <input type="text" name="new_supplier_name">
@@ -1003,13 +899,7 @@
         <input type="hidden" name="entry_date" value="{{ selected_date.isoformat() }}">
         <div class="form-grid">
           <label>Supplier
-            <select name="supplier_id" class="supplier-select" data-scope="supplier_payment" required>
-              <option value="">Select...</option>
-              <option value="__new__">+ Add new supplier</option>
-              {% for a in accounts_supplier_first %}
-              <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
-              {% endfor %}
-            </select>
+            {{ m.new_account_select("supplier", "supplier_payment", accounts_supplier_first, required=True) }}
           </label>
           <label class="new-supplier-field" data-scope="supplier_payment" style="display:none;">New supplier name
             <input type="text" name="new_supplier_name">
@@ -1018,13 +908,7 @@
             <input type="number" step="0.01" min="0.01" name="amount" required>
           </label>
           <label>Paid via
-            <select name="paid_via" class="paidvia-select" data-scope="supplier_payment">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_new_select("paid_via", "supplier_payment", bank_accounts) }}
           </label>
           <label class="new-paidvia-field" data-scope="supplier_payment" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
@@ -1075,13 +959,7 @@
             <input type="number" step="0.01" min="0.01" name="amount" required>
           </label>
           <label>Paid via
-            <select name="paid_via" class="paidvia-select" data-scope="loan">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_new_select("paid_via", "loan", bank_accounts) }}
           </label>
           <label class="new-paidvia-field" data-scope="loan" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
@@ -1118,13 +996,7 @@
             <input type="number" step="0.01" min="0.01" name="amount" required>
           </label>
           <label>Paid via
-            <select name="paid_via" class="paidvia-select" data-scope="drawing">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_new_select("paid_via", "drawing", bank_accounts) }}
           </label>
           <label class="new-paidvia-field" data-scope="drawing" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
@@ -1171,13 +1043,7 @@
             <input type="number" step="0.01" min="0" name="deduction_amount" id="salary_deduction" placeholder="0.00">
           </label>
           <label>Paid via
-            <select name="paid_via" class="paidvia-select" data-scope="salary">
-              <option value="cash">Cash</option>
-              <option value="__new__">+ Add new bank account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}">{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_new_select("paid_via", "salary", bank_accounts) }}
           </label>
           <label class="new-paidvia-field" data-scope="salary" style="display:none;">New bank account name
             <input type="text" name="new_bank_account_name">
@@ -1555,21 +1421,10 @@
             <input type="number" step="0.01" min="0.01" name="liters" value="{{ e.obj.liters }}" required>
           </label>
           <label>Refunded via
-            <select name="method">
-              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
-              <option value="credit" {{ "selected" if e.obj.method == "credit" }}>Off a customer's account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}" {{ "selected" if e.obj.method == "bank" and e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_edit_select_with_credit(e.obj.method, e.obj.bank_account_id, bank_accounts, "off") }}
           </label>
           <label>Customer (only when refunded on account)
-            <select name="customer_id">
-              <option value="">-</option>
-              {% for a in accounts_customer_first %}
-              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.account_id }}>{{ a.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.edit_account_select("customer_id", e.obj.account_id, accounts_customer_first) }}
           </label>
           <label>Note (optional)
             <input type="text" name="note" value="{{ e.obj.note or '' }}">
@@ -1608,12 +1463,7 @@
             <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" required>
           </label>
           <label>Paid via
-            <select name="paid_via">
-              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_edit_select(e.obj.method, e.obj.bank_account_id, bank_accounts) }}
           </label>
 
           {% elif e.kind == "product_sale" %}
@@ -1637,21 +1487,10 @@
             <input type="number" step="0.01" min="0.01" name="retail_rate_override" value="{{ e.obj.retail_rate }}">
           </label>
           <label>Received via
-            <select name="method">
-              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
-              <option value="credit" {{ "selected" if e.obj.method == "credit" }}>On a customer's account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}" {{ "selected" if e.obj.method == "bank" and e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_edit_select_with_credit(e.obj.method, e.obj.bank_account_id, bank_accounts, "on") }}
           </label>
           <label>Customer (only when sold on account)
-            <select name="customer_id">
-              <option value="">-</option>
-              {% for a in accounts_customer_first %}
-              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.account_id }}>{{ a.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.edit_account_select("customer_id", e.obj.account_id, accounts_customer_first) }}
           </label>
           <label>Note (optional)
             <input type="text" name="note" value="{{ e.obj.note or '' }}">
@@ -1684,20 +1523,10 @@
             </select>
           </label>
           <label>Paid via (only when paid now)
-            <select name="paid_via">
-              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_edit_select(e.obj.method, e.obj.bank_account_id, bank_accounts) }}
           </label>
           <label>Supplier (only when on credit)
-            <select name="supplier_id">
-              <option value="">-</option>
-              {% for a in accounts_supplier_first %}
-              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.account_id }}>{{ a.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.edit_account_select("supplier_id", e.obj.account_id, accounts_supplier_first) }}
           </label>
           <label>Note (optional)
             <input type="text" name="note" value="{{ e.obj.note or '' }}">
@@ -1743,21 +1572,10 @@
             <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" required>
           </label>
           <label>Received via
-            <select name="method">
-              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
-              <option value="credit" {{ "selected" if e.obj.method == "credit" }}>On a customer's account</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}" {{ "selected" if e.obj.method == "bank" and e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_edit_select_with_credit(e.obj.method, e.obj.bank_account_id, bank_accounts, "on") }}
           </label>
           <label>Customer (only when on account)
-            <select name="customer_id">
-              <option value="">-</option>
-              {% for a in accounts_customer_first %}
-              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.account_id }}>{{ a.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.edit_account_select("customer_id", e.obj.account_id, accounts_customer_first) }}
           </label>
 
           {% elif e.kind == "tanker_deal" %}
@@ -1784,20 +1602,10 @@
             </select>
           </label>
           <label>Paid via (only when paid now)
-            <select name="purchase_paid_via">
-              <option value="cash" {{ "selected" if e.obj.purchase_payment_type == "cash" }}>Cash</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}" {{ "selected" if e.obj.purchase_bank_account_id == b.id }}>{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_edit_select(e.obj.purchase_payment_type, e.obj.purchase_bank_account_id, bank_accounts, name="purchase_paid_via") }}
           </label>
           <label>Supplier (only when on credit)
-            <select name="supplier_id">
-              <option value="">-</option>
-              {% for a in accounts_supplier_first %}
-              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.supplier_account_id }}>{{ a.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.edit_account_select("supplier_id", e.obj.supplier_account_id, accounts_supplier_first) }}
           </label>
           <label>Sale amount (Rs)
             <input type="number" step="0.01" min="0.01" name="sale_amount" value="{{ e.obj.sale_amount }}" required>
@@ -1809,20 +1617,10 @@
             </select>
           </label>
           <label>Received via (only when received now)
-            <select name="sale_paid_via">
-              <option value="cash" {{ "selected" if e.obj.sale_payment_type == "cash" }}>Cash</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}" {{ "selected" if e.obj.sale_bank_account_id == b.id }}>{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_edit_select(e.obj.sale_payment_type, e.obj.sale_bank_account_id, bank_accounts, name="sale_paid_via") }}
           </label>
           <label>Customer (only when on credit)
-            <select name="customer_id">
-              <option value="">-</option>
-              {% for a in accounts_customer_first %}
-              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.customer_account_id }}>{{ a.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.edit_account_select("customer_id", e.obj.customer_account_id, accounts_customer_first) }}
           </label>
           <label>Note (optional)
             <input type="text" name="note" value="{{ e.obj.note or '' }}">
@@ -1883,12 +1681,7 @@
           </label>
           {% if e.obj.payment_type == "cash" %}
           <label>Paid via
-            <select name="paid_via">
-              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_edit_select(e.obj.method, e.obj.bank_account_id, bank_accounts) }}
           </label>
           {% endif %}
           <label>Note (optional)
@@ -1909,12 +1702,7 @@
             <input type="number" step="0.01" min="0" name="deduction_amount" value="{{ e.obj.deduction_amount }}">
           </label>
           <label>Paid via
-            <select name="paid_via">
-              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_edit_select(e.obj.method, e.obj.bank_account_id, bank_accounts) }}
           </label>
           <label>Note (optional)
             <input type="text" name="note" value="{{ e.obj.note or '' }}">
@@ -1930,12 +1718,7 @@
             <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" required>
           </label>
           <label>Paid via
-            <select name="paid_via">
-              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
-              {% for b in bank_accounts %}
-              <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
-              {% endfor %}
-            </select>
+            {{ m.paidvia_edit_select(e.obj.method, e.obj.bank_account_id, bank_accounts) }}
           </label>
           <label>Note (optional)
             <input type="text" name="note" value="{{ e.obj.note or '' }}">

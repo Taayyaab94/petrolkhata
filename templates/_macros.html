@@ -1,0 +1,93 @@
+{# Shared Jinja macros for repeated form markup. Keep macro output byte-for-byte
+   equivalent (aside from whitespace) to what call sites used to inline -
+   these render into forms wired up by static/ledger-ajax.js, which reads
+   attributes like name="method" directly, so do not rename fields or
+   reorder attributes without checking that script. #}
+
+{# Edit-form "Paid via" select: cash + bank list only, no credit option and
+   no "add new bank account" option. Used on entry-edit forms across
+   ledger.html, account_detail.html, bank_account_detail.html,
+   cash_account_detail.html and accounts.html. #}
+{% macro paidvia_edit_select(current_method, current_bank_id, bank_accounts, name="paid_via") %}
+<select name="{{ name }}">
+  <option value="cash" {{ "selected" if current_method == "cash" }}>Cash</option>
+  {% for b in bank_accounts %}
+  <option value="{{ b.id }}" {{ "selected" if current_bank_id == b.id }}>{{ b.name }}</option>
+  {% endfor %}
+</select>
+{% endmacro %}
+
+{# Edit-form "Paid via" select that also offers a credit option. The credit
+   label differs by call site, so it is selected by DIRECTION ("off"/"on")
+   and the text lives here as literal markup.
+
+   Deliberately not passed in as a string: rendering a string through
+   {{ }} escapes the apostrophe in "customer's" to &#39;, which renders
+   identically but is not byte-identical to the inline markup this
+   replaced, and the obvious fix - |safe - puts an XSS footgun in a macro
+   with six call sites. Emitting the literal avoids both. #}
+{% macro paidvia_edit_select_with_credit(current_method, current_bank_id, bank_accounts, credit_direction="on", name="method") %}
+<select name="{{ name }}">
+  <option value="cash" {{ "selected" if current_method == "cash" }}>Cash</option>
+  <option value="credit" {{ "selected" if current_method == "credit" }}>{% if credit_direction == "off" %}Off a customer's account{% else %}On a customer's account{% endif %}</option>
+  {% for b in bank_accounts %}
+  <option value="{{ b.id }}" {{ "selected" if current_method == "bank" and current_bank_id == b.id }}>{{ b.name }}</option>
+  {% endfor %}
+</select>
+{% endmacro %}
+
+{# New-entry "Paid via" select used on ledger.html's add-entry forms: cash,
+   "+ Add new bank account", the bank list, and optionally a credit option.
+   Nothing is pre-selected (these are blank forms). #}
+{% macro paidvia_new_select(name, data_scope, bank_accounts, id=None, allow_credit=False) %}
+<select name="{{ name }}" class="paidvia-select" data-scope="{{ data_scope }}"{% if id %} id="{{ id }}"{% endif %}>
+  <option value="cash">Cash</option>
+  <option value="__new__">+ Add new bank account</option>
+  {% for b in bank_accounts %}
+  <option value="{{ b.id }}">{{ b.name }}</option>
+  {% endfor %}
+  {% if allow_credit %}
+  <option value="credit">On customer's account</option>
+  {% endif %}
+</select>
+{% endmacro %}
+
+{# New-entry "Customer"/"Supplier" account picker used on ledger.html's
+   add-entry forms: a blank "Select..." option, "+ Add new <kind>", then the
+   account list. `kind` is "customer" or "supplier" - it drives the field
+   name (customer_id/supplier_id), the select's class
+   (customer-select/supplier-select) and the "+ Add new" text. #}
+{% macro new_account_select(kind, data_scope, accounts, required=False) %}
+<select name="{{ kind }}_id" class="{{ kind }}-select" data-scope="{{ data_scope }}"{% if required %} required{% endif %}>
+  <option value="">Select...</option>
+  <option value="__new__">+ Add new {{ kind }}</option>
+  {% for a in accounts %}
+  <option value="{{ a.id }}">{{ a.name }} ({{ a.account_type|capitalize }})</option>
+  {% endfor %}
+</select>
+{% endmacro %}
+
+{# Edit-form "Customer"/"Supplier" account picker: a blank "-" option and
+   the account list, with the currently-linked account pre-selected. #}
+{# Edit-form "Tank" select over the flat `tanks` list (id/label), with the
+   entry's current tank pre-selected. Used on account_detail.html,
+   bank_account_detail.html and cash_account_detail.html's fuel-purchase
+   edit forms. Not used for ledger.html's own tank-edit selects, which
+   iterate `tank_rows` (row.tank.id/row.tank.label) - a different shape,
+   not just a different variable name. #}
+{% macro edit_tank_select(current_tank_id, tanks) %}
+<select name="tank_id" required>
+  {% for t in tanks %}
+  <option value="{{ t.id }}" {{ "selected" if t.id == current_tank_id }}>{{ t.label }}</option>
+  {% endfor %}
+</select>
+{% endmacro %}
+
+{% macro edit_account_select(name, current_id, accounts) %}
+<select name="{{ name }}">
+  <option value="">-</option>
+  {% for a in accounts %}
+  <option value="{{ a.id }}" {{ "selected" if a.id == current_id }}>{{ a.name }}</option>
+  {% endfor %}
+</select>
+{% endmacro %}
