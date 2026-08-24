@@ -73,6 +73,16 @@
 </div>
 {% endif %}
 
+{#
+  LIVE REGION: everything from here to the matching </div> is display-only
+  (no inputs at all), so static/ledger-ajax.js can replace it wholesale with
+  the freshly-rendered server HTML after an AJAX save. The wrapper exists so
+  the region is ALWAYS in the DOM even when the inner {% if %}s are false -
+  a region that is absent from the live page can never be swapped in, so a
+  block that only appears once the day has its first fuel sale would
+  otherwise never show up without a reload.
+#}
+<div data-live-region="summary">
 <div class="ledger-summary">
   <div class="stat-card accent-brand">
     <div class="label">Total Sales</div>
@@ -132,6 +142,7 @@
   {% endfor %}
 </div>
 {% endif %}
+</div>{# /data-live-region="summary" #}
 
 {% if current_user.is_owner %}
 <div class="panel">
@@ -1185,7 +1196,14 @@
   </div>
 </div>
 
-<div class="panel">
+{#
+  LIVE REGION: every figure in this table (expected cash, variance) is
+  recomputed from the day's sales, so any save can change it. It does hold
+  the per-shift edit forms, but those are collapsed by default and
+  ledger-ajax.js refuses to swap a region the user is currently focused
+  inside, so an in-progress handover edit is never wiped.
+#}
+<div class="panel" data-live-region="handover">
   <div class="panel-head"><h3>Cash Handover - Shift Reconciliation</h3></div>
   <p class="hint">Enter the cash actually counted at the end of each shift. Expected cash is that shift's nozzle sales minus credit given minus bank sales. This is a check, not a transaction - it never changes any balance by itself, exactly like a tank dip. If a shortfall is real, an owner can write it off as a cash expense from the row below.</p>
   <div class="table-wrap">
@@ -1310,7 +1328,15 @@
   </form>
 </div>
 
-<div class="panel" style="margin-top:24px;">
+{#
+  LIVE REGION: the day's entry feed. Same caveat as the handover panel -
+  it contains the collapsed per-entry Edit forms, and ledger-ajax.js will
+  not swap it while the user is focused inside one. Everything bound to
+  elements in here (Edit toggle, Edit cancel, Delete submit) MUST be
+  delegated off document, because this whole subtree is thrown away and
+  rebuilt on every AJAX save. See the script at the bottom of this file.
+#}
+<div class="panel" style="margin-top:24px;" data-live-region="feed">
   <div class="panel-head"><h3>Entries for {{ selected_date.strftime("%d %b %Y") }}</h3></div>
   <div class="feed-list">
     {% for e in feed %}
@@ -1424,12 +1450,504 @@
       <div class="feed-amount neutral">{{ (e.obj.liters)|fmt }} L</div>
       {% endif %}
       {% if current_user.is_owner %}
-      <form method="post" action="{{ url_for('entry_delete', kind=delete_kind, entry_id=e.obj.id) }}"
-            onsubmit="return confirm('Delete {{ delete_label }}? This cannot be undone.');">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <input type="hidden" name="next" value="{{ ledger_next }}">
-        <button type="submit" class="feed-delete">Delete</button>
-      </form>
+      {#
+        Edit + Delete share one trailing cell so the row keeps its five
+        grid columns; the edit form itself is a sixth grid child spanning
+        the full width (grid-column: 1 / -1), so it opens UNDER the row it
+        belongs to instead of squeezing it.
+
+        Where each form posts: the six account-side kinds already have
+        editors under /accounts/entry/..., so they post there with a
+        "next" of this ledger URL rather than growing a second
+        implementation. A fuel purchase picks between the two editors it
+        has by how it was paid - the cash one is the only one that carries
+        the cash-overdraw guard, and the credit one is the only one that
+        leaves payment_type alone.
+      #}
+      {% if e.kind == "purchase" %}
+      {% set edit_action = url_for('account_entry_fuel_purchase_edit', entry_id=e.obj.id) if e.obj.payment_type == "cash" else url_for('account_entry_purchase_edit', entry_id=e.obj.id) %}
+      {% else %}
+      {% set edit_action = {
+        "sale": url_for('entry_edit', kind='sale', entry_id=e.obj.id),
+        "direct_sale": url_for('entry_edit', kind='direct-sale', entry_id=e.obj.id),
+        "dip": url_for('entry_edit', kind='dip', entry_id=e.obj.id),
+        "handover": url_for('entry_edit', kind='handover', entry_id=e.obj.id),
+        "sales_return": url_for('entry_edit', kind='sales-return', entry_id=e.obj.id),
+        "bank_sale": url_for('entry_edit', kind='bank-sale', entry_id=e.obj.id),
+        "cash_deposit": url_for('entry_edit', kind='cash-deposit', entry_id=e.obj.id),
+        "expense": url_for('entry_edit', kind='expense', entry_id=e.obj.id),
+        "product_sale": url_for('entry_edit', kind='product-sale', entry_id=e.obj.id),
+        "product_purchase": url_for('entry_edit', kind='product-purchase', entry_id=e.obj.id),
+        "nozzle_testing": url_for('entry_edit', kind='nozzle-testing', entry_id=e.obj.id),
+        "other_income": url_for('entry_edit', kind='other-income', entry_id=e.obj.id),
+        "tanker_deal": url_for('entry_edit', kind='tanker-deal', entry_id=e.obj.id),
+        "credit": url_for('account_entry_credit_edit', entry_id=e.obj.id),
+        "receipt": url_for('account_entry_receipt_edit', entry_id=e.obj.id),
+        "supplier_payment": url_for('account_entry_supplier_payment_edit', entry_id=e.obj.id),
+        "employee_loan": url_for('account_entry_employee_loan_edit', entry_id=e.obj.id),
+        "salary": url_for('account_entry_salary_edit', entry_id=e.obj.id),
+      }[e.kind] %}
+      {% endif %}
+      <div class="feed-actions">
+        <button type="button" class="feed-edit" aria-expanded="false"
+                data-edit-target="feed-edit-{{ e.kind }}-{{ e.obj.id }}">Edit</button>
+        <form method="post" action="{{ url_for('entry_delete', kind=delete_kind, entry_id=e.obj.id) }}"
+              onsubmit="return confirm('Delete {{ delete_label }}? This cannot be undone.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="next" value="{{ ledger_next }}">
+          <button type="submit" class="feed-delete">Delete</button>
+        </form>
+      </div>
+      <div class="feed-edit-panel" id="feed-edit-{{ e.kind }}-{{ e.obj.id }}" hidden>
+        <form method="post" action="{{ edit_action }}" class="form-grid">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="next" value="{{ ledger_next }}">
+
+          {% if e.kind == "sale" %}
+          <label>Previous reading
+            <input type="number" step="0.01" name="previous_reading" value="{{ e.obj.previous_reading }}" required>
+          </label>
+          <label>Current reading
+            <input type="number" step="0.01" name="current_reading" value="{{ e.obj.current_reading }}" required>
+          </label>
+          <div class="hint-sm" style="grid-column:1/-1;">Litres and amount are recalculated from these two readings at the rate this entry was priced at (Rs {{ (e.obj.price_per_liter)|fmt }}/L); any testing on this slot is carved out again automatically.</div>
+
+          {% elif e.kind == "direct_sale" %}
+          <label>Liters
+            <input type="number" step="0.01" min="0.01" name="liters" value="{{ e.obj.liters }}" required>
+          </label>
+          <div class="hint-sm" style="grid-column:1/-1;">Priced at this entry's own Rs {{ (e.obj.price_per_liter)|fmt }}/L.</div>
+
+          {% elif e.kind == "dip" %}
+          <label>{% if e.obj.tank.dip_chart_rows %}Dip (cm){% else %}Dip (litres){% endif %}
+            <input type="number" step="0.01" min="0" name="dip"
+                   value="{{ e.obj.dip_cm if e.obj.dip_cm is not none else e.obj.dip_liters }}" required>
+          </label>
+          <label>Water (cm, optional)
+            <input type="number" step="0.01" min="0" name="water_cm" value="{{ e.obj.water_cm if e.obj.water_cm is not none else '' }}">
+          </label>
+
+          {% elif e.kind == "handover" %}
+          <label>Cash counted (Rs)
+            <input type="number" step="0.01" min="0" name="declared_amount" value="{{ e.obj.declared_amount }}" required>
+          </label>
+          <label>Attendant (optional)
+            <select name="attendant_id">
+              <option value="">-</option>
+              {% for a in accounts_employee_first %}
+              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.attendant_id }}>{{ a.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+
+          {% elif e.kind == "sales_return" %}
+          <label>Tank
+            <select name="tank_id" required>
+              {% for r in tank_rows %}
+              <option value="{{ r.tank.id }}" {{ "selected" if r.tank.id == e.obj.tank_id }}>{{ r.tank.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Liters
+            <input type="number" step="0.01" min="0.01" name="liters" value="{{ e.obj.liters }}" required>
+          </label>
+          <label>Refunded via
+            <select name="method">
+              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
+              <option value="credit" {{ "selected" if e.obj.method == "credit" }}>Off a customer's account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if e.obj.method == "bank" and e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Customer (only when refunded on account)
+            <select name="customer_id">
+              <option value="">-</option>
+              {% for a in accounts_customer_first %}
+              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.account_id }}>{{ a.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+          <div class="hint-sm" style="grid-column:1/-1;">Refunded at this entry's own Rs {{ (e.obj.price_per_liter)|fmt }}/L.</div>
+
+          {% elif e.kind in ("bank_sale", "cash_deposit") %}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Bank account
+            <select name="bank_account_id" required>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if b.id == e.obj.bank_account_id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" required>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+
+          {% elif e.kind == "expense" %}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Category
+            <input type="text" name="category" value="{{ e.obj.category }}" required>
+          </label>
+          <label>Description (optional)
+            <input type="text" name="description" value="{{ e.obj.description or '' }}">
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" required>
+          </label>
+          <label>Paid via
+            <select name="paid_via">
+              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+
+          {% elif e.kind == "product_sale" %}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Product
+            <select name="product_id" required>
+              {% if e.obj.product not in products %}
+              <option value="{{ e.obj.product_id }}" selected>{{ e.obj.product.label }}</option>
+              {% endif %}
+              {% for p in products %}
+              <option value="{{ p.id }}" {{ "selected" if p.id == e.obj.product_id }}>{{ p.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Quantity
+            <input type="number" step="0.01" min="0.01" name="quantity" value="{{ e.obj.quantity }}" required>
+          </label>
+          <label>Retail rate (Rs)
+            <input type="number" step="0.01" min="0.01" name="retail_rate_override" value="{{ e.obj.retail_rate }}">
+          </label>
+          <label>Received via
+            <select name="method">
+              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
+              <option value="credit" {{ "selected" if e.obj.method == "credit" }}>On a customer's account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if e.obj.method == "bank" and e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Customer (only when sold on account)
+            <select name="customer_id">
+              <option value="">-</option>
+              {% for a in accounts_customer_first %}
+              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.account_id }}>{{ a.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+
+          {% elif e.kind == "product_purchase" %}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Product
+            <select name="product_id" required>
+              {% if e.obj.product not in products %}
+              <option value="{{ e.obj.product_id }}" selected>{{ e.obj.product.label }}</option>
+              {% endif %}
+              {% for p in products %}
+              <option value="{{ p.id }}" {{ "selected" if p.id == e.obj.product_id }}>{{ p.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Quantity <span class="hint-sm">negative for a return/correction</span>
+            <input type="number" step="0.01" name="quantity" value="{{ e.obj.quantity }}" required>
+          </label>
+          <label>Unit cost (Rs)
+            <input type="number" step="0.01" min="0.01" name="unit_cost" value="{{ e.obj.unit_cost }}" required>
+          </label>
+          <label>Paid
+            <select name="payment_type">
+              <option value="cash" {{ "selected" if e.obj.payment_type == "cash" }}>Now</option>
+              <option value="credit" {{ "selected" if e.obj.payment_type == "credit" }}>On credit</option>
+            </select>
+          </label>
+          <label>Paid via (only when paid now)
+            <select name="paid_via">
+              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Supplier (only when on credit)
+            <select name="supplier_id">
+              <option value="">-</option>
+              {% for a in accounts_supplier_first %}
+              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.account_id }}>{{ a.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+
+          {% elif e.kind == "nozzle_testing" %}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Nozzle
+            <select name="nozzle_id" required>
+              {% for r in nozzle_rows %}
+              <option value="{{ r.nozzle.id }}" {{ "selected" if r.nozzle.id == e.obj.nozzle_id }}>{{ r.nozzle.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          {% if shifts|length > 1 %}
+          <label>Shift
+            <select name="shift_id">
+              {% for s in shifts %}
+              <option value="{{ s.id }}" {{ "selected" if s.id == e.obj.shift_id }}>{{ s.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          {% else %}
+          <input type="hidden" name="shift_id" value="{{ e.obj.shift_id }}">
+          {% endif %}
+          <label>Liters
+            <input type="number" step="0.01" min="0.01" name="liters" value="{{ e.obj.liters }}" required>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+
+          {% elif e.kind == "other_income" %}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Description
+            <input type="text" name="description" value="{{ e.obj.description }}" required>
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" required>
+          </label>
+          <label>Received via
+            <select name="method">
+              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
+              <option value="credit" {{ "selected" if e.obj.method == "credit" }}>On a customer's account</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if e.obj.method == "bank" and e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Customer (only when on account)
+            <select name="customer_id">
+              <option value="">-</option>
+              {% for a in accounts_customer_first %}
+              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.account_id }}>{{ a.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+
+          {% elif e.kind == "tanker_deal" %}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Fuel
+            <select name="fuel_type_id" required>
+              {% for f in fuel_types %}
+              <option value="{{ f.id }}" {{ "selected" if f.id == e.obj.fuel_type_id }}>{{ f.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Liters
+            <input type="number" step="0.01" min="0.01" name="liters" value="{{ e.obj.liters }}" required>
+          </label>
+          <label>Purchase cost (Rs)
+            <input type="number" step="0.01" min="0.01" name="purchase_cost" value="{{ e.obj.purchase_cost }}" required>
+          </label>
+          <label>Bought
+            <select name="purchase_payment_type">
+              <option value="cash" {{ "selected" if e.obj.purchase_payment_type != "credit" }}>Paid now</option>
+              <option value="credit" {{ "selected" if e.obj.purchase_payment_type == "credit" }}>On credit</option>
+            </select>
+          </label>
+          <label>Paid via (only when paid now)
+            <select name="purchase_paid_via">
+              <option value="cash" {{ "selected" if e.obj.purchase_payment_type == "cash" }}>Cash</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if e.obj.purchase_bank_account_id == b.id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Supplier (only when on credit)
+            <select name="supplier_id">
+              <option value="">-</option>
+              {% for a in accounts_supplier_first %}
+              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.supplier_account_id }}>{{ a.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Sale amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="sale_amount" value="{{ e.obj.sale_amount }}" required>
+          </label>
+          <label>Sold
+            <select name="sale_payment_type">
+              <option value="cash" {{ "selected" if e.obj.sale_payment_type != "credit" }}>Received now</option>
+              <option value="credit" {{ "selected" if e.obj.sale_payment_type == "credit" }}>On credit</option>
+            </select>
+          </label>
+          <label>Received via (only when received now)
+            <select name="sale_paid_via">
+              <option value="cash" {{ "selected" if e.obj.sale_payment_type == "cash" }}>Cash</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if e.obj.sale_bank_account_id == b.id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Customer (only when on credit)
+            <select name="customer_id">
+              <option value="">-</option>
+              {% for a in accounts_customer_first %}
+              <option value="{{ a.id }}" {{ "selected" if a.id == e.obj.customer_account_id }}>{{ a.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+
+          {% elif e.kind == "credit" %}
+          {# Defaulted to whichever mode the stored row looks like it was
+             entered in, exactly as account_detail.html does: amount !=
+             liters x price means a deliberately discounted entry, which
+             must not be silently recomputed away on save. #}
+          {% set recomputed_amount = (e.obj.liters * e.obj.price_per_liter) | round(2) %}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Fuel <span class="hint-sm">re-priced to the date above on save</span>
+            <select name="fuel_type_id" required>
+              {% for f in fuel_types %}
+              <option value="{{ f.id }}" {{ "selected" if f.id == e.obj.fuel_type_id }}>{{ f.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Enter by
+            <select name="entry_mode">
+              <option value="liters" {{ "selected" if e.obj.amount == recomputed_amount }}>By Litres</option>
+              <option value="amount" {{ "selected" if e.obj.amount != recomputed_amount }}>By Amount</option>
+            </select>
+          </label>
+          <label>Liters
+            <input type="number" step="0.01" min="0.01" name="liters" value="{{ e.obj.liters }}">
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}">
+          </label>
+          <label>Vehicle number (optional)
+            <input type="text" name="vehicle_number" value="{{ e.obj.vehicle_number or '' }}">
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+          <div class="hint-sm" style="grid-column:1/-1;">Both figures are saved as typed, exactly as on the Accounts page: "Enter by" only decides which one is authoritative if they disagree, and the gap between Amount and litres x rate is what records a discount.</div>
+
+          {% elif e.kind == "purchase" %}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Tank
+            <select name="tank_id" required>
+              {% for r in tank_rows %}
+              <option value="{{ r.tank.id }}" {{ "selected" if r.tank.id == e.obj.tank_id }}>{{ r.tank.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Liters
+            <input type="number" step="0.01" min="0.01" name="liters" value="{{ e.obj.liters }}" required>
+          </label>
+          <label>Cost (Rs)
+            <input type="number" step="0.01" min="0.01" name="cost" value="{{ e.obj.cost if e.obj.cost is not none else '' }}" required>
+          </label>
+          {% if e.obj.payment_type == "cash" %}
+          <label>Paid via
+            <select name="paid_via">
+              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          {% endif %}
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+
+          {% elif e.kind == "salary" %}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Period (optional)
+            <input type="text" name="period_label" value="{{ e.obj.period_label or '' }}">
+          </label>
+          <label>Salary (Rs)
+            <input type="number" step="0.01" min="0.01" name="gross_amount" value="{{ e.obj.gross_amount }}" required>
+          </label>
+          <label>Deducted against advance (Rs)
+            <input type="number" step="0.01" min="0" name="deduction_amount" value="{{ e.obj.deduction_amount }}">
+          </label>
+          <label>Paid via
+            <select name="paid_via">
+              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+
+          {% else %}
+          {# receipt / supplier_payment / employee_loan - one amount, one
+             payment method, same three fields on all three. #}
+          <label>Date
+            <input type="date" name="entry_date" value="{{ e.obj.entry_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+          </label>
+          <label>Amount (Rs)
+            <input type="number" step="0.01" min="0.01" name="amount" value="{{ e.obj.amount }}" required>
+          </label>
+          <label>Paid via
+            <select name="paid_via">
+              <option value="cash" {{ "selected" if e.obj.method == "cash" }}>Cash</option>
+              {% for b in bank_accounts %}
+              <option value="{{ b.id }}" {{ "selected" if e.obj.bank_account_id == b.id }}>{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Note (optional)
+            <input type="text" name="note" value="{{ e.obj.note or '' }}">
+          </label>
+          {% endif %}
+
+          <div class="feed-edit-actions">
+            <button type="submit" class="btn btn-sm">Save</button>
+            <button type="button" class="btn btn-sm btn-secondary feed-edit-cancel">Cancel</button>
+          </div>
+        </form>
+      </div>
       {% endif %}
     </div>
     {% else %}
@@ -2366,14 +2884,19 @@ if (salaryEmployee && salaryGross && salaryDeduction) {
 }
 
 // --- Cash handover rows: same edit-toggle pattern as the account pages ---
-document.querySelectorAll('.edit-toggle').forEach(function (link) {
-  link.addEventListener('click', function (e) {
-    e.preventDefault();
-    const row = link.closest('tr').nextElementSibling;
-    if (row && row.classList.contains('edit-row')) {
-      row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
-    }
-  });
+// DELEGATED off document, not bound per link: these links live inside the
+// "handover" live region, which ledger-ajax.js replaces after every save.
+// A per-element listener would be attached to a node that no longer exists
+// the moment the first AJAX save lands, and the toggle would silently die.
+document.addEventListener('click', function (e) {
+  const link = e.target.closest('.edit-toggle');
+  if (!link) { return; }
+  e.preventDefault();
+  const tr = link.closest('tr');
+  const row = tr && tr.nextElementSibling;
+  if (row && row.classList.contains('edit-row')) {
+    row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+  }
 });
 
 // --- Purchase: show supplier field only when "on credit" ---
@@ -2388,5 +2911,52 @@ if (purchasePaymentType) {
     purchasePaidViaField.style.display = isCredit ? 'none' : '';
   });
 }
+
+// --- Feed: inline Edit panel per entry ---
+// Same lightweight reveal the Accounts page uses (account_detail.html's
+// .edit-toggle): the form is already in the DOM, prefilled server-side,
+// and just unhidden in place - no modal, no navigation, nothing fetched.
+//
+// Both of these are DELEGATED off document rather than bound per button.
+// The feed is a live region: ledger-ajax.js replaces the whole panel with
+// freshly-rendered server HTML after every AJAX save, so any listener
+// attached to a button at page load is attached to a detached node from
+// the first save onward. Delegation is what keeps Edit (and Delete, whose
+// form submit is handled by ledger-ajax.js's own delegated listener)
+// working for the lifetime of the page.
+document.addEventListener('click', function (e) {
+  const btn = e.target.closest('.feed-edit');
+  if (!btn) { return; }
+  const panel = document.getElementById(btn.dataset.editTarget);
+  if (!panel) { return; }
+  const opening = panel.hidden;
+  panel.hidden = !opening;
+  btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
+  if (opening) {
+    const first = panel.querySelector('input, select');
+    if (first) { first.focus(); }
+  }
+});
+
+document.addEventListener('click', function (e) {
+  const btn = e.target.closest('.feed-edit-cancel');
+  if (!btn) { return; }
+  const panel = btn.closest('.feed-edit-panel');
+  if (!panel) { return; }
+  panel.hidden = true;
+  const toggle = document.querySelector('[data-edit-target="' + panel.id + '"]');
+  if (toggle) {
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.focus();
+  }
+});
 </script>
+
+{#
+  AJAX save. Purely a progressive enhancement layered on top of the plain
+  form posts above: with JavaScript off (or if this file fails to load)
+  every form on this page still submits normally and the server still
+  redirects back here, exactly as before.
+#}
+<script defer src="{{ url_for('static', filename='ledger-ajax.js') }}"></script>
 {% endblock %}

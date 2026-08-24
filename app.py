@@ -4798,6 +4798,743 @@ def entry_delete(kind, entry_id):
     return redirect(next_url)
 
 
+# --------------------------------------------------------------- edit ---
+#
+# One editor per entry kind, all dispatched from the single entry_edit()
+# route below the way entry_delete() dispatches deletes - thirteen
+# near-identical routes would be thirteen places to forget a guard.
+#
+# Each handler takes (entry, form) and returns
+# (error_or_None, success_message, [(note, category), ...]).
+#
+# THE CONTRACT EVERY HANDLER KEEPS: it must not mutate `entry` until
+# every check has passed, so a rejected edit writes nothing at all. The
+# route rolls back on error anyway (the resolve_* helpers can have
+# quick-created an Account/BankAccount by then), but "validate fully,
+# then assign" is what makes that rollback a safety net rather than the
+# mechanism.
+#
+# Each mirrors its own CREATE route's validation and field handling, and
+# reuses the same resolver helpers - a rule that must survive future
+# edits: if a create route grows a guard, its editor grows the same one,
+# or the ledger gets a value through the back door that the front door
+# refuses.
+
+
+def _edit_sale(entry, form):
+    """Re-enter a nozzle's meter readings for the slot this Sale already
+    occupies. The slot itself (nozzle/date/shift) is deliberately fixed -
+    Sale is unique per (nozzle, date, shift) and moving one would either
+    collide with a real row or silently punch a hole in the reading
+    chain; delete and re-enter is the honest way to move a reading.
+
+    price_per_liter is NOT re-resolved. total_amount is re-derived from
+    the row's OWN stored price, because re-pricing to today's rate would
+    silently rewrite history - repricing is reprice_entries()'s job
+    (ledger_logic.py), triggered deliberately from Settings.
+
+    The same three chain guards ledger_readings() applies are applied
+    here: a previous reading can't dip below an earlier recorded one, a
+    current reading can't fall below its own previous, and it can't
+    overshoot a later reading already on file.
+    """
+    previous = form.get("previous_reading", type=float)
+    current = form.get("current_reading", type=float)
+    label = entry.nozzle.label
+
+    if previous is None:
+        return f"{label}: previous reading is not a valid number.", None, []
+    if current is None:
+        return f"{label}: reading is not a valid number.", None, []
+
+    floor = nearest_earlier_reading(entry.nozzle, entry.entry_date, entry.shift)
+    if previous < floor:
+        return (
+            f"{label}: previous reading ({previous:g}) can't be lower than an "
+            f"earlier recorded reading ({floor:g}).",
+            None,
+            [],
+        )
+    if current < previous:
+        return (
+            f"{label}: reading ({current:g}) is less than the previous "
+            f"reading ({previous:g}).",
+            None,
+            [],
+        )
+    next_sale = next_sale_on_or_after(entry.nozzle_id, entry.entry_date, entry.shift)
+    if next_sale and current > next_sale.current_reading:
+        return (
+            f"{label}: reading ({current:g}) is more than a later reading "
+            f"already recorded on {next_sale.entry_date} ({next_sale.current_reading:g}).",
+            None,
+            [],
+        )
+
+    entry.previous_reading = previous
+    entry.current_reading = current
+    # Provisional, exactly as ledger_readings() writes it: the full gross
+    # meter difference with testing not yet carved out. sync_sale_testing()
+    # below is the only writer of testing_liters and re-derives
+    # liters/total_amount from gross minus whatever testing is on file.
+    entry.liters = round(current - previous, 2)
+    entry.total_amount = round(entry.liters * entry.price_per_liter, 2)
+    db.session.flush()
+    _, over_by = sync_sale_testing(entry.nozzle_id, entry.entry_date, entry.shift_id)
+
+    notes = []
+    if over_by:
+        notes.append(
+            (
+                f"{label}: testing recorded for this slot exceeds the meter difference "
+                f"by {over_by:g} L - clamped so the sale doesn't go negative.",
+                "error",
+            )
+        )
+    if next_sale and round(next_sale.previous_reading, 2) != round(current, 2):
+        # Identical situation to deleting a reading (see entry_delete):
+        # the following slot's previous_reading no longer matches what
+        # this slot now ends at, so the chain has a step in it. Nothing to
+        # fix automatically - guessing on the user's behalf is exactly
+        # what ledger_readings() refuses to do past one slot.
+        notes.append(
+            (
+                f"Changed the {entry.entry_date} reading for {label} - the next "
+                f"recorded reading for this nozzle may need its previous "
+                f"reading re-entered by hand.",
+                "info",
+            )
+        )
+    return None, f"Updated {label}'s reading for {entry.entry_date} ({entry.liters:g} L).", notes
+
+
+def _edit_direct_sale(entry, form):
+    """Litres only. The tank/date/shift slot is fixed for the same reason
+    a Sale's is (DirectSale is unique per tank/date/shift), and
+    price_per_liter stays the row's own for the same reason a Sale's
+    does - total_amount is re-derived from it, never carried over."""
+    liters = form.get("liters", type=float)
+    if not liters or liters <= 0:
+        return f"{entry.tank.label}: litres must be a positive number.", None, []
+
+    entry.liters = liters
+    entry.total_amount = round(liters * entry.price_per_liter, 2)
+    return (
+        None,
+        f"Updated direct sales entry for {entry.tank.label} ({liters:g} L).",
+        [],
+    )
+
+
+def _edit_dip(entry, form):
+    """A dip is measured in cm on a tank with a calibration chart and in
+    litres on one without - the same split ledger_dip() makes, resolved
+    from the tank rather than trusted from the form so a hand-rolled POST
+    can't store an unconverted cm figure as litres."""
+    tank = entry.tank
+    has_chart = bool(tank.dip_chart_rows)
+    raw = (form.get("dip") or "").strip()
+    if not raw:
+        return f"Tank {tank.number}: please enter a dip reading.", None, []
+    try:
+        entered = float(raw)
+    except ValueError:
+        return f"Tank {tank.number}: not a valid number.", None, []
+    if entered < 0:
+        return f"Tank {tank.number}: dip must be zero or more.", None, []
+
+    if has_chart:
+        dip_cm = entered
+        dip_value = liters_from_dip_cm(tank, entered)
+        if dip_value is None:
+            return f"Tank {tank.number}: no dip chart found.", None, []
+    else:
+        dip_cm = None
+        dip_value = entered
+
+    raw_water = (form.get("water_cm") or "").strip()
+    water_cm = None
+    if raw_water:
+        try:
+            water_cm = float(raw_water)
+        except ValueError:
+            return f"Tank {tank.number}: water level is not a valid number.", None, []
+        if water_cm < 0:
+            return f"Tank {tank.number}: water level must be zero or more.", None, []
+
+    entry.dip_cm = dip_cm
+    entry.dip_liters = dip_value
+    entry.water_cm = water_cm
+    return None, f"Updated dip reading for {tank.label} ({entry.entry_date}).", []
+
+
+def _edit_handover(entry, form):
+    """Purely a reconciliation record - it moves no money itself (see
+    CashHandover in models.py), so there is no cash guard here any more
+    than there is on ledger_handover(). The variance against the day's
+    expected cash is recomputed from the ledger, never stored."""
+    declared = form.get("declared_amount", type=float)
+    attendant_id = form.get("attendant_id", type=int)
+    note = (form.get("note") or "").strip()
+    attendant = db.session.get(Account, attendant_id) if attendant_id else None
+
+    if declared is None or declared < 0:
+        return "Please enter the cash counted (zero or more).", None, []
+
+    entry.declared_amount = declared
+    entry.attendant_id = attendant.id if attendant else None
+    entry.note = note or None
+
+    expected = sales_breakdown_for_date(entry.entry_date, shift_id=entry.shift_id)["cash"]
+    variance = round(declared - expected, 2)
+    if abs(variance) < 0.01:
+        message = f"{entry.shift.name}: cash counted matches the ledger exactly."
+    elif variance < 0:
+        message = (
+            f"{entry.shift.name}: updated - short by Rs {format_number(abs(variance))} "
+            f"(expected Rs {format_number(expected)}, counted Rs {format_number(declared)})."
+        )
+    else:
+        message = (
+            f"{entry.shift.name}: updated - over by Rs {format_number(variance)} "
+            f"(expected Rs {format_number(expected)}, counted Rs {format_number(declared)})."
+        )
+    return None, message, []
+
+
+def _edit_sales_return(entry, form):
+    """Fuel handed back and refunded. price_per_liter stays the row's own
+    (the rate actually charged when the fuel was sold), so amount is
+    re-derived as litres x that price - which is also why the fuel type
+    isn't editable here: changing it would leave the stored price
+    belonging to a different fuel."""
+    tank_id = form.get("tank_id", type=int)
+    liters = form.get("liters", type=float)
+    note = (form.get("note") or "").strip()
+    tank = db.session.get(Tank, tank_id) if tank_id else None
+    method, bank_account, account, method_error = resolve_return_method(form)
+
+    if not tank:
+        return "Please choose which tank the fuel goes back into.", None, []
+    if not liters or liters <= 0:
+        return "Liters must be a positive number.", None, []
+    if method_error:
+        return method_error, None, []
+
+    amount = round(liters * entry.price_per_liter, 2)
+    old_cash = entry.amount if entry.method == "cash" else 0
+    new_cash = amount if method == "cash" else 0
+    if would_overdraw_cash(new_cash, entry.entry_date, old_cash, entry.entry_date):
+        return cash_shortfall_message(entry.entry_date), None, []
+
+    entry.tank_id = tank.id
+    entry.liters = liters
+    entry.amount = amount
+    entry.method = method
+    entry.bank_account_id = bank_account.id if bank_account else None
+    entry.account_id = account.id if account else None
+    entry.note = note or None
+    return (
+        None,
+        f"Updated return of {liters:g} L {entry.fuel_type.name} into {tank.label} "
+        f"(Rs {format_number(amount)}).",
+        [],
+    )
+
+
+def _edit_bank_sale(entry, form):
+    """Cash taken out of the drawer and banked as a sale - guarded exactly
+    like ledger_bank_sale(), but with the row's own old figure handed to
+    would_overdraw_cash() so raising an existing bank sale is only
+    checked against the DIFFERENCE, not against the whole new amount on
+    top of itself."""
+    entry_date = parse_date_param(form.get("entry_date"), entry.entry_date)
+    bank_account, error = resolve_bank_account(form)
+    amount = form.get("amount", type=float)
+    note = (form.get("note") or "").strip()
+
+    if error:
+        return error, None, []
+    if not amount or amount <= 0:
+        return "Amount must be a positive number.", None, []
+    if would_overdraw_cash(amount, entry_date, entry.amount, entry.entry_date):
+        return cash_shortfall_message(entry_date), None, []
+
+    entry.entry_date = entry_date
+    entry.bank_account_id = bank_account.id
+    entry.amount = amount
+    entry.note = note or None
+    return None, f"Updated bank sale to {bank_account.name} (Rs {format_number(amount)}).", []
+
+
+def _edit_cash_deposit(entry, form):
+    """Same shape and same guard as _edit_bank_sale - a deposit also
+    leaves the drawer."""
+    entry_date = parse_date_param(form.get("entry_date"), entry.entry_date)
+    bank_account, error = resolve_bank_account(form)
+    amount = form.get("amount", type=float)
+    note = (form.get("note") or "").strip()
+
+    if error:
+        return error, None, []
+    if not amount or amount <= 0:
+        return "Amount must be a positive number.", None, []
+    if would_overdraw_cash(amount, entry_date, entry.amount, entry.entry_date):
+        return cash_shortfall_message(entry_date), None, []
+
+    entry.entry_date = entry_date
+    entry.bank_account_id = bank_account.id
+    entry.amount = amount
+    entry.note = note or None
+    return None, f"Updated deposit to {bank_account.name} (Rs {format_number(amount)}).", []
+
+
+def _edit_expense(entry, form):
+    """Mirrors ledger_expense(). Only the cash-method side of the old and
+    new figures counts toward the overdraw guard - switching an expense
+    from cash to a bank puts the whole old amount back in the drawer."""
+    entry_date = parse_date_param(form.get("entry_date"), entry.entry_date)
+    category = (form.get("category") or "").strip()
+    description = (form.get("description") or "").strip()
+    amount = form.get("amount", type=float)
+    method, bank_account, method_error = resolve_payment_method(form)
+    old_cash = entry.amount if entry.method == "cash" else 0
+    new_cash = amount if (amount and method == "cash") else 0
+
+    if not category:
+        return "Please enter an expense category.", None, []
+    if not amount or amount <= 0:
+        return "Amount must be a positive number.", None, []
+    if method_error:
+        return method_error, None, []
+    if would_overdraw_cash(new_cash, entry_date, old_cash, entry.entry_date):
+        return cash_shortfall_message(entry_date), None, []
+
+    entry.entry_date = entry_date
+    entry.category = category
+    entry.description = description or None
+    entry.amount = amount
+    entry.method = method
+    entry.bank_account_id = bank_account.id if bank_account else None
+    return None, f"Updated expense: {category} - Rs {format_number(amount)}", []
+
+
+def _edit_product_sale(entry, form):
+    """Mirrors ledger_product_sale(), including its deliberate absence of
+    a cash guard (a sale only ever puts money in) and its "overselling
+    warns but still saves" rule - a stock count being wrong is not a
+    reason to refuse a sale that physically happened.
+
+    purchase_rate is re-resolved from product_rates_on_date() for the
+    entry's date and is never overridable, exactly as on create - it is
+    cost, not a negotiated price. The retail rate is submitted through
+    the same retail_rate_override field the create form uses (prefilled
+    with the row's current rate, so saving an untouched form keeps the
+    figure that was actually charged).
+    """
+    entry_date = parse_date_param(form.get("entry_date"), entry.entry_date)
+    quantity = form.get("quantity", type=float)
+    note = (form.get("note") or "").strip()
+    method, bank_account, account, method_error = resolve_return_method(form)
+    product, product_error = resolve_product(form, entry_date)
+
+    raw_retail_override = (form.get("retail_rate_override") or "").strip()
+    retail_override = None
+    retail_override_error = None
+    if raw_retail_override:
+        try:
+            retail_override = float(raw_retail_override)
+        except ValueError:
+            retail_override_error = "Retail rate override is not a valid number."
+        if retail_override is not None and retail_override <= 0:
+            retail_override_error = "Retail rate override must be a positive number."
+
+    if product_error:
+        return product_error, None, []
+    if not quantity or quantity <= 0:
+        return "Quantity must be a positive number.", None, []
+    if method_error:
+        return method_error, None, []
+    if retail_override_error:
+        return retail_override_error, None, []
+
+    purchase_rate, retail_rate = product_rates_on_date(product, entry_date)
+    if retail_override is not None:
+        retail_rate = retail_override
+    amount = round(quantity * retail_rate, 2)
+    # Stock as it stands with THIS sale's old quantity still counted -
+    # backed out below so the warning is judged against what was
+    # available to sell, not against the row being replaced.
+    unchanged_slot = product.id == entry.product_id and entry_date == entry.entry_date
+    stock_before = round(
+        product_stock(product, entry_date) + (entry.quantity if unchanged_slot else 0), 2
+    )
+
+    entry.entry_date = entry_date
+    entry.product_id = product.id
+    entry.quantity = quantity
+    entry.retail_rate = retail_rate
+    entry.purchase_rate = purchase_rate
+    entry.amount = amount
+    entry.method = method
+    entry.bank_account_id = bank_account.id if bank_account else None
+    entry.account_id = account.id if account else None
+    entry.note = note or None
+
+    notes = []
+    if quantity > stock_before:
+        notes.append(
+            (
+                f"{product.label}: sold {quantity:g} but only {stock_before:g} were in stock as "
+                f"of {entry_date} - the stock count may need correcting; the edit was still saved.",
+                "error",
+            )
+        )
+    return (
+        None,
+        f"Updated sale of {quantity:g} {product.label} (Rs {format_number(amount)}).",
+        notes,
+    )
+
+
+def _edit_product_purchase(entry, form):
+    """Mirrors ledger_product_purchase() field for field, including the
+    negative-quantity return/correction case and the rule that the sign of
+    total_cost comes from quantity alone, never from unit_cost."""
+    entry_date = parse_date_param(form.get("entry_date"), entry.entry_date)
+    quantity = form.get("quantity", type=float)
+    unit_cost = form.get("unit_cost", type=float)
+    payment_type = form.get("payment_type", "cash")
+    payment_type = payment_type if payment_type in ("cash", "credit") else "cash"
+    note = (form.get("note") or "").strip()
+
+    product, product_error = resolve_product(
+        form, entry_date, fallback_purchase_rate=unit_cost if unit_cost and unit_cost > 0 else None
+    )
+
+    supplier = None
+    supplier_error = None
+    method, bank_account, method_error = "cash", None, None
+    if payment_type == "credit":
+        supplier, supplier_error = resolve_supplier(form)
+    else:
+        method, bank_account, method_error = resolve_payment_method(form)
+
+    # Same ordering as the create route: a bad unit cost must be reported
+    # as exactly that, never laundered into a "bad purchase rate" error
+    # from the quick-create fallback above.
+    if quantity is None or quantity == 0:
+        return "Quantity can't be zero - use a negative quantity for a return or correction.", None, []
+    if not unit_cost or unit_cost <= 0:
+        return (
+            "Unit cost must be a positive number - the sign of a return comes from a negative "
+            "quantity, never from the cost.",
+            None,
+            [],
+        )
+    if product_error:
+        return product_error, None, []
+    if payment_type == "credit" and supplier_error:
+        return supplier_error, None, []
+    if payment_type == "cash" and method_error:
+        return method_error, None, []
+
+    total_cost = round(quantity * unit_cost, 2)
+    # Signed on purpose, unlike the create route's "only guard a positive
+    # total_cost" shortcut. A negative total_cost is money coming BACK in,
+    # so as the new figure it can never overdraw (the guard sees a
+    # negative outflow and passes, exactly as skipping it would) - but as
+    # the OLD figure being replaced it has to be backed out with its sign
+    # intact, or removing a refund would look free.
+    old_cash = entry.total_cost if (entry.payment_type == "cash" and entry.method == "cash") else 0
+    new_cash = total_cost if (payment_type == "cash" and method == "cash") else 0
+    if would_overdraw_cash(new_cash, entry_date, old_cash, entry.entry_date):
+        return cash_shortfall_message(entry_date), None, []
+
+    entry.entry_date = entry_date
+    entry.product_id = product.id
+    entry.quantity = quantity
+    entry.unit_cost = unit_cost
+    entry.total_cost = total_cost
+    entry.payment_type = payment_type
+    entry.method = method
+    entry.bank_account_id = bank_account.id if bank_account else None
+    entry.account_id = supplier.id if supplier else None
+    entry.note = note or None
+    verb = "Received" if quantity > 0 else "Returned/corrected"
+    return (
+        None,
+        f"Updated: {verb.lower()} {abs(quantity):g} {product.label} (Rs {format_number(abs(total_cost))}).",
+        [],
+    )
+
+
+def _edit_nozzle_testing(entry, form):
+    """Testing can be re-slotted (nozzle, date and shift are all editable
+    here, unlike a Sale's), so BOTH the slot it left and the slot it
+    joined have to be re-reconciled - the Sale it used to be carved out
+    of gets those litres back, and the Sale it now belongs to has them
+    taken out. Missing either half would leave one of the two Sales
+    permanently wrong.
+
+    No cash guard, deliberately, exactly as on ledger_testing(): testing
+    moves no money at all, it only reduces revenue the way a smaller
+    meter reading would.
+    """
+    old_slot = (entry.nozzle_id, entry.entry_date, entry.shift_id)
+    entry_date = parse_date_param(form.get("entry_date"), entry.entry_date)
+    shift = resolve_shift(form)
+    nozzle_id = form.get("nozzle_id", type=int)
+    liters = form.get("liters", type=float)
+    note = (form.get("note") or "").strip()
+    nozzle = db.session.get(Nozzle, nozzle_id) if nozzle_id else None
+
+    if not nozzle:
+        return "Please choose a valid nozzle.", None, []
+    if not liters or liters <= 0:
+        return "Liters must be a positive number.", None, []
+
+    entry.nozzle_id = nozzle.id
+    entry.entry_date = entry_date
+    entry.shift_id = shift.id
+    entry.liters = liters
+    entry.note = note or None
+
+    new_slot = (nozzle.id, entry_date, shift.id)
+    db.session.flush()
+    notes = []
+    if old_slot != new_slot:
+        sync_sale_testing(*old_slot)
+    sale, over_by = sync_sale_testing(*new_slot)
+    if sale is None:
+        notes.append(
+            (
+                f"No meter reading has been saved yet for {nozzle.label} on {entry_date} "
+                f"({shift.name}) - this testing will be carved out of the sale automatically "
+                f"as soon as that reading is saved.",
+                "info",
+            )
+        )
+    elif over_by:
+        notes.append(
+            (
+                f"{nozzle.label}: total testing on this slot now exceeds the meter difference "
+                f"by {over_by:g} L - clamped so the sale doesn't go negative.",
+                "error",
+            )
+        )
+    return None, f"Updated testing to {liters:g} L on {nozzle.label}.", notes
+
+
+def _edit_other_income(entry, form):
+    """Mirrors ledger_other_income() - only ever increases cash/bank/what a
+    customer owes, so no cash guard here either."""
+    entry_date = parse_date_param(form.get("entry_date"), entry.entry_date)
+    description = (form.get("description") or "").strip()
+    amount = form.get("amount", type=float)
+    method, bank_account, account, method_error = resolve_return_method(form)
+
+    if not description:
+        return "Please enter a description.", None, []
+    if not amount or amount <= 0:
+        return "Amount must be a positive number.", None, []
+    if method_error:
+        return method_error, None, []
+
+    entry.entry_date = entry_date
+    entry.description = description
+    entry.amount = amount
+    entry.method = method
+    entry.bank_account_id = bank_account.id if bank_account else None
+    entry.account_id = account.id if account else None
+    return None, f"Updated other income: {description} - Rs {format_number(amount)}", []
+
+
+def _edit_tanker_deal(entry, form):
+    """Mirrors ledger_tanker_sale(): two independently-resolved sides,
+    each with its own payment type, bank picker field name and account
+    picker, and the cash guard applied only to a cash-method PURCHASE and
+    against the full purchase cost - never netted against the sale side,
+    since the drawer is drained when the tanker is paid for whether or
+    not the customer has settled.
+
+    Nothing here touches tank stock, on edit any more than on create -
+    the fuel never entered a tank (see TankerDeal in models.py). The
+    margin shown everywhere is derived from purchase_cost/sale_amount on
+    read, so correcting either figure moves profit and nothing else.
+    """
+    entry_date = parse_date_param(form.get("entry_date"), entry.entry_date)
+    fuel_type_id = form.get("fuel_type_id", type=int)
+    liters = form.get("liters", type=float)
+    purchase_cost = form.get("purchase_cost", type=float)
+    sale_amount = form.get("sale_amount", type=float)
+    note = (form.get("note") or "").strip()
+
+    purchase_payment_type = form.get("purchase_payment_type", "cash")
+    if purchase_payment_type not in ("cash", "credit"):
+        purchase_payment_type = "cash"
+    sale_payment_type = form.get("sale_payment_type", "cash")
+    if sale_payment_type not in ("cash", "credit"):
+        sale_payment_type = "cash"
+
+    fuel_type = db.session.get(FuelType, fuel_type_id) if fuel_type_id else None
+
+    supplier = None
+    supplier_error = None
+    purchase_bank_account = None
+    purchase_method_error = None
+    if purchase_payment_type == "credit":
+        supplier, supplier_error = resolve_supplier(form)
+    else:
+        purchase_payment_type, purchase_bank_account, purchase_method_error = resolve_payment_method(
+            form, field="purchase_paid_via", new_field="new_purchase_bank_account_name"
+        )
+
+    customer = None
+    customer_error = None
+    sale_bank_account = None
+    sale_method_error = None
+    if sale_payment_type == "credit":
+        customer, customer_error = resolve_customer(form)
+    else:
+        sale_payment_type, sale_bank_account, sale_method_error = resolve_payment_method(
+            form, field="sale_paid_via", new_field="new_sale_bank_account_name"
+        )
+
+    if not fuel_type:
+        return "Please choose a valid fuel type.", None, []
+    if not liters or liters <= 0:
+        return "Liters must be a positive number.", None, []
+    if not purchase_cost or purchase_cost <= 0:
+        return (
+            "Purchase cost must be a positive number - without it the amount owed to "
+            "the supplier, and the whole margin on this deal, would silently be zero.",
+            None,
+            [],
+        )
+    if not sale_amount or sale_amount <= 0:
+        return "Sale amount must be a positive number.", None, []
+    if supplier_error:
+        return supplier_error, None, []
+    if purchase_method_error:
+        return purchase_method_error, None, []
+    if customer_error:
+        return customer_error, None, []
+    if sale_method_error:
+        return sale_method_error, None, []
+
+    old_cash = entry.purchase_cost if entry.purchase_payment_type == "cash" else 0
+    new_cash = purchase_cost if purchase_payment_type == "cash" else 0
+    if would_overdraw_cash(new_cash, entry_date, old_cash, entry.entry_date):
+        return cash_shortfall_message(entry_date), None, []
+
+    entry.entry_date = entry_date
+    entry.fuel_type_id = fuel_type.id
+    entry.liters = liters
+    entry.purchase_cost = purchase_cost
+    entry.purchase_payment_type = purchase_payment_type
+    entry.purchase_bank_account_id = purchase_bank_account.id if purchase_bank_account else None
+    entry.supplier_account_id = supplier.id if supplier else None
+    entry.sale_amount = sale_amount
+    entry.sale_payment_type = sale_payment_type
+    entry.sale_bank_account_id = sale_bank_account.id if sale_bank_account else None
+    entry.customer_account_id = customer.id if customer else None
+    entry.note = note or None
+
+    margin = round(sale_amount - purchase_cost, 2)
+    return (
+        None,
+        f"Tanker deal updated: sold Rs {format_number(sale_amount)} against "
+        f"Rs {format_number(purchase_cost)} cost - margin Rs {format_number(margin)}.",
+        [],
+    )
+
+
+# The thirteen kinds the Ledger's feed edits through entry_edit() below,
+# keyed by the same URL segment DELETABLE_ENTRIES uses. The six
+# account-side kinds (credit, receipt, purchase, supplier-payment,
+# employee-loan, salary) are deliberately absent: they already have
+# editors under /accounts/entry/..., and the feed posts to THOSE with a
+# "next" field rather than growing a second implementation of each.
+EDITABLE_ENTRIES = {
+    "sale": (Sale, _edit_sale),
+    "direct-sale": (DirectSale, _edit_direct_sale),
+    "dip": (TankDip, _edit_dip),
+    "handover": (CashHandover, _edit_handover),
+    "sales-return": (SalesReturn, _edit_sales_return),
+    "bank-sale": (BankSale, _edit_bank_sale),
+    "cash-deposit": (CashDeposit, _edit_cash_deposit),
+    "expense": (Expense, _edit_expense),
+    "product-sale": (ProductSale, _edit_product_sale),
+    "product-purchase": (ProductPurchase, _edit_product_purchase),
+    "nozzle-testing": (NozzleTesting, _edit_nozzle_testing),
+    "other-income": (OtherIncome, _edit_other_income),
+    "tanker-deal": (TankerDeal, _edit_tanker_deal),
+}
+
+
+@app.route("/entry/<kind>/<int:entry_id>/edit", methods=["POST"])
+@login_required
+@owner_required
+def entry_edit(kind, entry_id):
+    """Edit one ledger row in place, from whichever page linked here (via
+    the hidden "next" field) - the counterpart to entry_delete(), and one
+    dispatching route rather than thirteen near-identical ones.
+
+    DOWNSTREAM RECALCULATION IS AUTOMATIC - PLEASE DON'T "FIX" THIS BY
+    ADDING A CACHE. This app stores no running totals anywhere: account
+    balances, credit aging, tank book stock, product stock, cash in hand,
+    bank balances, the dashboard and every report all derive themselves
+    fresh from the rows on each read (see Account.balance in models.py,
+    and book_stock() / cash_account_balance() / credit_aging() in
+    ledger_logic.py). Changing a row here therefore changes every figure
+    that row feeds, with nothing to invalidate and nothing to recompute.
+
+    Exactly two things do NOT fall out of that, and both are handled by
+    the per-kind handlers above rather than here:
+      * Sale.previous_reading/current_reading form a chain across slots,
+        so editing one reading can leave the NEXT slot's previous reading
+        stale - surfaced as a flash, never silently patched.
+      * Sale.testing_liters is a stored split written only by
+        sync_sale_testing(), so a Sale or NozzleTesting edit re-runs it
+        for every slot it touched.
+
+    Everything else - the cash-overdraw guard, the "cash went negative on
+    a later date" warning below - is the same treatment the create routes
+    and entry_delete() already give. A rejected edit writes nothing: the
+    handlers validate before assigning, and the rollback here also
+    discards any account/bank account a resolve_* helper quick-created
+    while parsing the rejected form.
+    """
+    editable = EDITABLE_ENTRIES.get(kind)
+    if not editable:
+        abort(404)
+    model, handler = editable
+    entry = db.session.get(model, entry_id) or abort(404)
+
+    error, success, notes = handler(entry, request.form)
+    if error:
+        db.session.rollback()
+        flash(error, "error")
+    else:
+        db.session.commit()
+        flash(success, "success")
+        for note, category in notes:
+            flash(note, category)
+        bad_date = first_negative_cash_date()
+        if bad_date:
+            # Same after-the-fact warning entry_delete() gives: an edit on
+            # one date can only be judged against that date, but the money
+            # it moved is spent again on every later one.
+            flash(
+                f"Heads up: cash in hand is now negative on {bad_date} - you "
+                "may need to correct or remove entries on or after that date.",
+                "error",
+            )
+
+    return redirect(request.form.get("next") or url_for("ledger", date=entry.entry_date))
+
+
 # ------------------------------------------------------------ dashboard ---
 
 _ATTENTION_SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
@@ -6357,6 +7094,10 @@ def account_entry_credit_edit(entry_id):
     an existing credit-given entry be switched between liters-mode and
     amount-mode, or stay in either, on save."""
     entry = db.session.get(CreditGiven, entry_id) or abort(404)
+    # Honours an optional hidden "next" field exactly as entry_delete()
+    # does, so this one editor serves both the account page (which posts
+    # no "next" and so falls back to itself) and the Ledger feed.
+    next_url = request.form.get("next") or url_for("account_detail", account_id=entry.account_id)
     entry_date = parse_date_param(request.form.get("entry_date"))
     fuel_type_id = request.form.get("fuel_type_id", type=int)
     entry_mode = request.form.get("entry_mode", "liters")
@@ -6398,7 +7139,7 @@ def account_entry_credit_edit(entry_id):
         db.session.commit()
         flash("Credit entry updated.", "success")
 
-    return redirect(url_for("account_detail", account_id=entry.account_id))
+    return redirect(next_url)
 
 
 @app.route("/accounts/entry/receipt/<int:entry_id>/edit", methods=["POST"])
@@ -6406,6 +7147,10 @@ def account_entry_credit_edit(entry_id):
 @owner_required
 def account_entry_receipt_edit(entry_id):
     entry = db.session.get(Receipt, entry_id) or abort(404)
+    # Honours an optional hidden "next" field exactly as entry_delete()
+    # does, so this one editor serves both the account page (which posts
+    # no "next" and so falls back to itself) and the Ledger feed.
+    next_url = request.form.get("next") or url_for("account_detail", account_id=entry.account_id)
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
@@ -6424,7 +7169,7 @@ def account_entry_receipt_edit(entry_id):
         db.session.commit()
         flash("Receipt updated.", "success")
 
-    return redirect(url_for("account_detail", account_id=entry.account_id))
+    return redirect(next_url)
 
 
 @app.route("/accounts/entry/purchase/<int:entry_id>/edit", methods=["POST"])
@@ -6432,6 +7177,10 @@ def account_entry_receipt_edit(entry_id):
 @owner_required
 def account_entry_purchase_edit(entry_id):
     entry = db.session.get(StockPurchase, entry_id) or abort(404)
+    # Honours an optional hidden "next" field exactly as entry_delete()
+    # does, so this one editor serves both the account page (which posts
+    # no "next" and so falls back to itself) and the Ledger feed.
+    next_url = request.form.get("next") or url_for("account_detail", account_id=entry.account_id)
     entry_date = parse_date_param(request.form.get("entry_date"))
     tank_id = request.form.get("tank_id", type=int)
     liters = request.form.get("liters", type=float)
@@ -6454,7 +7203,7 @@ def account_entry_purchase_edit(entry_id):
         db.session.commit()
         flash("Purchase updated.", "success")
 
-    return redirect(url_for("account_detail", account_id=entry.account_id))
+    return redirect(next_url)
 
 
 @app.route("/accounts/entry/supplier-payment/<int:entry_id>/edit", methods=["POST"])
@@ -6462,6 +7211,10 @@ def account_entry_purchase_edit(entry_id):
 @owner_required
 def account_entry_supplier_payment_edit(entry_id):
     entry = db.session.get(SupplierPayment, entry_id) or abort(404)
+    # Honours an optional hidden "next" field exactly as entry_delete()
+    # does, so this one editor serves both the account page (which posts
+    # no "next" and so falls back to itself) and the Ledger feed.
+    next_url = request.form.get("next") or url_for("account_detail", account_id=entry.account_id)
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
@@ -6484,7 +7237,7 @@ def account_entry_supplier_payment_edit(entry_id):
         db.session.commit()
         flash("Payment updated.", "success")
 
-    return redirect(url_for("account_detail", account_id=entry.account_id))
+    return redirect(next_url)
 
 
 @app.route("/accounts/entry/employee-loan/<int:entry_id>/edit", methods=["POST"])
@@ -6492,6 +7245,10 @@ def account_entry_supplier_payment_edit(entry_id):
 @owner_required
 def account_entry_employee_loan_edit(entry_id):
     entry = db.session.get(EmployeeLoan, entry_id) or abort(404)
+    # Honours an optional hidden "next" field exactly as entry_delete()
+    # does, so this one editor serves both the account page (which posts
+    # no "next" and so falls back to itself) and the Ledger feed.
+    next_url = request.form.get("next") or url_for("account_detail", account_id=entry.account_id)
     entry_date = parse_date_param(request.form.get("entry_date"))
     amount = request.form.get("amount", type=float)
     note = request.form.get("note", "").strip()
@@ -6514,7 +7271,7 @@ def account_entry_employee_loan_edit(entry_id):
         db.session.commit()
         flash("Loan updated.", "success")
 
-    return redirect(url_for("account_detail", account_id=entry.account_id))
+    return redirect(next_url)
 
 
 @app.route("/accounts/entry/salary/<int:entry_id>/edit", methods=["POST"])
