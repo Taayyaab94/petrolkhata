@@ -362,7 +362,16 @@
     fetch(formAction(form), {
       method: "POST",
       body: body,
-      headers: { "X-Requested-With": "XMLHttpRequest" },
+      headers: {
+        "X-Requested-With": "XMLHttpRequest",
+        /* Which ledger view we are on. The server points the save's
+           redirect here (see _ajax_save_lands_on_the_viewed_page in
+           app.py) so the response we follow is already the page we want
+           to graft in - otherwise the handler would send us to the
+           entry's own date with no ?shift= and we would have to fetch
+           this page separately, rendering the whole ledger twice. */
+        "X-Ledger-View": window.location.search
+      },
       redirect: "follow",
       credentials: "same-origin"
     }).then(function (response) {
@@ -399,35 +408,33 @@
          form's snapshot is put back and the typed values survive. */
       var skipKey = failed || !editorContainer(form) ? null : editorKey(form);
 
-      return fetch(window.location.href, {
-        credentials: "same-origin",
-        headers: { "X-Requested-With": "XMLHttpRequest" }
-      }).then(function (r) {
-        return r.text();
-      }).then(function (html) {
-        var fresh = parse(html);
-        /* On failure the submitted form must keep exactly what the user
-           typed, so it is snapshotted and restored like any other open
-           editor; on success it is left to render fresh from the server. */
-        var swapped = swapRegions(fresh, form, activeAtSubmit, skipKey);
-        if (!failed) { highlight(swapped); }
+      /* The POST's own response IS the page we want. fetch followed the
+         redirect, and the server aimed that redirect at the view we told
+         it we are on, so this document is exactly what a separate GET of
+         window.location.href would have returned - for one render of the
+         ledger instead of two. */
+      var fresh = posted.doc;
+      /* On failure the submitted form must keep exactly what the user
+         typed, so it is snapshotted and restored like any other open
+         editor; on success it is left to render fresh from the server. */
+      var swapped = swapRegions(fresh, form, activeAtSubmit, skipKey);
+      if (!failed) { highlight(swapped); }
 
-        if (failed) {
-          reanchor(status, editorContainer(form) ? key : null);
-          settleStatus(status, "err", outcome.message || "Couldn't save.");
-        } else {
-          /* Only on success does the form get cleared, so the next entry
-             starts from a clean slate. reset() restores the server-rendered
-             defaults, which is right for the prefilled forms (dip, edit). */
-          if (document.body.contains(form)) { resetForm(form); }
-          var message = outcome.message || readFlashes(fresh).message;
-          /* The server's own wording ("Logged expense: ...", "Deleted
-             expense.") is better than anything generic we could prefix it
-             with; the checkmark already says it worked. */
-          settleStatus(status, "ok", message || "Saved");
-        }
-        restore();
-      });
+      if (failed) {
+        reanchor(status, editorContainer(form) ? key : null);
+        settleStatus(status, "err", outcome.message || "Couldn't save.");
+      } else {
+        /* Only on success does the form get cleared, so the next entry
+           starts from a clean slate. reset() restores the server-rendered
+           defaults, which is right for the prefilled forms (dip, edit). */
+        if (document.body.contains(form)) { resetForm(form); }
+        var message = outcome.message || readFlashes(fresh).message;
+        /* The server's own wording ("Logged expense: ...", "Deleted
+           expense.") is better than anything generic we could prefix it
+           with; the checkmark already says it worked. */
+        settleStatus(status, "ok", message || "Saved");
+      }
+      restore();
     }).catch(function (err) {
       settleStatus(status, "err", "Couldn't save - check your connection.");
       restore();

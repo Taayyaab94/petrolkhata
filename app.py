@@ -253,6 +253,48 @@ def _cache_static_at_the_edge(response):
     return response
 
 
+# A view query string as sent by static/ledger-ajax.js. Deliberately
+# strict: this value ends up in a Location header, so anything that could
+# carry a newline (header injection) or a second host must not get through.
+_LEDGER_VIEW = re.compile(r"\?[A-Za-z0-9_\-=&%.+]*\Z")
+
+
+@app.after_request
+def _ajax_save_lands_on_the_viewed_page(response):
+    """Point a ledger save's redirect at the page the user is actually
+    looking at, so the AJAX layer doesn't have to fetch it separately.
+
+    Every ledger POST ends `redirect(url_for("ledger", date=entry_date))`
+    - the entry's own date, with no ?shift=. That is usually NOT the view
+    the user is on, so static/ledger-ajax.js threw the followed response
+    away and re-fetched the current URL, rendering the whole ledger a
+    SECOND time: two full renders (165 queries each) per saved entry.
+
+    When the save is an AJAX one the browser sends the view it is on, and
+    the redirect is pointed there instead - so the response fetch follows
+    is already the page the script wants to graft in, and one render does
+    the job. Nothing else is touched: the handler still validates, still
+    flashes, still redirects, and a save with JavaScript off takes the
+    original path unchanged.
+    """
+    view = request.headers.get("X-Ledger-View")
+    if (
+        view is not None
+        and request.method == "POST"
+        and request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        and response.status_code in (301, 302, 303, 307, 308)
+        and (view == "" or _LEDGER_VIEW.match(view))
+    ):
+        ledger_path = url_for("ledger")
+        location = response.headers.get("Location") or ""
+        # Only ever rewrite a redirect that was already going to the
+        # ledger - a handler that bounces somewhere else (login, an
+        # account page) must keep its own destination.
+        if location.partition("?")[0].rstrip("/") == ledger_path.rstrip("/"):
+            response.headers["Location"] = ledger_path + view
+    return response
+
+
 @app.url_defaults
 def _static_cache_buster(endpoint, values):
     """Append the content hash to every url_for('static', ...). Templates
