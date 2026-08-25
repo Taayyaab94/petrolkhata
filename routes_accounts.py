@@ -24,6 +24,7 @@ from flask_login import login_required
 
 from formatting import format_number
 from extensions import db
+from balance_terms import ACCOUNT_TERMS, BANK_TERMS, eager_load
 from ledger_logic import (
     account_ledger_events,
     bank_account_ledger_events,
@@ -242,6 +243,14 @@ def _accounts_context(kind, type_filter, q=""):
         query = Account.query.filter(Account.parent_account_id.is_(None))
         if type_filter in ACCOUNT_TYPES:
             query = query.filter_by(account_type=type_filter)
+        # Every row below reads a.balance (or a.group_balance, which reads
+        # each child's), and each of those walks 12 relationships. Left
+        # lazy that is 12 queries per account and 12 more per sub-account;
+        # fetched up front it is 12 for the whole page, plus 12 for all the
+        # children together, however many accounts there are. Same rows,
+        # same Python arithmetic - only fewer round trips.
+        query = eager_load(query, Account, ACCOUNT_TERMS)
+        query = eager_load(query, Account, ACCOUNT_TERMS, via=Account.children)
         for a in query.all():
             # Debitor/creditor is purely a function of the account's current
             # balance sign - not its type label - so an account's
@@ -273,7 +282,8 @@ def _accounts_context(kind, type_filter, q=""):
             )
 
     if kind == "all" and type_filter in ("all", "bank"):
-        for b in BankAccount.query.all():
+        # Same story as the accounts above, over BANK_TERMS' 14 relationships.
+        for b in eager_load(BankAccount.query, BankAccount, BANK_TERMS).all():
             # Bank accounts (and cash-in-hand) are the pump's own money,
             # not a debitor/creditor relationship, so they only show up
             # under "All" - not under the Debitors/Creditors filter.

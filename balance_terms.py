@@ -428,6 +428,43 @@ def sum_via_relationships(owner, terms, start=0):
     return total
 
 
+def eager_load(query, model, terms, via=None):
+    """Fetch every relationship `terms` walks up front, one query per
+    relationship for the WHOLE result set, instead of one query per
+    relationship per row.
+
+    sum_via_relationships() reads `owner.<rel>`; if that collection is
+    already loaded it costs nothing, and if it isn't, SQLAlchemy emits a
+    query right there. Listing N accounts therefore cost 12N queries
+    (14N for bank accounts) purely in lazy loads. With this it is 12 (or
+    14), whatever N is.
+
+    This changes only WHEN the rows are fetched, never which rows or how
+    they are summed - the arithmetic still runs in Python over the same
+    collections, in the same term order, so the result is identical down
+    to the last bit. selectinload (a second SELECT ... WHERE fk IN (...))
+    is used rather than a join, so no row is duplicated by fanout and
+    each collection holds exactly what a lazy load would have put there.
+
+    `via` nests the loads under another relationship, for the Accounts
+    list: a parent row shows group_balance, which sums each child's
+    balance too, so the children's own term relationships have to come
+    across as well or the N+1 simply moves down a level.
+    """
+    from sqlalchemy.orm import selectinload
+
+    seen = []
+    for term in terms:
+        if term.rel not in seen:
+            seen.append(term.rel)
+    if via is None:
+        opts = [selectinload(getattr(model, rel)) for rel in seen]
+    else:
+        opts = [selectinload(via).selectinload(getattr(model, rel))
+                for rel in seen]
+    return query.options(*opts)
+
+
 def sum_via_sql(owner_id, terms, date_column=None, as_of=None, start=0.0):
     """What bank_account_balance_as_of() uses: one explicit SQL sum per
     term, filtered by the owner's id and (optionally) by

@@ -33,6 +33,7 @@ from sqlalchemy.exc import IntegrityError
 
 from formatting import format_number
 from extensions import db
+from balance_terms import ACCOUNT_TERMS, BANK_TERMS, eager_load
 from ledger_logic import (
     active_shifts,
     allocate_group_payment,
@@ -352,7 +353,14 @@ def ledger():
     # account labelled "supplier" can still be given customer credit).
     # Each picker still sorts its own "relevant" type first, though, so
     # the common case doesn't require scrolling past every other type.
-    accounts = Account.query.order_by(Account.name).all()
+    # account_groups below reads every sub-account's .balance, and the
+    # template reads more of them - each one walking 12 relationships.
+    # Fetched up front that is 12 queries for the page instead of 12 per
+    # account; the summing itself is untouched.
+    accounts = eager_load(
+        eager_load(Account.query, Account, ACCOUNT_TERMS),
+        Account, ACCOUNT_TERMS, via=Account.children,
+    ).order_by(Account.name).all()
     accounts_customer_first = prioritize_accounts(accounts, "customer")
     accounts_supplier_first = prioritize_accounts(accounts, "supplier")
     accounts_employee_first = prioritize_accounts(accounts, "employee")
@@ -378,7 +386,9 @@ def ledger():
         for a in accounts
         if a.children
     }
-    bank_accounts = BankAccount.query.order_by(BankAccount.name).all()
+    bank_accounts = eager_load(
+        BankAccount.query, BankAccount, BANK_TERMS
+    ).order_by(BankAccount.name).all()
 
     # Sorted by category first so the Non-Fuel Sale/Product Purchase
     # pickers group lubricants/filters/shop items into visible blocks, same
