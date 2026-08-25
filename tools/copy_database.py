@@ -210,19 +210,37 @@ def main():
     old.set_session(readonly=True)
     oc, nc = old.cursor(), new.cursor()
 
-    # --- safety: the target must be empty -------------------------------
+    # --- safety: the target must hold no real business data --------------
+    #
+    # "Empty" is not quite the right test. Building the schema runs this
+    # project's migrations, and those legitimately create a default pump
+    # row - so a freshly prepared target is never literally empty, and a
+    # re-run after an interrupted attempt would be refused forever.
+    #
+    # What actually must not be there is TRANSACTIONAL data. Every table
+    # outside the structural set below is a ledger table, and a database
+    # holding even one of those rows is somebody's live records, not a
+    # fresh target. That is the thing worth refusing.
+    STRUCTURAL = {
+        "alembic_version", "playing_with_neon",
+        "pump", "shift", "user", "account", "cash_account", "bank_account",
+        "fuel_type", "tank", "dispenser", "nozzle", "product",
+    }
     nc.execute("""
         SELECT table_name FROM information_schema.tables
         WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     """)
     existing = [r[0] for r in nc.fetchall()]
-    for t in existing:
+    for t in sorted(existing):
+        if t in STRUCTURAL:
+            continue
         nc.execute('SELECT COUNT(*) FROM "%s"' % t)
         n = nc.fetchone()[0]
-        if n and t != "alembic_version":
-            sys.exit("\nThe target already has data (%s has %d rows).\n"
-                     "This script only ever writes into an EMPTY database. "
-                     "Delete and recreate it, then run again." % (t, n))
+        if n:
+            sys.exit("\nThe target holds real ledger data (%s has %d rows).\n"
+                     "That is a database with someone's records in it, not a "
+                     "fresh one.\nRefusing to touch it - check that "
+                     "NEW_DATABASE_URL points at the NEW database." % (t, n))
 
     # --- schema ----------------------------------------------------------
     if not existing:
@@ -232,9 +250,30 @@ def main():
         new = psycopg2.connect(new_url)
         nc = new.cursor()
     else:
-        print("\ntarget already has the schema (and no data) - reusing it")
+        print("\ntarget already has the schema and no ledger data - reusing it")
+
+    # Re-read the table list: on the fresh path it was captured before the
+    # migrations existed, so it would otherwise miss the tables (and the
+    # seeded pump row) they just created.
+    nc.execute("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+    """)
+    existing = [r[0] for r in nc.fetchall()]
 
     # --- data -------------------------------------------------------------
+    # Clear whatever the migrations seeded (the default pump, and anything
+    # hanging off it), so every row in the target comes from the source and
+    # nothing is left over to collide with a copied id. Safe because the
+    # check above has already established this database holds no ledger
+    # data. alembic_version is kept - it records the schema version.
+    wipe = [t for t in existing if t not in ("alembic_version",)]
+    if wipe:
+        nc.execute('TRUNCATE %s RESTART IDENTITY CASCADE'
+                   % ", ".join('"%s"' % t for t in wipe))
+        new.commit()
+        print("cleared %d migration-seeded table(s) in the target" % len(wipe))
+
     order = tables_in_fk_order(oc)
 
     # The target's schema was built from this project's migrations, so any
