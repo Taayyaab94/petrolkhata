@@ -236,6 +236,26 @@ def main():
 
     # --- data -------------------------------------------------------------
     order = tables_in_fk_order(oc)
+
+    # The target's schema was built from this project's migrations, so any
+    # table the target does NOT have is by definition not part of the app -
+    # in practice Neon's own "playing_with_neon" demo table, which every new
+    # Neon project is created with. Skip those, but say so out loud rather
+    # than passing over them quietly.
+    nc.execute("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+    """)
+    target_tables = {r[0] for r in nc.fetchall()}
+    skipped = [t for t in order if t not in target_tables]
+    order = [t for t in order if t in target_tables]
+    if skipped:
+        print("\nnot part of this app - skipping:")
+        for t in skipped:
+            oc.execute('SELECT COUNT(*) FROM "%s"' % t)
+            print("   %-26s %7d rows  (no such table in the new database)"
+                  % (t, oc.fetchone()[0]))
+
     print("\ncopying %d tables..." % len(order))
     total = 0
     todo = []          # self-referencing links to restore after the copy
@@ -308,11 +328,19 @@ def main():
     old.close()
     new.close()
 
-    keys = sorted(set(a) | set(b))
+    # Anything belonging to a skipped table (and its sequence) is not part
+    # of this app and was never meant to come across.
+    def is_skipped(key):
+        name = key.split(" :: ")[0].split(".")[0]
+        return any(name == t or name.startswith(t + "_") for t in skipped)
+
+    keys = sorted(k for k in set(a) | set(b) if not is_skipped(k))
     diffs = [(k, a.get(k, "<missing>"), b.get(k, "<missing>"))
              for k in keys if a.get(k, "<missing>") != b.get(k, "<missing>")]
 
     print("   compared %d values, %d rows copied in total" % (len(keys), total))
+    if skipped:
+        print("   (ignored %s - not part of this app)" % ", ".join(skipped))
     if not diffs:
         print("\nIDENTICAL - the new database matches the old one exactly.")
         return 0
