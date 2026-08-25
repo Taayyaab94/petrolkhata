@@ -210,6 +210,60 @@ else:
     )
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+# Every static URL carries a ?v=<content hash> (see _static_cache_buster
+# below), so a file's URL changes whenever the file itself does. That is
+# what makes caching it for a year safe. Without this Flask sends
+# "Cache-Control: no-cache", which forced the browser to revalidate
+# style.css on EVERY page view - a full round trip to the function region
+# (measured ~280-550ms) to be told "304, nothing changed, no body".
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 31536000  # one year
+
+
+_STATIC_FINGERPRINTS = {}
+
+
+def static_fingerprint(filename):
+    """Short content hash of a file under static/, computed once per
+    process and remembered. Returns None if the file isn't readable, in
+    which case the URL is left unversioned rather than breaking the page."""
+    if filename not in _STATIC_FINGERPRINTS:
+        digest = None
+        try:
+            with open(os.path.join(app.static_folder, filename), "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()[:10]
+        except OSError:
+            digest = None
+        _STATIC_FINGERPRINTS[filename] = digest
+    return _STATIC_FINGERPRINTS[filename]
+
+
+@app.after_request
+def _cache_static_at_the_edge(response):
+    """Vercel's CDN only caches a function's response when it is told to
+    with s-maxage; a plain max-age is a browser-only instruction, which is
+    why every static file was a MISS and woke the function in Virginia.
+    With this the edge nearest the user (Mumbai) serves style.css itself.
+
+    Only ever applied to the `static` endpoint - no page is cached, since
+    every page is per-pump and per-user data."""
+    if request.endpoint == "static":
+        response.headers["Cache-Control"] = (
+            "public, max-age=31536000, s-maxage=31536000, immutable"
+        )
+    return response
+
+
+@app.url_defaults
+def _static_cache_buster(endpoint, values):
+    """Append the content hash to every url_for('static', ...). Templates
+    are left completely untouched - they keep calling url_for the way they
+    always did, and the version appears automatically."""
+    if endpoint == "static" and "filename" in values and "v" not in values:
+        digest = static_fingerprint(values["filename"])
+        if digest:
+            values["v"] = digest
+
+
 # Single shared number-display rule for every template (see
 # formatting.py's own docstring) - registered once here so any page using
 # |fmt automatically gets comma thousands separators and a dropped ".00".

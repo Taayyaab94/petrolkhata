@@ -152,6 +152,13 @@ _SCRUB = [
     (re.compile(r'\bcsrf_token=[A-Za-z0-9._\-]+'), 'csrf_token=SCRUBBED'),
     (re.compile(r'\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?'), 'TIMESTAMP'),
     (re.compile(r'\b\d{2}:\d{2}:\d{2}\b'), 'TIME'),
+    # Static assets carry a ?v=<content hash> so they can be cached for a
+    # year (app.py's _static_cache_buster). The hash changes whenever the
+    # CSS or JS changes, which is a deliberate asset-URL change and never a
+    # change in what the page CALCULATES - scrubbed for the same reason the
+    # CSRF token above is, so editing style.css doesn't light up all 15
+    # pages as false regressions.
+    (re.compile(r'\?v=[0-9a-f]{6,}'), ''),
     (re.compile(r'\s+'), ' '),
 ]
 
