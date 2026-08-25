@@ -231,16 +231,10 @@ def main():
         WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     """)
     existing = [r[0] for r in nc.fetchall()]
-    for t in sorted(existing):
-        if t in STRUCTURAL:
-            continue
-        nc.execute('SELECT COUNT(*) FROM "%s"' % t)
-        n = nc.fetchone()[0]
-        if n:
-            sys.exit("\nThe target holds real ledger data (%s has %d rows).\n"
-                     "That is a database with someone's records in it, not a "
-                     "fresh one.\nRefusing to touch it - check that "
-                     "NEW_DATABASE_URL points at the NEW database." % (t, n))
+    # The decision about whether this target is safe to write to is made
+    # further down, once both sides' row counts are known - that way a
+    # target already holding an EXACT copy (an earlier run that got as far
+    # as the data and then stopped) can be resumed rather than refused.
 
     # --- schema ----------------------------------------------------------
     if not existing:
@@ -261,19 +255,7 @@ def main():
     """)
     existing = [r[0] for r in nc.fetchall()]
 
-    # --- data -------------------------------------------------------------
-    # Clear whatever the migrations seeded (the default pump, and anything
-    # hanging off it), so every row in the target comes from the source and
-    # nothing is left over to collide with a copied id. Safe because the
-    # check above has already established this database holds no ledger
-    # data. alembic_version is kept - it records the schema version.
-    wipe = [t for t in existing if t not in ("alembic_version",)]
-    if wipe:
-        nc.execute('TRUNCATE %s RESTART IDENTITY CASCADE'
-                   % ", ".join('"%s"' % t for t in wipe))
-        new.commit()
-        print("cleared %d migration-seeded table(s) in the target" % len(wipe))
-
+    # --- what is in each side ---------------------------------------------
     order = tables_in_fk_order(oc)
 
     # The target's schema was built from this project's migrations, so any
@@ -295,9 +277,57 @@ def main():
             print("   %-26s %7d rows  (no such table in the new database)"
                   % (t, oc.fetchone()[0]))
 
-    print("\ncopying %d tables..." % len(order))
-    total = 0
+    def counts(cur):
+        out = {}
+        for t in order:
+            cur.execute('SELECT COUNT(*) FROM "%s"' % t)
+            out[t] = cur.fetchone()[0]
+        return out
+
+    src_counts, tgt_counts = counts(oc), counts(nc)
+    ledger_in_target = sum(n for t, n in tgt_counts.items()
+                           if t not in STRUCTURAL)
+
+    # --- is this target safe to write to? ---------------------------------
+    if ledger_in_target == 0:
+        already_copied = False              # fresh (or only migration seeds)
+    elif tgt_counts == src_counts:
+        already_copied = True               # an earlier run already did this
+        print("\nthe target already holds an exact copy (every table's row "
+              "count matches)\n- skipping the copy and carrying on from "
+              "where the last run stopped")
+    else:
+        mismatch = [t for t in order if tgt_counts[t] != src_counts[t]]
+        sys.exit(
+            "\nThe target holds ledger data that does NOT match the source "
+            "(%d row(s) across\n%d table(s), first difference: %s has %d "
+            "there vs %d here).\n\nThat is somebody's records, not a fresh "
+            "or half-copied target. Refusing to\ntouch it - check that "
+            "NEW_DATABASE_URL points at the NEW database."
+            % (ledger_in_target, len(mismatch), mismatch[0],
+               tgt_counts[mismatch[0]], src_counts[mismatch[0]]))
+
+    total = sum(tgt_counts.values())
     todo = []          # self-referencing links to restore after the copy
+
+    # --- data --------------------------------------------------------------
+    if already_copied:
+        order = []                          # nothing left to copy
+    else:
+        # Clear whatever the migrations seeded (the default pump, and
+        # anything hanging off it), so every row in the target comes from
+        # the source and no leftover id can collide. alembic_version is
+        # kept - it records the schema version.
+        wipe = [t for t in existing if t != "alembic_version"]
+        if wipe:
+            nc.execute('TRUNCATE %s RESTART IDENTITY CASCADE'
+                       % ", ".join('"%s"' % t for t in wipe))
+            new.commit()
+            print("\ncleared %d migration-seeded table(s) in the target"
+                  % len(wipe))
+        print("\ncopying %d tables..." % len(order))
+        total = 0
+
     for table in order:
         src_cols = columns(oc, table)
         dst_cols = set(columns(nc, table))
@@ -352,13 +382,24 @@ def main():
         SELECT sequence_name FROM information_schema.sequences
         WHERE sequence_schema = 'public' ORDER BY sequence_name
     """)
-    seqs = [r[0] for r in oc.fetchall()]
+    src_seqs = [r[0] for r in oc.fetchall()]
+    # A skipped table brings a sequence with it (playing_with_neon_id_seq),
+    # and the target has no such sequence to set.
+    nc.execute("""
+        SELECT sequence_name FROM information_schema.sequences
+        WHERE sequence_schema = 'public'
+    """)
+    target_seqs = {r[0] for r in nc.fetchall()}
+    seqs = [s for s in src_seqs if s in target_seqs]
     for seq in seqs:
         oc.execute('SELECT last_value, is_called FROM "%s"' % seq)
         last, called = oc.fetchone()
         nc.execute("SELECT setval(%s, %s, %s)", (seq, last, called))
     new.commit()
-    print("   %d sequences set" % len(seqs))
+    ignored = len(src_seqs) - len(seqs)
+    print("   %d sequences set%s"
+          % (len(seqs), " (%d ignored, not in this app)" % ignored
+             if ignored else ""))
 
     # --- verify ------------------------------------------------------------
     print("\nverifying (row counts, column totals, sequences, "
